@@ -1,0 +1,13 @@
+FieldForm
+Copyright (c) 2026 49form
+
+Third-party material that is incorporated or closely followed:
+
+* Lighting model (fieldform-gpu/src/shade.wgsl, flake.rs, environment.rs): the physically based
+  equations follow Google Filament (https://github.com/google/filament), which is licensed under
+  the Apache License 2.0. Where code or constants are carried over from it, they remain under that
+  licence.
+* Vendored sources, each under its own licence and kept unmodified: Fidget (vendor/fidget, MPL-2.0)
+  and the OpenCASCADE bindings (vendor/opencascade-rs, LGPL-2.1). The STEP importer links
+  OpenCASCADE Technology (LGPL-2.1 with the OCCT exception) and runs as its own process.
+* The application bundles egui's default fonts (MIT/Apache-2.0, OFL-1.1, Ubuntu Font Licence 1.0).

@@ -1,0 +1,3 @@
+# The second: it names the same word a used, which only works if a's document is gone.
+sphere radius=10 centre=0,0,0 'only'
+expect target=only volume=4188.79 tol=0.5%

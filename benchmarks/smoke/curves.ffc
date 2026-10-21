@@ -1,0 +1,66 @@
+# Item 81 A6 smoke test: curves placed from the console, loops that close into profiles, and the
+# four blocks built on curves -- each checked against its closed form with `expect`.
+#
+# Run with:
+#   fieldform.exe --run benchmarks/smoke/curves.ffc --keep-going --report curves.json --exit
+# (keep-going, because the refusals are part of the test.) Exit code 0 when every expect passed.
+
+# --- a 40 x 20 rectangle of four lines closes into a profile, and extrudes 10 high
+line p0=0,0,0 p1=40,0,0 'a'
+line p0=40,0,0 p1=40,20,0 'b'
+line p0=40,20,0 p1=0,20,0 'c'
+line p0=0,20,0 p1=0,0,0 'd'
+extrude profile=a height=10 'slab'
+expect target=slab volume=8000 tol=0.1%
+# 2 * (40*20 + 40*10 + 20*10) = 2800
+expect target=slab area=2800 tol=0.5%
+
+# --- a circle of four exact quarter arcs (weight 1/sqrt2 at the corner), radius 10
+curve2 p=110,0,0;110,10,0;100,10,0 w=1,0.70710678,1 'q1'
+curve2 p=100,10,0;90,10,0;90,0,0 w=1,0.70710678,1 'q2'
+curve2 p=90,0,0;90,-10,0;100,-10,0 w=1,0.70710678,1 'q3'
+curve2 p=100,-10,0;110,-10,0;110,0,0 w=1,0.70710678,1 'q4'
+extrude profile=q1 height=10 'disc'
+# pi * 10^2 * 10 = 3141.59: exact only if the arcs are circles, not parabolas
+expect target=disc volume=3141.59 tol=0.5%
+
+# --- a 10 x 10 square in the XZ plane, 20 to 30 from the Z axis, turned about Z: an annulus
+line p0=20,0,0 p1=30,0,0 'r1'
+line p0=30,0,0 p1=30,0,10 'r2'
+line p0=30,0,10 p1=20,0,10 'r3'
+line p0=20,0,10 p1=20,0,0 'r4'
+revolve profile=r1 axis=z origin=0,0,0 'ring'
+# pi * (30^2 - 20^2) * 10 = 15707.96
+expect target=ring volume=15707.96 tol=0.5%
+
+# --- an open line given a wall: 40 long, 2 thick, 10 high
+line p0=0,100,0 p1=40,100,0 'w1'
+extrude curve=w1 wall=2 height=10 'fence'
+expect target=fence volume=800 tol=0.5%
+
+# --- a pipe along a 50 mm line, radius 3: a capsule, pi*9*50 + 4/3*pi*27 = 1526.81
+line p0=0,-100,0 p1=0,-100,50 'pathp'
+pipe curve=pathp radius=3 'tube'
+expect target=tube volume=1526.81 tol=1%
+
+# --- a 4 x 4 square swept 30 up a straight spine: a 4 x 4 x 30 bar
+line p0=298,-2,0 p1=302,-2,0 's1'
+line p0=302,-2,0 p1=302,2,0 's2'
+line p0=302,2,0 p1=298,2,0 's3'
+line p0=298,2,0 p1=298,-2,0 's4'
+line p0=300,0,0 p1=300,0,30 'up'
+sweep profile=s1 spine=up 'bar'
+expect target=bar volume=480 tol=1%
+sweep profile=s1 spine=s2
+
+# --- refused by name, nothing added
+line p0=0,0,0
+curve3 p=0,0,0;1,0,0;2,0,0
+extrude profile=w1 height=5
+extrude profile=nosuch height=5
+revolve profile=r1 axis=nosuch
+extrude height=5 depth=5
+pipe curve=nosuch
+
+saveas file="benchmarks/smoke/curves.fform"
+snap file="benchmarks/smoke/curves.png" view=iso

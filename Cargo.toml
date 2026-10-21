@@ -1,0 +1,147 @@
+[workspace]
+resolver = "3"
+members = [
+    # Vendored Fidget crates (see vendor/FIDGET_VENDOR.md) — kept unmodified;
+    # all fieldform-specific logic lives in the fieldform-* crates below.
+    "vendor/fidget/fidget",
+    "vendor/fidget/fidget-core",
+    "vendor/fidget/fidget-bytecode",
+    "vendor/fidget/fidget-gui",
+    "vendor/fidget/fidget-jit",
+    "vendor/fidget/fidget-mesh",
+    "vendor/fidget/fidget-raster",
+    "vendor/fidget/fidget-rhai",
+    "vendor/fidget/fidget-shapes",
+    "vendor/fidget/fidget-solver",
+    "vendor/fidget/fidget-wgpu",
+    "vendor/fidget/workspace-hack",
+
+    # Vendored OpenCASCADE bindings (see vendor/OPENCASCADE_VENDOR.md). The binding only —
+    # OCCT itself stays an ordinary build dependency and is not vendored.
+    "vendor/opencascade-rs/opencascade",
+    "vendor/opencascade-rs/opencascade-sys",
+
+    # fieldform crates
+    "fieldform-cage",
+    "fieldform-ops",
+    "fieldform-subd",
+    "fieldform-field",
+    "fieldform-scene",
+    "fieldform-io",
+    "fieldform-gpu",
+    "fieldform-app",
+    "fieldform-import",
+]
+
+[workspace.package]
+edition = "2024"
+# The vendored Fidget crates inherit this table and are MPL-2.0 upstream; every first-party crate
+# sets its own license, repository and authors.
+license = "MPL-2.0"
+authors = ["The Fidget authors"]
+rust-version = "1.92"
+repository = "https://github.com/mkeeter/fidget"
+
+[profile.release]
+debug = true
+overflow-checks = true
+
+[profile.test]
+opt-level = 1
+
+# Iterating in a debug build was not viable: the cage bake ran ~70x slower unoptimized, which
+# meant entering field mode took over a minute, which meant every run had to be a release build
+# — and a release rebuild after a one-line UI change costs ~18 s against debug's ~7 s.
+#
+# So the split is by *what the code does*, not by whose it is. Dependencies and the numeric
+# crates — the bake, the subdivision, the field evaluation — are compiled optimized and then
+# sit in the cache; `fieldform-app`, which is where the edits actually happen, stays at
+# opt-level 0 where it rebuilds fast. Editing the app costs an app-sized rebuild and runs at
+# release speed for everything underneath it.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.fieldform-cage]
+opt-level = 2
+[profile.dev.package.fieldform-subd]
+opt-level = 2
+[profile.dev.package.fieldform-field]
+opt-level = 2
+[profile.dev.package.fieldform-gpu]
+opt-level = 2
+# Curves evaluate here -- `Curve::evaluate`, `tessellate`, `tessellate_to_angle` -- and every
+# profile, wall, sweep and loft walks them per build. Left at 0 this was 2 ms per quadratic in
+# a dev build, measured on the owner's three-section loft by `document_cost.rs` (2026-10-04).
+[profile.dev.package.fieldform-scene]
+opt-level = 2
+
+[workspace.dependencies]
+# --- shared with the vendored crates, which inherit these through `.workspace = true` ---
+approx = "0.5.1"
+arrayvec = "0.7"
+bytemuck = { version = "1", features = ["derive"] }
+criterion = { version = "0.8", features = ["html_reports"] }
+document-features = "0.2"
+dynasmrt = "5.0"
+eframe = { version = "0.34", features = ["wgpu"] }
+enum-map = "2.7.3"
+facet = { version = "0.46", features = ["reflect", "doc"] }
+env_logger = "0.11"
+flume = { version = "0.12", features = ["async"] }
+heck = { version = "0.5" }
+image = { version = "0.25", default-features = false, features = ["png"] }
+libc = "0.2"
+log = "0.4"
+naga = { version = "29.0.0", features = ["wgsl-in"] }
+nalgebra = { version = "0.35", features = ["serde-serialize"] }
+ordered-float = "5"
+rand = "0.10"
+pollster = "0.4.0"
+rayon = "1.10"
+rhai = { version = "1.24", features = ["sync"] }
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+static_assertions = "1"
+strum = { version = "0.28", features = ["derive"] }
+rfd = "0.15"
+thiserror = "2"
+tobj = "4.0"
+# OpenCASCADE, for STEP import. LGPL-2.1 with a header exception — see the import design note
+# for what that obliges and why truck-stepio was not enough.
+# Vendored rather than fetched, and not for the usual reason — see
+# vendor/OPENCASCADE_VENDOR.md. The only version of this binding that compiles on MSVC exists
+# as a commit on a closed pull request whose source fork has been deleted; depending on GitHub
+# continuing to serve that is not a build.
+opencascade = { path = "vendor/opencascade-rs/opencascade" }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+wgpu = "29.0.0"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Memory"] }
+# Puts the emblem into fieldform.exe as its file icon, from `fieldform-app/build.rs`. A build
+# dependency only: nothing it brings in is linked into either binary.
+winresource = "0.1"
+zerocopy = { version = "0.8", features = ["derive"] }
+# Half-precision floats for the environment cubemaps: a 16-bit float texture is filterable on
+# every WebGPU adapter, where a 32-bit one needs an optional feature.
+half = "2"
+
+# --- vendored Fidget local crates ---
+fidget-core     = { path = "vendor/fidget/fidget-core" }
+fidget-bytecode = { path = "vendor/fidget/fidget-bytecode" }
+fidget-gui      = { path = "vendor/fidget/fidget-gui" }
+fidget-jit      = { path = "vendor/fidget/fidget-jit" }
+fidget-mesh     = { path = "vendor/fidget/fidget-mesh" }
+fidget-raster   = { path = "vendor/fidget/fidget-raster" }
+fidget-rhai     = { path = "vendor/fidget/fidget-rhai" }
+fidget-shapes   = { path = "vendor/fidget/fidget-shapes" }
+fidget-solver   = { path = "vendor/fidget/fidget-solver" }
+fidget-wgpu     = { path = "vendor/fidget/fidget-wgpu" }
+workspace-hack  = { path = "vendor/fidget/workspace-hack" }
+
+# --- fieldform crates ---
+fieldform-cage  = { path = "fieldform-cage" }
+fieldform-ops   = { path = "fieldform-ops" }
+fieldform-subd  = { path = "fieldform-subd" }
+fieldform-field = { path = "fieldform-field" }
+fieldform-scene = { path = "fieldform-scene" }
+fieldform-io    = { path = "fieldform-io" }
+fieldform-gpu   = { path = "fieldform-gpu" }

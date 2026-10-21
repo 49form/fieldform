@@ -1,0 +1,97 @@
+[package]
+name = "fidget"
+description = "Infrastructure for complex closed-form implicit surfaces"
+readme = "../README.md"
+version = "0.5.0"
+
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+fidget-core     = { workspace = true }
+
+fidget-bytecode = { workspace = true, optional = true }
+fidget-gui      = { workspace = true, optional = true }
+fidget-mesh     = { workspace = true, optional = true }
+fidget-raster   = { workspace = true, optional = true }
+fidget-rhai     = { workspace = true, optional = true }
+fidget-shapes   = { workspace = true, optional = true }
+fidget-solver   = { workspace = true, optional = true }
+fidget-wgpu     = { workspace = true, optional = true }
+
+document-features.workspace = true
+workspace-hack.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fidget-jit = { workspace = true, optional = true }
+
+[features]
+default = [
+    "bytecode",
+    "gui",
+    "jit",
+    "mesh",
+    "raster",
+    "rhai",
+    "shapes",
+    "solver",
+    "wgpu",
+]
+
+## Enables fast evaluation via a JIT compiler.  This is exposed in the
+## [`fidget::jit`](crate::jit) module, and is supported on macOS, Linux, and
+## Windows (i.e. all supported platforms except WebAssembly).
+jit = ["dep:fidget-jit"]
+
+## Enable [Rhai](https://rhai.rs/) bindings, in the
+## [`fidget::rhai`](crate::rhai) module
+rhai = ["dep:fidget-rhai"]
+
+## Enable meshing in the [`fidget::mesh`](crate::mesh) module
+mesh = ["dep:fidget-mesh"]
+
+## Enables constraint solving in the [`fidget::solver`](crate::solver) module
+solver = ["dep:fidget-solver"]
+
+## Enables a library of standard shapes and transforms in the [`fidget::shapes`](crate::shapes) module
+shapes = ["dep:fidget-shapes"]
+
+## Enables bytecode generation in the [`fidget::bytecode`](crate::bytecode) module
+bytecode = ["dep:fidget-bytecode"]
+
+## Enables image rendering in the [`fidget::raster`](crate::raster) module
+raster = ["dep:fidget-raster"]
+
+## Enables GUI abstractions in the [`fidget::gui`](crate::gui) module
+gui = ["dep:fidget-gui"]
+
+## Enables WGPU rendering in the [`fidget::wgpu`](crate::wgpu) module
+wgpu = ["dep:fidget-wgpu"]
+
+[[bench]]
+name = "pixel"
+harness = false
+
+[[bench]]
+name = "voxel"
+harness = false
+
+[[bench]]
+name = "mesh"
+harness = false
+
+[[bench]]
+name = "function_call"
+harness = false
+
+[lib]
+bench = false
+
+[dev-dependencies]
+criterion.workspace = true
+nalgebra.workspace = true
+pollster.workspace = true
+rayon.workspace = true

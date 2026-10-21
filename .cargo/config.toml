@@ -1,0 +1,47 @@
+# OCCT 7.8.1 declares `cmake_minimum_required` below 3.5, and CMake 4 removed compatibility
+# with that — so `occt-sys` fails to configure on any machine with a current CMake. This is
+# the escape hatch CMake itself names in the error, applied to the whole workspace so a fresh
+# clone builds without anyone having to rediscover it.
+#
+# It affects only how CMake treats *policies* for the vendored OCCT sources. Nothing in
+# fieldform is built by CMake, so this cannot change how our own code compiles.
+#
+# Remove it when OCCT ships a CMakeLists that CMake 4 accepts on its own.
+[env]
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+
+# Where OpenCASCADE's *install* config lives, so `find_package(OpenCASCADE)` stops finding a
+# build tree instead.
+#
+# `occt-sys` builds OCCT into `target/OCCT` and leaves its CMake build directory at
+# `target/OCCT/build`, then registers **that** path in CMake's user package registry — on
+# Windows, `HKCU\Software\Kitware\CMake\Packages\OpenCASCADE`. The build-tree config
+# references per-module target files that only exist after install, so configuring against it
+# fails with "OpenCASCADEFoundationClassesTargets.cmake not found". The complete config is at
+# `target/OCCT/cmake`.
+#
+# It stayed hidden because `opencascade-sys` only re-runs CMake when it is rebuilt into a fresh
+# OUT_DIR, which nothing did between vendoring the crate and the first time a binding changed.
+# So the failure looked like it was caused by editing a binding, and was not.
+#
+# CMake consults `<Package>_DIR` from the environment ahead of the registry, so this settles it
+# without touching the registry or the vendored crate. `relative = true` resolves it against
+# this file's directory, which is the workspace root.
+#
+# `builtin` is not "ever" — it is on now, and has been since the bindings were vendored.
+# `opencascade` declares `default = ["builtin"]`, so `opencascade-sys/build.rs` sets
+# `DEP_OCCT_ROOT` itself and `register_dep("occt")` puts `target/OCCT` on `CMAKE_PREFIX_PATH`,
+# which already resolves ahead of the registry. So this line is belt-and-braces, not the only
+# thing holding the build off the build tree. Measured with `find_package(OpenCASCADE)` under
+# `cmake -P`:
+#
+#   neither set             ->  target/OCCT/build  (registry)  fails
+#   CMAKE_PREFIX_PATH only  ->  target/OCCT/cmake              ok
+#   OpenCASCADE_DIR only    ->  target/OCCT/cmake              ok
+#   both                    ->  target/OCCT/cmake              ok
+#
+# Kept anyway: it names the directory outright instead of trusting the prefix search to reach
+# `<prefix>/cmake`, and a stale value costs nothing — CMake ignores a `<Package>_DIR` that does
+# not exist and falls back to the search. Which is what happens in a git worktree, where
+# `relative = true` resolves against a `target/OCCT` that was never built there.
+OpenCASCADE_DIR = { value = "target/OCCT/cmake", relative = true }

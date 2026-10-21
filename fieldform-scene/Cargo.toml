@@ -1,0 +1,18 @@
+[package]
+name = "fieldform-scene"
+version = "0.1.0"
+edition.workspace = true
+license = "MPL-2.0"
+authors = ["49form"]
+repository = "https://github.com/49form/fieldform"
+publish = false
+
+[dependencies]
+fieldform-cage.workspace = true
+nalgebra.workspace = true
+rand.workspace = true
+serde.workspace = true
+# A real dependency, not a dev one: the unknown-node fallback in `Node` has to hold the
+# file's own representation of something it cannot interpret, and the file is JSON.
+serde_json.workspace = true
+thiserror.workspace = true

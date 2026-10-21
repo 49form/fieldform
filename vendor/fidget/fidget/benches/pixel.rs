@@ -1,0 +1,135 @@
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use fidget::{render::ThreadPool, shape::BoundShape};
+use std::hint::black_box;
+
+const PROSPERO: &str = include_str!("../../models/prospero.vm");
+
+pub fn prospero_exemplary(c: &mut Criterion) {
+    let (ctx, root) = fidget::Context::from_text(PROSPERO.as_bytes()).unwrap();
+    let shape_vm =
+        &BoundShape::try_from(fidget::vm::VmShape::new(&ctx, root).unwrap())
+            .unwrap();
+
+    let mut group = c.benchmark_group("prospero-exemplary");
+    let cfg = &fidget::raster::pixel::RenderConfig::from_size(1024.into());
+    group.bench_function("vm", move |b| {
+        b.iter(|| {
+            let tape = shape_vm.clone();
+            black_box(cfg.run(tape))
+        })
+    });
+
+    #[cfg(feature = "jit")]
+    {
+        let shape_jit = &BoundShape::try_from(
+            fidget::jit::JitShape::new(&ctx, root).unwrap(),
+        )
+        .unwrap();
+        group.bench_function("jit", move |b| {
+            b.iter(|| {
+                let tape = shape_jit.clone();
+                black_box(cfg.run(tape))
+            })
+        });
+    }
+}
+
+pub fn prospero_size_sweep(c: &mut Criterion) {
+    let (ctx, root) = fidget::Context::from_text(PROSPERO.as_bytes()).unwrap();
+    let shape_vm =
+        &BoundShape::try_from(fidget::vm::VmShape::new(&ctx, root).unwrap())
+            .unwrap();
+
+    #[cfg(feature = "jit")]
+    let shape_jit =
+        &BoundShape::try_from(fidget::jit::JitShape::new(&ctx, root).unwrap())
+            .unwrap();
+
+    let mut group =
+        c.benchmark_group("speed vs image size (prospero, 2d) (8 threads)");
+    for size in [256, 512, 768, 1024, 1280, 1546, 1792, 2048] {
+        let cfg = &fidget::raster::pixel::RenderConfig::from_size(size.into());
+        group.bench_function(BenchmarkId::new("vm", size), move |b| {
+            b.iter(|| {
+                let tape = shape_vm.clone();
+                black_box(cfg.run(tape))
+            })
+        });
+
+        #[cfg(feature = "jit")]
+        {
+            let cfg =
+                &fidget::raster::pixel::RenderConfig::from_size(size.into());
+            group.bench_function(BenchmarkId::new("jit", size), move |b| {
+                b.iter(|| {
+                    let tape = shape_jit.clone();
+                    black_box(cfg.run(tape))
+                })
+            });
+        }
+    }
+}
+
+pub fn prospero_thread_sweep(c: &mut Criterion) {
+    let (ctx, root) = fidget::Context::from_text(PROSPERO.as_bytes()).unwrap();
+    let shape_vm =
+        &BoundShape::try_from(fidget::vm::VmShape::new(&ctx, root).unwrap())
+            .unwrap();
+
+    #[cfg(feature = "jit")]
+    let shape_jit =
+        &BoundShape::try_from(fidget::jit::JitShape::new(&ctx, root).unwrap())
+            .unwrap();
+
+    let mut group =
+        c.benchmark_group("speed vs threads (prospero, 2d) (1024 x 1024)");
+    let pools = [1, 2, 4, 8, 16].map(|i| {
+        Some(ThreadPool::Custom(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(i)
+                .build()
+                .unwrap(),
+        ))
+    });
+    for threads in [None, Some(ThreadPool::Global)].into_iter().chain(pools) {
+        let threads = threads.as_ref();
+        let name = match &threads {
+            None => "-".to_string(),
+            Some(ThreadPool::Custom(i)) => i.current_num_threads().to_string(),
+            Some(ThreadPool::Global) => "N".to_string(),
+        };
+        let render_cfg =
+            &fidget::raster::pixel::RenderConfig::from_size(1024.into());
+        let eval_cfg = &fidget::raster::pixel::EvalConfig {
+            threads,
+            ..Default::default()
+        };
+        group.bench_function(BenchmarkId::new("vm", &name), move |b| {
+            b.iter(|| {
+                let tape = shape_vm.clone();
+                black_box(fidget::raster::pixel::render(
+                    tape, render_cfg, eval_cfg,
+                ))
+            })
+        });
+        #[cfg(feature = "jit")]
+        {
+            group.bench_function(BenchmarkId::new("jit", &name), move |b| {
+                b.iter(|| {
+                    let tape = shape_jit.clone();
+                    black_box(fidget::raster::pixel::render(
+                        tape, render_cfg, eval_cfg,
+                    ))
+                })
+            });
+        }
+    }
+}
+
+criterion_group!(
+    benches,
+    prospero_size_sweep,
+    prospero_thread_sweep,
+    prospero_exemplary,
+);
+criterion_main!(benches);

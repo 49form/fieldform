@@ -1,0 +1,100 @@
+# The owner's hand checks of 2026-10-17, as far as the console reaches them. The rest of that
+# list is in ownership.ffc (the empty slot, the shared instance, the 3.14 files) and the three
+# drag gestures are not reachable from a script at all.
+#
+#   fieldform.exe --run benchmarks/smoke/owner-checks.ffc --keep-going --report owner-checks.json --exit
+#
+# Exit code 0 when every expect passed. Every line here is meant to succeed: a `!!` in
+# %TEMP%\fieldform-console.log is a regression, not a deliberate refusal.
+
+# --- Check 8: a block two booleans read is one block, and editing it in one place changes both.
+#
+# `notebook-spec.md` R1 and §7.3: a second reader makes a shared instance rather than a variable,
+# and it is the *same block* in both places. A script cannot see two rows, so the assertion is the
+# one a measurement can make: one `set` on the shared ball, and both readers move.
+#
+# The ball sits centred on the box's +x face, so half of it is outside: a union is the box plus a
+# hemisphere. The far cube is disjoint from the ball, so the second union is a straight sum.
+#   r = 10: 40^3 + 2/3*pi*1000 = 66094.40    and    1000 + 4/3*pi*1000 = 5188.79
+#   r =  5: 40^3 + 2/3*pi*125  = 64261.80    and    1000 + 4/3*pi*125  = 1523.60
+new
+sphere radius=10 centre=20,0,0 'ball'
+cube size=40,40,40 centre=0,0,0 'box'
+boolean -u in=ball,box 'joined'
+cube size=10,10,10 centre=60,0,0 'far'
+boolean -u in=ball,far 'second'
+expect target=joined volume=66094.40 tol=0.5%
+expect target=second volume=5188.79 tol=0.5%
+set ball.radius=5
+expect target=joined volume=64261.80 tol=0.5%
+expect target=second volume=1523.60 tol=0.5%
+saveas file=target/owner-08-shared-edit.fform
+
+# --- Check 9: deleting one of two readers leaves the shared block for the other.
+#
+# ownership.ffc's item 8 deletes a union whose children have one reader each, which is a different
+# case: there the block goes free because nothing else wants it. Here the ball is read by two
+# booleans, `second` is deleted, and the ball must survive -- still nested in `joined`, which must
+# measure unchanged. The far cube goes free with the union that read it, and measures on its own.
+new
+sphere radius=10 centre=20,0,0 'ball'
+cube size=40,40,40 centre=0,0,0 'box'
+boolean -u in=ball,box 'joined'
+cube size=10,10,10 centre=60,0,0 'far'
+boolean -u in=ball,far 'second'
+delete
+expect target=joined volume=66094.40 tol=0.5%
+expect target=ball volume=4188.79 tol=0.5%
+expect target=far volume=1000 tol=0.5%
+saveas file=target/owner-09-one-reader-deleted.fform
+
+# --- Check 12: a fillet against a joined mirror that reaches its own plane says so.
+#
+# Backlog item 113 option 1. A joined mirror is `min(f(p), f(mirror(p)))`, and a union of operands
+# that touch keeps the face they share buried inside the solid: the sign is right, the magnitude
+# reads nought where the solid is deep, and a blend reads magnitudes. So such a mirror is no longer
+# called an exact distance, and the fillet against it is marked `≈ approximate` beside its radius.
+#
+# **A cuboid, not an extrude.** Item 113's cases 1 and 2 rewrite a mirror across an extrude's own
+# profile into one body with no buried face, so that case stays exact and says nothing about the
+# announcement. A mirrored cuboid is the case no rewrite reaches, which is what the mark is for --
+# the same reason `a_joined_mirror_whose_body_reaches_its_plane_is_not_called_an_exact_distance`
+# builds one.
+#
+# Three arms, and two of them must come back clean: that is the control. A face on the plane is
+# approximate; a 5 mm gap to the plane is exact, because nothing is buried; and an unjoined mirror
+# is exact however near the plane it lands, since moving a body is a rigid motion and unions
+# nothing.
+
+# A face on the plane: the cube spans x 0..20, mirrored about x = 0.
+new
+cube size=20,20,20 centre=10,0,0 'brick'
+mirror target=brick axis=x origin=0,0,0 join=true 'folded'
+sphere radius=15 centre=0,0,20 'cap'
+boolean -u in=folded,cap r=10.5 g=1 'filleted'
+expect target=filleted approx=true
+saveas file=target/owner-12-on-the-plane.fform
+
+# A 5 mm gap: the cube spans x 5..25, so the two halves never meet.
+new
+cube size=20,20,20 centre=15,0,0 'brick'
+mirror target=brick axis=x origin=0,0,0 join=true 'folded'
+sphere radius=15 centre=0,0,20 'cap'
+boolean -u in=folded,cap r=10.5 g=1 'filleted'
+expect target=filleted approx=false
+saveas file=target/owner-12-with-a-gap.fform
+
+# A face on the plane, not joined: the reflection alone, which is a rigid motion.
+new
+cube size=20,20,20 centre=10,0,0 'brick'
+mirror target=brick axis=x origin=0,0,0 join=false 'folded'
+sphere radius=15 centre=0,0,20 'cap'
+boolean -u in=folded,cap r=10.5 g=1 'filleted'
+expect target=filleted approx=false
+saveas file=target/owner-12-not-joined.fform
+
+# --- Check 13, the console's half only: the Normals view is a fourth environment the same verb
+# picks, and switching back restores the lit one. What the picture looks like is not something a
+# script can see -- no expect here, and the log is the whole record: two accepted lines, no `!!`.
+environment name=normals
+environment name=studio

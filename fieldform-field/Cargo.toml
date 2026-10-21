@@ -1,0 +1,28 @@
+[package]
+name = "fieldform-field"
+version = "0.1.0"
+edition.workspace = true
+license = "MPL-2.0"
+authors = ["49form"]
+repository = "https://github.com/49form/fieldform"
+publish = false
+
+[dependencies]
+fieldform-cage.workspace = true
+fieldform-subd.workspace = true
+fieldform-scene.workspace = true
+nalgebra.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# Three examples measure our own pruning and marching against Fidget's tape, which is
+# what it is still here for. Nothing the product ships touches it: see `lib.rs`.
+fidget-core.workspace = true
+fieldform-io.workspace = true
+serde_json.workspace = true
+approx.workspace = true
+image.workspace = true
+fidget-wgpu.workspace = true
+fidget-raster.workspace = true
+pollster.workspace = true

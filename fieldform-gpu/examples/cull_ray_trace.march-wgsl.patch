@@ -1,0 +1,103 @@
+diff --git a/fieldform-gpu/src/march.wgsl b/fieldform-gpu/src/march.wgsl
+index 50a61a5..a0274dd 100644
+--- a/fieldform-gpu/src/march.wgsl
++++ b/fieldform-gpu/src/march.wgsl
+@@ -374,6 +374,23 @@ fn skip_distance(p: vec3<f32>, dir: vec3<f32>, epsilon: f32) -> f32 {
+     return max(clear, wall + min(cell * 1e-3, clear * 0.5));
+ }
+ 
++// What the grid knows about the cell holding `p`: a distance no point of that cell is nearer the
++// surface than, or nought where the grid cannot say. A lower bound on the reading `field` would
++// give at `p`, which is what lets it stand in for one -- see the top of `trace_primary`'s loop.
++fn cell_clearance(p: vec3<f32>) -> f32 {
++    if skip_grid[5] == 0u {
++        return 0.0;
++    }
++    let n = skip_f(3u);
++    let g = (p - vec3<f32>(skip_f(0u), skip_f(1u), skip_f(2u))) / skip_f(4u);
++    if any(g < vec3<f32>(0.0)) || any(g >= vec3<f32>(n)) {
++        return 0.0;
++    }
++    let at = vec3<u32>(g);
++    let side = u32(n);
++    return max(skip_f(SKIP_HEADER + (at.z * side + at.y) * side + at.x), 0.0);
++}
++
+ // The ray at `t`, carried across every cell the grid knows to be empty, up to the far plane.
+ //
+ // **All the hops of one step together, and then the step's one reading.** Written the obvious
+@@ -675,7 +692,7 @@ fn trace_primary(gid: vec3<u32>) -> Primary {
+     //
+     // The cost is V8's over-relaxation on the frames that cull, which is the trade
+     // `masked_matches_unmasked` measures. Single-body parts never cull, so they are untouched.
+-    let relax = select(skip_f(7u), 1.0, tile_live);
++    let relax = skip_f(7u);
+     var reach = 0.0;
+     var before = 0.0;
+     var rest = 0u;
+@@ -688,16 +705,38 @@ fn trace_primary(gid: vec3<u32>) -> Primary {
+         if t > far {
+             break;
+         }
+-        // The grid first: across the cells it knows to be empty there is nothing to read.
+-        let hopped = skip_ahead(origin, dir, t, far, epsilon);
+-        if hopped > t {
+-            // A hop is vouched for by the grid, and the ball left behind says nothing here.
+-            reach = 0.0;
+-            came_by = 0.0;
++        // **The grid may not carry the ray on from a relaxed step that has not been vouched
++        // for.** The reading taken where a long step lands is the proof that nothing was stepped
++        // over; but the grid used to be asked first, and where the landing cell was clear the ray
++        // hopped on and `reach` was cleared with it -- so the proof was never asked for. A step
++        // that passed clean through a 2 mm wall and out the other side into empty space was
++        // simply kept, and the pixel came back a miss. `cull_ray_trace.rs` traces it step for
++        // step on the owner's five shells: with the per-tile cull, whose fold reads larger in the
++        // gaps and so steps far enough to clear a whole sphere, and without it, from a camera
++        // standing inside a shell -- the hole is the march's own and the cull only widened it.
++        //
++        // The cell's clearance is a lower bound on the reading the vouch would take, so where it
++        // and the old ball together cover the step the hop is as free as it was. Where they do
++        // not, the reading is taken first and the hop waits on it.
++        var may_hop = true;
++        if reach > 0.0 {
++            if (cell_clearance(origin + dir * t) + before) * STEP_SAFETY >= reach {
++                reach = 0.0;
++            } else {
++                may_hop = false;
++            }
+         }
+-        t = hopped;
+-        if t > far {
+-            break;
++        if may_hop {
++            let hopped = skip_ahead(origin, dir, t, far, epsilon);
++            if hopped > t {
++                // A hop is vouched for by the grid, and the ball left behind says nothing here.
++                reach = 0.0;
++                came_by = 0.0;
++            }
++            t = hopped;
++            if t > far {
++                break;
++            }
+         }
+         let d = scene(origin + dir * t);
+         if reach > 0.0 && (d < epsilon || (abs(d) + before) * STEP_SAFETY < reach) {
+@@ -711,6 +750,17 @@ fn trace_primary(gid: vec3<u32>) -> Primary {
+             came_by = plain;
+             continue;
+         }
++        if reach > 0.0 {
++            // Vouched by the reading the grid could not spare. The hop held back above is taken
++            // now; the reading was spent on the proof, and the next pass reads afresh.
++            reach = 0.0;
++            let hopped = skip_ahead(origin, dir, t, far, epsilon);
++            if hopped > t {
++                t = hopped;
++                came_by = 0.0;
++                continue;
++            }
++        }
+         if d < 0.0 && refused_at >= 0.0 {
+             // **The ray has gone through what it refused.** A candidate is refused when the
+             // value comes back up behind it, and the ray steps past; a negative reading

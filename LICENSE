@@ -1,0 +1,14 @@
+FieldForm is licensed per layer. Each crate's `Cargo.toml` and every source file's SPDX header
+name the licence that applies to it.
+
+| Layer | Crates | Licence | Text |
+| --- | --- | --- | --- |
+| Kernel | fieldform-cage, fieldform-subd, fieldform-field, fieldform-scene, fieldform-ops, fieldform-io, fieldform-gpu | MPL-2.0 | LICENSE-MPL-2.0 |
+| Application | fieldform-app, fieldform-import | GPL-3.0-only | LICENSE-GPL-3.0 |
+| Vendored: Fidget | vendor/fidget | MPL-2.0 (upstream, unmodified) | vendor/fidget/LICENSE.txt |
+| Vendored: OpenCASCADE bindings | vendor/opencascade-rs | LGPL-2.1 (upstream, unmodified) | vendor/opencascade-rs/LICENSE |
+
+Third-party attributions that travel with the code are in NOTICE.
+
+Models and files created with FieldForm belong to the user. They are not covered by any of the
+licences above.

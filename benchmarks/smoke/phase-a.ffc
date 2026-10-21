@@ -1,0 +1,94 @@
+# Item 81 Phase A smoke test: every create verb reads its numbers, unknown keys are refused,
+# operands by name, fillets, placements, a parameter-driven radius, and the name-reuse bug --
+# and `expect` checks what was made, so the run says pass or fail without anyone reading it.
+#
+# Run with:
+#   fieldform.exe --run benchmarks/smoke/phase-a.ffc --keep-going --report phase-a.json --exit
+# (keep-going, because the refusals below are part of the test.) The exit code is 0 when every
+# expect passed and 1 otherwise. The console log at %TEMP%\fieldform-console.log is the record, with
+# refusals prefixed !!, and the report lists every expect with its verdict.
+
+# --- the owner's original line is refused by name, nothing is added
+sphere r=10 at=40,0,0
+
+# --- primitives read their own field names
+sphere radius=10 centre=40,0,0 'ball'
+cube size=10,20,30 centre=0,0,0 turn=0,0,30 'box'
+cube radius=5
+help cube
+cylinder radius=5 from=0,0,-40 to=0,0,-20 'rod'
+
+# --- what they made, measured (pi*25*20 = 1570.80; 4/3*pi*1000 = 4188.79)
+expect target=rod volume=1570.80 tol=0.5%
+expect target=rod bbox=-5,-5,-40,5,5,-20 tol=0.05
+expect target=ball volume=4188.79 tol=0.5%
+# t0-01: a box's size is its full extent, and with its faces on the grid it measures exactly
+cube size=10,20,30 centre=200,0,0 'probe'
+expect target=probe bbox=195,-10,-15,205,10,15 tol=0.02
+expect target=probe volume=6000 tol=0.1%
+expect target=probe area=2200 tol=0.1%
+
+# --- the deleted name is free again (the bug found in the window)
+sphere radius=4 centre=0,60,0 'temp'
+delete
+sphere radius=4 centre=0,60,0 'temp'
+
+# --- operands by name, a fillet, and a three-way fillet refused
+boolean -u in=ball,box r=2 'part'
+expect target=part approx=false
+boolean -u in=ball,box,rod r=2
+
+# --- placements: two moves fold into one block, a turn after a move wraps
+move target=part by=0,0,20
+move target=part by=0,0,20
+turn target=part by=0,0,45
+
+# --- a value is a number, a parameter, or (where allowed) a block
+param name=h value=12
+sphere radius=h centre=0,0,-40 'top'
+expect target=top volume=7238.23 tol=0.5%
+# the radius is the parameter, not a copy of it: change h and the sphere follows
+param name=h value=20
+expect target=top volume=33510.32 tol=0.5%
+expect ratio=top,ball volume=8.0 tol=0.05
+sphere radius=ball centre=0,0,0
+offset target=top distance=3
+# A thickness is a bound and takes no tolerance. Measured over the whole surface, which is why
+# the body asked is a ball: at an edge the largest ball containing the point is tiny, so a
+# cube would report near nought and say nothing about its walls. The walk is bounded by the
+# number asked for, so a 46 mm ball reports 10 against a bound of 5 and passes.
+expect target=top thickness_min=5
+
+# --- the lattice reads its cell, map, phase and frame; wrong ones are refused by name
+tpms cell=schwarz_p cell_size=10 phase=solid density=0.3 'g'
+tpms phase=strut
+tpms cell=gyroids
+tpms map=cylindrical cell_size=5
+
+# --- modifiers read all their numbers
+sphere radius=5 centre=-40,0,0 'pin'
+pattern target=pin kind=linear count=4 step=0,30,0 r=1
+mirror target=pin axis=x -join
+twist target=rod rate=2 axis=z origin=0,0,0
+
+# --- item 113: a joined mirror whose body reaches its plane announces its fillet
+# Option 1, end to end. A joined mirror unions a body with its own reflection, and where the body
+# meets the plane that union keeps their shared face buried in the solid -- nought where the solid
+# is deep. A blend reads magnitudes, so the fillet is not the radius typed and the panel owes the
+# `~ approximate` mark the project notes requires wherever a radius is entered. A cube, because a mirrored
+# *extrude* is built as one body instead (cases 1 and 2) and so has no buried face to announce.
+cube size=20,20,20 centre=10,0,0 'half'
+mirror target=half axis=x origin=0,0,0 -join 'folded'
+sphere radius=5 centre=0,60,0 'knob'
+boolean -u in=folded,knob r=2 'announced'
+expect target=announced approx=true
+# And with a 5 mm gap to the plane nothing is buried, so the same fillet is exact. Without this row
+# the answer "every mirror is approximate" would pass just as well, and it would be wrong.
+cube size=20,20,20 centre=115,0,0 'far'
+mirror target=far axis=x origin=100,0,0 -join 'farfolded'
+sphere radius=5 centre=100,60,0 'farknob'
+boolean -u in=farfolded,farknob r=2 'exact'
+expect target=exact approx=false
+
+# --- the document, for inspection
+saveas file="benchmarks/smoke/phase-a.fform"

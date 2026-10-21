@@ -1,0 +1,94 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  checks:
+    name: build and test (eight crates, no OpenCASCADE)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Named explicitly rather than `--workspace`: cargo unifies features across one invocation, so
+    # asking for `fieldform-import` here would turn the `step` feature on and build OpenCASCADE.
+    env:
+      CRATES: >-
+        -p fieldform-cage -p fieldform-subd -p fieldform-field -p fieldform-scene
+        -p fieldform-ops -p fieldform-io -p fieldform-gpu -p fieldform-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: checks
+      - name: cargo check, warnings denied
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo check --all-targets $CRATES
+      - name: cargo test
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo test --lib --bins --tests $CRATES
+      - name: SPDX headers present
+        run: python3 tools/release/add_spdx_headers.py --check
+      - name: the two binaries stay split
+        run: |
+          set -euo pipefail
+          cargo tree -p fieldform-app -e features > /tmp/app.tree
+          if grep -q 'fieldform-io feature "step"' /tmp/app.tree; then
+            echo '::error::fieldform-app alone pulls in the step feature, so it links OpenCASCADE'
+            exit 1
+          fi
+      - name: no kernel crate depends on an application crate
+        run: |
+          set -euo pipefail
+          for c in cage subd field scene ops io gpu; do
+            if cargo tree -p "fieldform-$c" -e normal,build --prefix none | grep -E '^fieldform-(app|import) '; then
+              echo "::error::fieldform-$c depends on an application crate"
+              exit 1
+            fi
+          done
+
+  clippy:
+    name: clippy, correctness lints denied
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CRATES: >-
+        -p fieldform-cage -p fieldform-subd -p fieldform-field -p fieldform-scene
+        -p fieldform-ops -p fieldform-io -p fieldform-gpu -p fieldform-app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: clippy
+      - run: cargo clippy --all-targets $CRATES
+
+  deny:
+    name: cargo deny check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  step:
+    name: the STEP importer (builds OpenCASCADE; by hand only)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: target/OCCT
+          key: occt-${{ runner.os }}-${{ hashFiles('vendor/opencascade-rs/**/Cargo.toml', 'Cargo.lock') }}
+      - run: cargo test -p fieldform-import

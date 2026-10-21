@@ -1,0 +1,59 @@
+[package]
+name = "fieldform-io"
+version = "0.1.0"
+edition.workspace = true
+license = "MPL-2.0"
+authors = ["49form"]
+repository = "https://github.com/49form/fieldform"
+publish = false
+
+[dependencies]
+fieldform-cage.workspace = true
+fieldform-scene.workspace = true
+nalgebra.workspace = true
+thiserror.workspace = true
+tobj.workspace = true
+zip.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+opencascade = { workspace = true, optional = true }
+
+[dev-dependencies]
+fieldform-field.workspace = true
+pollster.workspace = true
+# For examples reproducing the viewport's own compile path against a real file.
+fieldform-gpu.workspace = true
+# `idle_clocks` waits on the device itself, which is a wgpu call.
+wgpu.workspace = true
+
+[features]
+default = []
+# The STEP reader. Off by default: it links OpenCASCADE, which is 29.4 MB of any executable
+# that reaches it, and only `fieldform-import` needs it.
+step = ["dep:opencascade"]
+# For `pattern_prune_equality`, which evaluates generated fields on the GPU through the
+# measuring build's grid evaluator. Nothing in the library reads it.
+march-stats = ["fieldform-gpu/march-stats"]
+
+# `step_diagnose` calls `import_step_with`, which is behind the `step` feature. Without this it
+# does not compile, and a workspace-wide run hides that: `fieldform-import` asks for `step`, cargo
+# unifies features across one invocation, and the example builds against somebody else's flag.
+# `cargo check -p fieldform-io --all-targets` is what reports it.
+[[example]]
+name = "step_diagnose"
+required-features = ["step"]
+
+# `angular_sweep` uses `opencascade` directly, which is an optional dependency behind the same
+# feature. Ungated it reported two errors rather than one: the missing crate, and a `{float}` that
+# is only pinned to `f64` by the `Mesher` call that crate supplies.
+[[example]]
+name = "angular_sweep"
+required-features = ["step"]
+
+[[example]]
+name = "pattern_prune_equality"
+required-features = ["march-stats"]
+
+[[example]]
+name = "framed_capture"
+required-features = ["march-stats"]

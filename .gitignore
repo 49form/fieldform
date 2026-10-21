@@ -1,0 +1,27 @@
+/target
+.vs/
+*.pdb
+
+# Diagnostic renders written to the repo root by the field examples, and whatever else gets
+# dropped there while working. Anything that belongs to the project lives in a crate's
+# `assets/`, which this does not cover.
+/*.png
+/*.xcf
+
+# A smoke script's own output: the document it saves to be read back, never kept.
+benchmarks/smoke/*.fform
+
+# A smoke run writes a picture beside its document; neither is kept.
+benchmarks/smoke/*.png
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local assistant and worktree state
+/.claude/

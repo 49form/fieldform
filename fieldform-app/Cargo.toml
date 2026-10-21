@@ -1,0 +1,55 @@
+[package]
+name = "fieldform-app"
+version = "0.1.0"
+edition.workspace = true
+license = "GPL-3.0-only"
+authors = ["49form"]
+repository = "https://github.com/49form/fieldform"
+publish = false
+
+[dependencies]
+eframe.workspace = true
+log.workspace = true
+env_logger.workspace = true
+bytemuck.workspace = true
+# The settled bake runs in a pool of its own, so it cannot take every core from the interface.
+rayon.workspace = true
+nalgebra.workspace = true
+rfd.workspace = true
+# Decodes the splash screen, which is a PNG embedded in the binary.
+image.workspace = true
+
+fieldform-cage.workspace = true
+fieldform-ops.workspace = true
+fieldform-scene.workspace = true
+fieldform-io.workspace = true
+fieldform-field.workspace = true
+fieldform-gpu.workspace = true
+wgpu.workspace = true
+# The `--report` a script run writes. Already linked through `fieldform-io`, so it costs the
+# binary nothing it was not already carrying.
+serde_json.workspace = true
+
+[dev-dependencies]
+# To validate the preview's WGSL in a test: wgpu's answer to a shader it cannot compile is to
+# panic the application, so a mistake there has to be caught before anything creates a pipeline.
+naga.workspace = true
+# To ask the adapter for a device in a test, which is how what the traced view holds of a lost
+# device is held to a property. Asking for one is async and nothing here has a runtime.
+pollster.workspace = true
+# Only `import_check` needs it now, to generate large cages to import. The app itself stopped
+# depending on the subdivision crate when the limit-surface mesh went.
+fieldform-subd.workspace = true
+
+# Compiles `assets/fieldform.ico` into the executable as its icon -- see `build.rs`. Here and not
+# in `fieldform-import`, which is a worker process nobody opens in Explorer.
+[build-dependencies]
+winresource.workspace = true
+
+[features]
+# `marchstats` in the console and View > Capture march stats. See fieldform-gpu's feature.
+march-stats = ["fieldform-gpu/march-stats"]
+
+[[bin]]
+name = "fieldform"
+path = "src/main.rs"

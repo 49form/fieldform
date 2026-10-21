@@ -1,0 +1,1039 @@
+use std::num::NonZeroUsize;
+use std::path::PathBuf;
+use std::time::Instant;
+use std::{
+    io::Read,
+    sync::{Arc, Mutex},
+};
+
+use anyhow::{Context as _, Result, bail};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use env_logger::Env;
+use log::info;
+
+use fidget::{
+    context::{Context, Node},
+    rhai::FromDynamic,
+};
+
+/// Simple test program
+#[derive(Parser)]
+#[clap(author, version, about, long_about = None)]
+struct Args {
+    #[clap(subcommand)]
+    cmd: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Rasterizes to a 2D image
+    Render2d {
+        #[clap(flatten)]
+        settings: ImageSettings,
+
+        /// Render mode
+        #[clap(long, value_enum, default_value_t)]
+        mode: RenderMode2D,
+
+        /// Center point of the render
+        #[clap(
+            long, default_value = "0,0", allow_hyphen_values = true,
+            value_parser = parse_vec2
+        )]
+        center: [f32; 2],
+
+        /// Render on the GPU
+        #[clap(long)]
+        wgpu: bool,
+    },
+
+    /// Rasterizes to a 3D image
+    Render3d {
+        #[clap(flatten)]
+        settings: ImageSettings,
+
+        /// Render mode
+        #[clap(long, value_enum, default_value_t = RenderMode3DArg::Heightmap)]
+        mode: RenderMode3DArg,
+
+        /// Render on the GPU
+        #[clap(long)]
+        wgpu: bool,
+
+        /// Rotation about the Y axis (in degrees)
+        #[clap(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        pitch: f32,
+
+        /// Rotation about the X axis (in degrees)
+        #[clap(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        yaw: f32,
+
+        /// Rotation about the Z axis (in degrees)
+        #[clap(long, default_value_t = 0.0, allow_hyphen_values = true)]
+        roll: f32,
+
+        /// Image depth (in voxels)
+        #[clap(long, requires_all = ["width", "height"])]
+        depth: Option<u32>,
+
+        /// Center point of the render
+        #[clap(
+            long, default_value = "0,0,0", allow_hyphen_values = true,
+            value_parser = parse_vec3
+        )]
+        center: [f32; 3],
+
+        /// Flatten values on the Z axis to prevent screen clipping
+        #[clap(long, default_value_t = 1.0)]
+        zflatten: f32,
+
+        /// Render using an isometric perspective
+        #[clap(long, conflicts_with = "perspective")]
+        isometric: bool,
+
+        /// Apply SSAO to a shaded image
+        ///
+        /// Only compatible with `--mode=shaded`
+        #[clap(long)]
+        ssao: bool,
+
+        /// Skip denoising of normals
+        ///
+        /// Incompatible with `--mode=heightmap`
+        #[clap(long)]
+        no_denoise: bool,
+
+        /// Strength of perspective transform
+        #[clap(long)]
+        perspective: Option<f32>,
+    },
+    /// Builds a mesh
+    Mesh {
+        #[clap(flatten)]
+        settings: MeshSettings,
+    },
+}
+
+#[derive(ValueEnum, Default, Clone)]
+enum EvalMode {
+    #[default]
+    Vm,
+
+    #[cfg(feature = "jit")]
+    Jit,
+}
+
+#[derive(strum::EnumDiscriminants, Clone)]
+#[strum_discriminants(name(RenderMode3DArg), derive(ValueEnum))]
+enum RenderMode3D {
+    /// Pixels are colored based on height
+    Heightmap,
+    /// Pixels are colored based on normals
+    Normals { denoise: bool },
+    /// Pixels are shaded
+    Shaded { denoise: bool, ssao: bool },
+    /// Raw (unblurred) SSAO occlusion, for debugging
+    RawOcclusion { denoise: bool },
+    /// Blurred SSAO occlusion, for debugging
+    BlurredOcclusion { denoise: bool },
+}
+
+#[derive(ValueEnum, Default, Clone)]
+enum RenderMode2D {
+    /// Pixels are colored based on interval results
+    #[default]
+    Debug,
+    /// Monochrome rendering (white-on-black)
+    Mono,
+    /// Signed distance field visualization
+    Sdf,
+    /// Brute-force (pixel-by-pixel) evaluation
+    Brute,
+}
+
+#[derive(Parser)]
+struct ImageSettings {
+    #[clap(flatten)]
+    script: ScriptSettings,
+
+    /// Name of a `.png` file to write
+    #[clap(short, long)]
+    out: Option<PathBuf>,
+
+    /// Evaluator flavor
+    #[clap(short, long, value_enum, default_value_t)]
+    eval: EvalMode,
+
+    /// Number of threads to use
+    #[clap(short, long)]
+    threads: Option<NonZeroUsize>,
+
+    /// Number of times to render (for benchmarking)
+    #[clap(short = 'N', default_value_t = 1)]
+    n: usize,
+
+    /// Image size (in pixels)
+    #[clap(short, long, conflicts_with_all = ["width", "height", "depth"])]
+    size: Option<u32>,
+
+    /// Image width (in pixels)
+    #[clap(long, requires = "height")]
+    width: Option<u32>,
+
+    /// Image height (in pixels)
+    #[clap(long, requires = "width")]
+    height: Option<u32>,
+
+    /// Scale applied to the model before rendering
+    #[clap(long, default_value_t = 1.0)]
+    scale: f32,
+}
+
+impl ImageSettings {
+    const DEFAULT_SIZE: u32 = 128;
+
+    fn voxel_size(&self, depth: Option<u32>) -> fidget::render::VoxelSize {
+        match (self.size, self.width, self.height, depth) {
+            (Some(s), None, None, None) => s.into(),
+            (None, Some(w), Some(h), d) => {
+                let d = d.unwrap_or(w.max(h));
+                fidget::render::VoxelSize::new(w, h, d)
+            }
+            (None, None, None, None) => Self::DEFAULT_SIZE.into(),
+            _ => panic!(
+                "invalid size combination (this should be enforced by clap)"
+            ),
+        }
+    }
+
+    fn image_size(&self) -> fidget::render::ImageSize {
+        match (self.size, self.width, self.height) {
+            (Some(s), None, None) => s.into(),
+            (None, Some(w), Some(h)) => fidget::render::ImageSize::new(w, h),
+            (None, None, None) => Self::DEFAULT_SIZE.into(),
+            _ => panic!(
+                "invalid size combination (this should be enforced by clap)"
+            ),
+        }
+    }
+}
+
+#[derive(Parser)]
+struct MeshSettings {
+    #[clap(flatten)]
+    script: ScriptSettings,
+
+    /// Octree depth
+    #[clap(short, long)]
+    depth: u8,
+
+    /// Name of a `.stl` file to write
+    #[clap(short, long)]
+    out: Option<PathBuf>,
+
+    /// Evaluator flavor
+    #[clap(short, long, value_enum, default_value_t)]
+    eval: EvalMode,
+
+    /// Number of threads to use
+    #[clap(short, long)]
+    threads: Option<NonZeroUsize>,
+
+    /// Number of times to render (for benchmarking)
+    #[clap(short = 'N', default_value_t = 1)]
+    n: usize,
+
+    /// Scale applied to the model before rendering
+    #[clap(long, default_value_t = 1.0)]
+    scale: f32,
+
+    /// Center point of the render
+    #[clap(
+        long, default_value = "0,0,0", allow_hyphen_values = true,
+        value_parser = parse_vec3
+    )]
+    center: [f32; 3],
+}
+
+#[derive(Parser)]
+struct ScriptSettings {
+    /// Input file
+    #[clap(short, long)]
+    input: PathBuf,
+
+    /// Input file type
+    #[clap(long, default_value_t, value_enum)]
+    r#type: ScriptType,
+}
+
+#[derive(clap::ValueEnum, Copy, Clone, Default, Debug)]
+enum ScriptType {
+    /// Select based on file extension
+    #[default]
+    Auto,
+    /// Rhai script
+    Rhai,
+    /// Raw VM instructions
+    Vm,
+}
+
+fn parse_vec3(s: &str) -> Result<[f32; 3]> {
+    let parts: Vec<f32> = s
+        .split(',')
+        .map(str::trim)
+        .map(|num| num.parse::<f32>())
+        .collect::<Result<Vec<f32>, _>>()
+        .with_context(|| format!("failed to parse vec3 from '{s}'"))?;
+
+    if parts.len() == 3 {
+        Ok([parts[0], parts[1], parts[2]])
+    } else {
+        bail!(
+            "expected 3 comma-separated floating point numbers, got {}",
+            parts.len()
+        )
+    }
+}
+
+fn parse_vec2(s: &str) -> Result<[f32; 2]> {
+    let parts: Vec<f32> = s
+        .split(',')
+        .map(str::trim)
+        .map(|num| num.parse::<f32>())
+        .collect::<Result<Vec<f32>, _>>()
+        .with_context(|| format!("failed to parse vec2 from '{s}'"))?;
+
+    if parts.len() == 2 {
+        Ok([parts[0], parts[1]])
+    } else {
+        bail!(
+            "expected 2 comma-separated floating point numbers, got {}",
+            parts.len()
+        )
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+fn run3d<F: fidget::eval::Function + fidget::render::RenderHints>(
+    shape: fidget::shape::Shape<F>,
+    world_to_model: nalgebra::Matrix4<f32>,
+    settings: &ImageSettings,
+    depth: Option<u32>,
+    threads: Option<&fidget::render::ThreadPool>,
+) -> fidget::raster::voxel::Image {
+    let render_cfg = fidget::raster::voxel::RenderConfig {
+        world_to_model,
+        image_size: settings.voxel_size(depth),
+    };
+    let eval_cfg = fidget::raster::voxel::EvalConfig {
+        threads,
+        ..Default::default()
+    };
+
+    let mut image = Default::default();
+    let bound_shape =
+        fidget::shape::BoundShape::try_from(shape).expect("no vars allowed");
+
+    let start = std::time::Instant::now();
+    for _ in 0..settings.n {
+        // Unwrap both cancellation and errors
+        image = fidget::raster::voxel::render(
+            bound_shape.clone(),
+            &render_cfg,
+            &eval_cfg,
+        )
+        .expect("rendering should not be cancelled");
+    }
+    info!(
+        "Rendered {}× at {:?} ms/frame",
+        settings.n,
+        start.elapsed().as_micros() as f64 / 1000.0 / (settings.n as f64)
+    );
+    image
+}
+
+fn occlusion_to_rgba(data: &[f32]) -> Vec<u8> {
+    data.iter()
+        .flat_map(|p| {
+            // CPU uses NaN, GPU uses -1.0
+            if p.is_nan() || *p < 0.0 {
+                [0; 4]
+            } else {
+                let v = (p * 255.0).min(255.0) as u8;
+                [v, v, v, 255]
+            }
+        })
+        .collect()
+}
+
+fn run3d_wgpu(
+    shape: fidget::vm::VmShape,
+    world_to_model: nalgebra::Matrix4<f32>,
+    settings: &ImageSettings,
+    depth: Option<u32>,
+    mode: RenderMode3D,
+) -> Result<Vec<u8>> {
+    // Build a fidget gpu context
+    let gpu = pollster::block_on(fidget::wgpu::Gpu::init())?;
+
+    let ctx = fidget::wgpu::voxel::Context::new(&gpu);
+    let image_size = settings.voxel_size(depth);
+    let cfg = fidget::wgpu::voxel::RenderConfig {
+        world_to_model,
+        image_size,
+    };
+    let mut image = Default::default();
+    let start = std::time::Instant::now();
+    let mut buffers = ctx.buffers();
+    let mut out = ctx.image_buffer();
+    let shape = gpu.shape(&shape)?;
+    let mut compute_pass_time = std::time::Duration::ZERO;
+    for _ in 0..settings.n {
+        ctx.submit(&shape, &mut buffers, Some(&mut out), &cfg)?;
+        let img = ctx.map_image(&mut out);
+        compute_pass_time += img.time().unwrap();
+        image = img.image();
+    }
+    let _ = image;
+    info!(
+        "Rendered {}× at {:.2?} ms/frame ({:.2?} ms/compute pass)",
+        settings.n,
+        start.elapsed().as_micros() as f64 / 1000.0 / (settings.n as f64),
+        compute_pass_time.as_micros() as f64 / 1000.0 / (settings.n as f64)
+    );
+
+    let effects = fidget::wgpu::effects::Context::new(&gpu);
+    let mut merge_buf = effects.merge_buffers(image_size)?;
+    let mut ssao_buf = effects.ssao_buffers(image_size)?;
+    let mut shade_buf = effects.shade_buffers(image_size.into())?;
+
+    let start = std::time::Instant::now();
+    let out_bytes = match mode {
+        RenderMode3D::Heightmap | RenderMode3D::Normals { .. } => {
+            bail!("only shaded rendering is supported on the GPU")
+        }
+        RenderMode3D::BlurredOcclusion { denoise } => {
+            effects.submit_merge(
+                &[buffers.image_storage_buffer()],
+                denoise,
+                &mut merge_buf,
+            )?;
+            effects.submit_ssao(&merge_buf, &mut ssao_buf)?;
+            let ssao = gpu.read_vec::<f32>(ssao_buf.blurred_occlusion().data());
+            occlusion_to_rgba(&ssao)
+        }
+        RenderMode3D::RawOcclusion { denoise } => {
+            effects.submit_merge(
+                &[buffers.image_storage_buffer()],
+                denoise,
+                &mut merge_buf,
+            )?;
+            effects.submit_ssao(&merge_buf, &mut ssao_buf)?;
+            let ssao = gpu.read_vec::<f32>(ssao_buf.raw_occlusion().data());
+            occlusion_to_rgba(&ssao)
+        }
+        RenderMode3D::Shaded { denoise, ssao } => {
+            effects.submit_merge(
+                &[buffers.image_storage_buffer()],
+                denoise,
+                &mut merge_buf,
+            )?;
+            if ssao {
+                effects.submit_ssao(&merge_buf, &mut ssao_buf)?;
+            }
+
+            let mut out_buf = gpu.read_buffer_for(shade_buf.output());
+            effects.submit_shade(
+                &merge_buf,
+                if ssao { Some(&ssao_buf) } else { None },
+                &mut shade_buf,
+                Some(&mut out_buf),
+            )?;
+            let out = gpu.map(&mut out_buf);
+            out.image().as_bytes().to_vec()
+        }
+    };
+    info!("Post-processed image in {:?}", start.elapsed());
+
+    Ok(out_bytes)
+}
+
+fn postprocess3d(
+    image: fidget::raster::voxel::Image,
+    mode: RenderMode3D,
+    threads: Option<&fidget::render::ThreadPool>,
+) -> Vec<u8> {
+    let start = std::time::Instant::now();
+    let out = match mode {
+        RenderMode3D::Normals { denoise } => {
+            let image = if denoise {
+                fidget::raster::effects::denoise_normals(&image, threads)
+            } else {
+                image
+            };
+            image
+                .into_iter()
+                .flat_map(|p| {
+                    if p.depth > 0 {
+                        let c = p.to_color();
+                        [c[0], c[1], c[2], 255]
+                    } else {
+                        [0, 0, 0, 0]
+                    }
+                })
+                .collect()
+        }
+        RenderMode3D::Shaded { ssao, denoise } => {
+            let image = if denoise {
+                fidget::raster::effects::denoise_normals(&image, threads)
+            } else {
+                image
+            };
+            let color =
+                fidget::raster::effects::apply_shading(&image, ssao, threads);
+            image
+                .into_iter()
+                .zip(color)
+                .flat_map(|(p, c)| {
+                    if p.depth > 0 {
+                        [c[0], c[1], c[2], 255]
+                    } else {
+                        [0, 0, 0, 0]
+                    }
+                })
+                .collect()
+        }
+        RenderMode3D::RawOcclusion { denoise } => {
+            let image = if denoise {
+                fidget::raster::effects::denoise_normals(&image, threads)
+            } else {
+                image
+            };
+            let ssao = fidget::raster::effects::compute_ssao(&image, threads);
+            occlusion_to_rgba(ssao.as_slice())
+        }
+        RenderMode3D::BlurredOcclusion { denoise } => {
+            let image = if denoise {
+                fidget::raster::effects::denoise_normals(&image, threads)
+            } else {
+                image
+            };
+            let ssao = fidget::raster::effects::compute_ssao(&image, threads);
+            let blurred = fidget::raster::effects::blur_ssao(&ssao, threads);
+            occlusion_to_rgba(blurred.as_slice())
+        }
+        RenderMode3D::Heightmap => {
+            let z_max =
+                u64::from(image.iter().map(|p| p.depth).max().unwrap_or(1));
+            image
+                .into_iter()
+                .flat_map(|p| {
+                    if p.depth > 0 {
+                        let z = (u64::from(p.depth) * 255 / z_max) as u8;
+                        [z, z, z, 255]
+                    } else {
+                        [0, 0, 0, 0]
+                    }
+                })
+                .collect()
+        }
+    };
+    info!("Post-processed image in {:?}", start.elapsed());
+
+    out
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+fn run2d<F: fidget::eval::Function + fidget::render::RenderHints>(
+    shape: fidget::shape::Shape<F>,
+    world_to_model: nalgebra::Matrix3<f32>,
+    settings: &ImageSettings,
+    mode: RenderMode2D,
+    threads: Option<&fidget::render::ThreadPool>,
+) -> Vec<u8> {
+    let size = settings.image_size();
+    let start;
+    let out = if matches!(mode, RenderMode2D::Brute) {
+        let tape = shape.float_slice_tape(Default::default());
+        let mut eval = fidget::shape::Shape::<F>::new_float_slice_eval();
+        let mut out: Vec<bool> = vec![];
+        start = std::time::Instant::now();
+        for _ in 0..settings.n {
+            let mut xs = vec![];
+            let mut ys = vec![];
+            let div_x = (size.width() - 1) as f64;
+            let div_y = (size.height() - 1) as f64;
+            for i in 0..size.height() {
+                let y = if div_y == 0.0 {
+                    0.0
+                } else {
+                    -(-1.0 + 2.0 * (i as f64) / div_y)
+                };
+                for j in 0..size.width() {
+                    let x = if div_x == 0.0 {
+                        0.0
+                    } else {
+                        -1.0 + 2.0 * (j as f64) / div_x
+                    };
+                    xs.push(x as f32);
+                    ys.push(y as f32);
+                }
+            }
+            let zs = vec![0.0; xs.len()];
+            let values = eval.eval(&tape, &xs, &ys, &zs).unwrap();
+            out = values.iter().map(|v| *v <= 0.0).collect();
+        }
+        // Convert from Vec<bool> to an image
+        out.into_iter()
+            .map(|b| if b { [u8::MAX; 4] } else { [0, 0, 0, 255] })
+            .flat_map(|i| i.into_iter())
+            .collect()
+    } else {
+        let bound_shape = fidget::shape::BoundShape::try_from(shape)
+            .expect("no vars allowed");
+        let render_cfg = fidget::raster::pixel::RenderConfig {
+            pixel_perfect: matches!(mode, RenderMode2D::Sdf),
+            world_to_model,
+            ..fidget::raster::pixel::RenderConfig::from_size(size)
+        };
+        let eval_cfg = fidget::raster::pixel::EvalConfig {
+            threads,
+            ..Default::default()
+        };
+        let mut image = fidget::raster::Image::default();
+        start = std::time::Instant::now();
+        for _ in 0..settings.n {
+            let tmp = fidget::raster::pixel::render(
+                bound_shape.clone(),
+                &render_cfg,
+                &eval_cfg,
+            )
+            .expect("render should not be cancelled");
+            image = postprocess2d(tmp, &mode, threads);
+        }
+        image.into_iter().flatten().collect()
+    };
+    info!(
+        "Rendered {}× at {:.2?} ms/frame",
+        settings.n,
+        start.elapsed().as_micros() as f64 / 1000.0 / (settings.n as f64),
+    );
+    out
+}
+
+fn postprocess2d(
+    image: fidget::raster::pixel::Image,
+    mode: &RenderMode2D,
+    threads: Option<&fidget::render::ThreadPool>,
+) -> fidget::raster::RgbaImage {
+    match mode {
+        RenderMode2D::Mono => {
+            fidget::raster::effects::to_rgba_bitmap(image, false, threads)
+        }
+        RenderMode2D::Sdf => {
+            fidget::raster::effects::to_rgba_distance(image, threads)
+        }
+        RenderMode2D::Debug => {
+            fidget::raster::effects::to_debug_bitmap(image, threads)
+        }
+        RenderMode2D::Brute => unreachable!(),
+    }
+}
+
+fn run2d_wgpu(
+    shape: fidget::vm::VmShape,
+    world_to_model: nalgebra::Matrix3<f32>,
+    settings: &ImageSettings,
+    mode: RenderMode2D,
+    threads: Option<&fidget::render::ThreadPool>,
+) -> Result<Vec<u8>> {
+    if matches!(mode, RenderMode2D::Brute) {
+        bail!("cannot render in brute-force mode with --wgpu");
+    }
+
+    // Build a fidget gpu context
+    let gpu = pollster::block_on(fidget::wgpu::Gpu::init())?;
+
+    let ctx = fidget::wgpu::pixel::Context::new(&gpu);
+    let image_size = settings.image_size();
+    let cfg = fidget::wgpu::pixel::RenderConfig {
+        pixel_perfect: matches!(mode, RenderMode2D::Sdf),
+        world_to_model,
+        image_size,
+        z: 0.0,
+    };
+    let mut image = Default::default();
+    let start = std::time::Instant::now();
+    let mut buffers = ctx.buffers();
+    let mut out = ctx.image_buffer();
+    let shape = gpu.shape(&shape)?;
+    let mut compute_pass_time = std::time::Duration::ZERO;
+    let mut postprocess_time = std::time::Duration::ZERO;
+    for _ in 0..settings.n {
+        ctx.submit(&shape, &mut buffers, Some(&mut out), &cfg)?;
+        let img = ctx.map_image(&mut out);
+        compute_pass_time += img.time().unwrap();
+        let pp_start = std::time::Instant::now();
+        image = postprocess2d(img.image(), &mode, threads);
+        postprocess_time += pp_start.elapsed();
+    }
+    info!(
+        "Rendered {}× at {:.2?} ms/frame ({:.2?} ms/compute pass)",
+        settings.n,
+        start.elapsed().as_micros() as f64 / 1000.0 / (settings.n as f64),
+        compute_pass_time.as_micros() as f64 / 1000.0 / (settings.n as f64)
+    );
+
+    info!(
+        "Post-processed image in {:.2?}",
+        postprocess_time.as_micros() as f64 / 1000.0 / (settings.n as f64)
+    );
+
+    Ok(image.as_bytes().to_owned())
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+fn run_mesh<F: fidget::eval::Function + fidget::render::RenderHints>(
+    shape: fidget::shape::Shape<F>,
+    settings: &MeshSettings,
+) -> (fidget::mesh::Mesh, std::time::Duration, std::time::Duration) {
+    let mut mesh = fidget::mesh::Mesh::new();
+    let shape = shape.try_into().expect("no variables");
+
+    // Transform the shape based on our render settings
+    let s = 1.0 / settings.scale;
+    let scale = nalgebra::Scale3::new(s, s, s);
+    let center = nalgebra::Translation3::new(
+        -settings.center[0],
+        -settings.center[1],
+        -settings.center[2],
+    );
+    let world_to_model = center.to_homogeneous() * scale.to_homogeneous();
+
+    let threads = match settings.threads {
+        Some(n) if n.get() == 1 => None,
+        Some(n) => Some(fidget::render::ThreadPool::Custom(
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n.get())
+                .build()
+                .unwrap(),
+        )),
+        None => Some(fidget::render::ThreadPool::Global),
+    };
+    let threads = threads.as_ref();
+
+    let mut octree_time = std::time::Duration::ZERO;
+    let mut mesh_time = std::time::Duration::ZERO;
+    for _ in 0..settings.n {
+        let settings = fidget::mesh::Settings {
+            depth: settings.depth,
+            threads,
+            world_to_model,
+            ..Default::default()
+        };
+        let start = std::time::Instant::now();
+        let octree = fidget::mesh::Octree::build(&shape, &settings).unwrap();
+        octree_time += start.elapsed();
+
+        let start = std::time::Instant::now();
+        mesh = octree.walk_dual();
+        mesh_time += start.elapsed();
+    }
+    (mesh, octree_time, mesh_time)
+}
+
+fn load_script(settings: &ScriptSettings) -> Result<(Context, Node)> {
+    let now = Instant::now();
+    let mut file = std::fs::File::open(&settings.input)?;
+    let ty = match settings.r#type {
+        ScriptType::Auto => {
+            let ext = settings
+                .input
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_ascii_lowercase());
+            match ext.as_deref() {
+                Some("rhai") => ScriptType::Rhai,
+                Some("vm") => ScriptType::Vm,
+                Some(s) => {
+                    bail!(
+                        "Unknown extension '{s}', should be '.rhai' or '.vm' \
+                         (or specify --type)"
+                    )
+                }
+                None => bail!("cannot detect script type without extension"),
+            }
+        }
+        s => s,
+    };
+    let (ctx, root) = match ty {
+        ScriptType::Vm => Context::from_text(&mut file)?,
+        ScriptType::Rhai => {
+            let mut engine = fidget::rhai::engine();
+            let mut script = String::new();
+            file.read_to_string(&mut script)
+                .context("failed to read script to string")?;
+            let out = Arc::new(Mutex::new(None));
+            let out_ = out.clone();
+            engine.register_fn(
+                "draw",
+                move |ctx: rhai::NativeCallContext,
+                      d: rhai::Dynamic|
+                      -> Result<(), Box<rhai::EvalAltResult>> {
+                    let t = fidget::context::Tree::from_dynamic(&ctx, d, None)?;
+                    let mut out = out_.lock().unwrap();
+                    if out.is_some() {
+                        return Err("can only draw one shape".into());
+                    }
+                    *out = Some(t);
+                    Ok(())
+                },
+            );
+            engine.run(&script)?;
+            if let Some(tree) = out.lock().unwrap().take() {
+                let mut ctx = Context::new();
+                let node = ctx.import(&tree);
+                (ctx, node)
+            } else {
+                bail!("script must include a draw(tree) call");
+            }
+        }
+        ScriptType::Auto => unreachable!(),
+    };
+    info!("Loaded file in {:?}", now.elapsed());
+    Ok((ctx, root))
+}
+
+fn main() -> Result<()> {
+    env_logger::Builder::from_env(Env::default().default_filter_or("info"))
+        .init();
+
+    let args = Args::parse();
+
+    match args.cmd {
+        Command::Render2d {
+            settings,
+            mode,
+            center,
+            wgpu,
+        } => {
+            let (ctx, root) = load_script(&settings.script)?;
+            let start = Instant::now();
+            let s = 1.0 / settings.scale;
+            let scale = nalgebra::Scale2::new(s, s);
+            let center = nalgebra::Translation2::new(-center[0], -center[1]);
+            let t = center.to_homogeneous() * scale.to_homogeneous();
+
+            let threads = match settings.threads {
+                Some(n) if n.get() == 1 => None,
+                Some(n) => Some(fidget::render::ThreadPool::Custom(
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(n.get())
+                        .build()
+                        .unwrap(),
+                )),
+                None => Some(fidget::render::ThreadPool::Global),
+            };
+
+            let buffer = if wgpu {
+                #[cfg(feature = "jit")]
+                if matches!(settings.eval, EvalMode::Jit) {
+                    bail!("can't combine --wgpu and --jit");
+                }
+                let shape = fidget::vm::VmShape::new(&ctx, root)?;
+                run2d_wgpu(shape, t, &settings, mode, threads.as_ref())?
+            } else {
+                match settings.eval {
+                    #[cfg(feature = "jit")]
+                    EvalMode::Jit => {
+                        let shape = fidget::jit::JitShape::new(&ctx, root)?;
+                        info!("Built shape in {:?}", start.elapsed());
+                        run2d(shape, t, &settings, mode, threads.as_ref())
+                    }
+                    EvalMode::Vm => {
+                        let shape = fidget::vm::VmShape::new(&ctx, root)?;
+                        info!("Built shape in {:?}", start.elapsed());
+                        run2d(shape, t, &settings, mode, threads.as_ref())
+                    }
+                }
+            };
+            if let Some(out) = &settings.out {
+                let image_size = settings.image_size();
+                image::save_buffer(
+                    out,
+                    &buffer,
+                    image_size.width(),
+                    image_size.height(),
+                    image::ColorType::Rgba8,
+                )?;
+            }
+        }
+        Command::Render3d {
+            settings,
+            mode,
+            isometric,
+            pitch,
+            zflatten,
+            wgpu,
+            yaw,
+            roll,
+            center,
+            perspective,
+            depth,
+            ssao,
+            no_denoise,
+        } => {
+            // Manual checking of arguments
+            // TODO this isn't printed in color
+            if ssao && !matches!(mode, RenderMode3DArg::Shaded) {
+                let mut cmd = Args::command();
+                let sub = cmd.find_subcommand_mut("render3d").unwrap();
+                let error = sub.error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "`--ssao` is only allowed when `--mode=shaded`",
+                );
+                error.exit();
+            }
+            if no_denoise && matches!(mode, RenderMode3DArg::Heightmap) {
+                let mut cmd = Args::command();
+                let sub = cmd.find_subcommand_mut("render3d").unwrap();
+                let error = sub.error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "`--no-denoise` is not allowed when `--mode=heightmap`",
+                );
+                error.exit();
+            }
+            let denoise = !no_denoise;
+            let mode = match mode {
+                RenderMode3DArg::Shaded => {
+                    RenderMode3D::Shaded { ssao, denoise }
+                }
+                RenderMode3DArg::Heightmap => RenderMode3D::Heightmap,
+                RenderMode3DArg::BlurredOcclusion => {
+                    RenderMode3D::BlurredOcclusion { denoise }
+                }
+                RenderMode3DArg::RawOcclusion => {
+                    RenderMode3D::RawOcclusion { denoise }
+                }
+                RenderMode3DArg::Normals => RenderMode3D::Normals { denoise },
+            };
+            let (ctx, root) = load_script(&settings.script)?;
+            let start = Instant::now();
+            let s = 1.0 / settings.scale;
+            let scale = nalgebra::Scale3::new(s, s, s);
+            let pitch = nalgebra::Rotation3::new(
+                nalgebra::Vector3::x() * pitch * std::f32::consts::PI / 180.0,
+            );
+            let yaw = nalgebra::Rotation3::new(
+                nalgebra::Vector3::y() * yaw * std::f32::consts::PI / 180.0,
+            );
+            let roll = nalgebra::Rotation3::new(
+                nalgebra::Vector3::z() * roll * std::f32::consts::PI / 180.0,
+            );
+            let center =
+                nalgebra::Translation3::new(-center[0], -center[1], -center[2]);
+
+            let perspective =
+                perspective.unwrap_or(if isometric { 0.0 } else { 0.3 });
+            let mut camera = nalgebra::Transform3::identity();
+            *camera.matrix_mut().get_mut((3, 2)).unwrap() = perspective;
+
+            let zflatten = nalgebra::Scale3::new(1.0, 1.0, zflatten);
+
+            let t = center.to_homogeneous()
+                * yaw.to_homogeneous()
+                * roll.to_homogeneous()
+                * pitch.to_homogeneous()
+                * scale.to_homogeneous()
+                * camera.to_homogeneous()
+                * zflatten.to_homogeneous();
+
+            let threads = match settings.threads {
+                Some(n) if n.get() == 1 => None,
+                Some(n) => Some(fidget::render::ThreadPool::Custom(
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(n.get())
+                        .build()
+                        .unwrap(),
+                )),
+                None => Some(fidget::render::ThreadPool::Global),
+            };
+
+            let buffer = if wgpu {
+                #[cfg(feature = "jit")]
+                if matches!(settings.eval, EvalMode::Jit) {
+                    bail!("can't combine --wgpu and --jit");
+                }
+                let shape = fidget::vm::VmShape::new(&ctx, root)?;
+                run3d_wgpu(shape, t, &settings, depth, mode)?
+            } else {
+                let image = match settings.eval {
+                    #[cfg(feature = "jit")]
+                    EvalMode::Jit => {
+                        let shape = fidget::jit::JitShape::new(&ctx, root)?;
+                        info!("Built shape in {:?}", start.elapsed());
+                        run3d(shape, t, &settings, depth, threads.as_ref())
+                    }
+                    EvalMode::Vm => {
+                        let shape = fidget::vm::VmShape::new(&ctx, root)?;
+                        info!("Built shape in {:?}", start.elapsed());
+                        run3d(shape, t, &settings, depth, threads.as_ref())
+                    }
+                };
+                postprocess3d(image, mode, threads.as_ref())
+            };
+
+            if let Some(out) = &settings.out {
+                let image_size = settings.image_size();
+                info!("Writing image to {out:?}");
+                image::save_buffer(
+                    out,
+                    &buffer,
+                    image_size.width(),
+                    image_size.height(),
+                    image::ColorType::Rgba8,
+                )?;
+            }
+        }
+        Command::Mesh { settings } => {
+            let (ctx, root) = load_script(&settings.script)?;
+            let start = Instant::now();
+            let (mesh, octree_time, mesh_time) = match settings.eval {
+                #[cfg(feature = "jit")]
+                EvalMode::Jit => {
+                    let shape = fidget::jit::JitShape::new(&ctx, root)?;
+                    info!("Built shape in {:?}", start.elapsed());
+                    run_mesh(shape, &settings)
+                }
+                EvalMode::Vm => {
+                    let shape = fidget::vm::VmShape::new(&ctx, root)?;
+                    info!("Built shape in {:?}", start.elapsed());
+                    run_mesh(shape, &settings)
+                }
+            };
+            info!(
+                "Rendered {}× at {:?} ms/iter",
+                settings.n,
+                start.elapsed().as_micros() as f64
+                    / 1000.0
+                    / (settings.n as f64)
+            );
+            info!(
+                "  Octree construction: {:?} ms/iter",
+                octree_time.as_micros() as f64 / 1000.0 / (settings.n as f64)
+            );
+            info!(
+                "  Mesh construction: {:?} ms/iter",
+                mesh_time.as_micros() as f64 / 1000.0 / (settings.n as f64)
+            );
+            if let Some(out) = settings.out {
+                info!("Writing STL to {out:?}");
+                mesh.write_stl(&mut std::fs::File::create(out)?)?;
+            }
+        }
+    }
+
+    Ok(())
+}

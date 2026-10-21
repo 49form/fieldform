@@ -1,0 +1,7 @@
+/target
+/local
+*.dot
+*.pdf
+*.svg
+*.png
+*.stl

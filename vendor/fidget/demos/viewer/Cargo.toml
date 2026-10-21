@@ -1,0 +1,28 @@
+[package]
+name = "fidget-viewer"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+crossbeam-channel.workspace = true
+eframe.workspace = true
+env_logger.workspace = true
+log.workspace = true
+nalgebra.workspace = true
+notify.workspace = true
+rhai.workspace = true
+zerocopy.workspace = true
+
+fidget = { workspace = true, default-features = true }
+workspace-hack.workspace = true
+
+[features]
+default = ["jit"]
+jit = ["fidget/jit"]
+
+[[bin]]
+name = "fidget-viewer"
+doctest = false

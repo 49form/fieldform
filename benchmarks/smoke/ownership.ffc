@@ -1,0 +1,256 @@
+# Refactor plan step 2.16: where a block sits in the list is stored, and the list reads it
+# (block-ownership-spec.md, backlog item 82). The hand checks of block-ownership-instructions.md
+# §1e, as far as the console reaches them.
+#
+# Run from the repository root, after a build, so target/ is there to save into:
+#   fieldform.exe --run benchmarks/smoke/ownership.ffc --keep-going --report ownership.json --exit
+# Exit code 0 when every expect passed. The expects say the geometry never moved and that each
+# older document opened; where each block sits and what draws are read out of the documents the
+# run saves, target/ownership-*.fform -- history/ownership.json and history/node-meta.json beside
+# document.json -- and the lines it said are in %TEMP%\fieldform-console.log. So a run that exits
+# 0 has not checked the rows: that is the read-back.
+#
+# The V is typed as `variable` and `inline` (refactor plan 2.21): items 4, 6 and 7 below, and the
+# curve, profile and parameter checks of the instructions' Phase 3. A refused `inline` or
+# `variable` is warned, so each one here is deliberate, as the run keeps going past it.
+#
+# What the console cannot reach yet, and what holds it instead:
+# - renaming a block already made, and clearing a name (item 2's second half): a name is given
+#   as a block is made, nowhere else. clearing_a_variable_s_name_is_refused_and_a_rename_moves_no_block
+#   holds the rest.
+# - the eye on a block something consumes (item 3): `hide` turns over the selected block's own
+#   eye, which for one inside another is the `shown` its row's eye writes (refactor plan 2.17),
+#   but no verb selects a block by name, so a script reaches one only through a selection some
+#   other verb happened to leave on it. The scene's
+#   the_eye_does_not_lift_a_block_out_of_its_consumer holds it, and the app's
+#   the_eye_draws_a_block_or_stops_whichever_flag_its_place_in_the_graph_gives_it what it draws.
+# - the title bar (item 11): read instead as whether a `new` straight after opening has unsaved
+#   changes to discard, which a run says in the log when it does ("Discarding unsaved changes
+#   before starting a new document"). Every `new` here follows a save, so a good run's log has no
+#   such line at all. No expect sees it, so the exit code does not say it either.
+
+# --- items 1 and 2: a sphere and a cube a union reads are inside it and not drawn, and the names
+# they were made with leave them there -- a name is a label, not a declaration. The ball pokes
+# halfway out of the box's +x face: 40^3 + 2/3*pi*10^3 = 66094.40
+sphere radius=10 centre=20,0,0 'ball'
+cube size=40,40,40 centre=0,0,0 'box'
+boolean -u in=ball,box 'joined'
+expect target=joined volume=66094.40 tol=0.5%
+saveas file=target/ownership-01-union.fform
+
+# --- item 5: a shell of the box is a second reader. **Reversed by item 112** (`notebook-spec.md`
+# §7.3, ruling 1): the box used to be promoted to a variable here, with the log saying "box is now
+# a variable -- joined and outer both use it". Settling never declares now, so the box stays nested
+# and is drawn inside *both* readers -- one block in two places, a shared instance -- and nothing
+# is said at all, because the line that said it is gone with the promotion. The union is untouched
+# either way, which is what the expect holds. The row is the read-back:
+# `history/ownership.json` says `"nested"` where a 3.15 file said `{"inside": "<id>"}`.
+shell target=box thickness=2 'outer'
+expect target=joined volume=66094.40 tol=0.5%
+saveas file=target/ownership-05-shell.fform
+
+# --- item 7: taking the shell back puts the box back inside the union. Two undos, since the name
+# given to the shell is a step of its own after the shell's.
+undo
+undo
+saveas file=target/ownership-07-unshelled.fform
+
+# --- item 9: the ball, named and inside the union, typed into a second boolean. **Reversed by item
+# 112 the same way**: the log used to say it is a variable now; it is a shared instance, drawn in
+# both booleans, and the log says nothing. An undo still takes the second reader away, and the ball
+# is then drawn in the first alone. Disjoint, so 4188.79 + 1000.
+cube size=10,10,10 centre=60,0,0 'far'
+boolean -u in=ball,far 'second'
+expect target=second volume=5188.79 tol=0.5%
+saveas file=target/ownership-09-second-reader.fform
+undo
+undo
+expect target=joined volume=66094.40 tol=0.5%
+saveas file=target/ownership-09-undone.fform
+
+# --- items 4, 6 and 7, typed: the V on a cube nobody named, found by the label its row shows.
+# `variable` gives it a row of its own and the name `Cube`, the union unchanged.
+#
+# **The refusal in the middle of this is gone, item 112 §6.6.** With a shell added as a second
+# reader, `inline` used to be refused, naming the union and the shell, because there was no single
+# block for the row to go back inside. A block goes back inside *every* reader now, so the first
+# `inline 'Cube'` below **succeeds** where it used to warn, and says "is part of joined and outer
+# again". It is no longer one of this file's deliberate refusals; the log is the read-back, and a
+# `!!` on that line now is a regression rather than the point.
+new
+sphere radius=10 centre=20,0,0 'ball'
+cube size=40,40,40 centre=0,0,0
+boolean -u in=ball,Cube 'joined'
+variable 'Cube'
+expect target=joined volume=66094.40 tol=0.5%
+saveas file=target/ownership-04-variable.fform
+shell target=Cube thickness=2 'outer'
+inline 'Cube'
+saveas file=target/ownership-06-shared.fform
+undo
+undo
+inline 'Cube'
+expect target=joined volume=66094.40 tol=0.5%
+saveas file=target/ownership-07-inline.fform
+undo
+saveas file=target/ownership-07-inline-undone.fform
+
+# --- item 8: deleting the union lets go of both and they draw; undo puts them back inside and not
+# drawn; redo lets go of them again. `delete` takes the union the boolean line left selected.
+new
+sphere radius=10 centre=20,0,0 'ball'
+cube size=40,40,40 centre=0,0,0 'box'
+boolean -u in=ball,box 'joined'
+delete
+expect target=ball volume=4188.79 tol=0.5%
+expect target=box volume=64000 tol=0.5%
+saveas file=target/ownership-08-deleted.fform
+undo
+expect target=joined volume=66094.40 tol=0.5%
+saveas file=target/ownership-08-undone.fform
+redo
+saveas file=target/ownership-08-redone.fform
+
+# --- item 10: a pattern adopts its body and still draws it, and so does the same file reopened.
+# A count of three is the seed and two copies 20 and 40 along, and the pattern's block is the
+# copies, with the seed drawn beside them: 2 * 4/3*pi*125 = 1047.20
+new
+sphere radius=5 centre=0,100,0 'seed'
+pattern target=seed kind=linear count=3 step=20,0,0 'row'
+expect target=row volume=1047.20 tol=0.5%
+expect target=row bbox=15,95,-5,45,105,5 tol=0.05
+saveas file=target/ownership-10-pattern.fform
+open file=target/ownership-10-pattern.fform
+expect target=row volume=1047.20 tol=0.5%
+saveas file=target/ownership-10-reopened.fform
+
+# --- Phase 3, a profile: a closed four-line profile, extruded, sits inside the extrude. Its first
+# curve's own V is the loop's, so `variable 'a'` is refused, naming the profile row (deliberate);
+# `variable 'Profile 1'` takes the profile out of the extrude to a row of its own and
+# `inline 'Profile 1'` puts it back, the slab 40 x 20 x 10 throughout. Before the extrude, a point
+# beside the loop: the loop is held by four joints, unnamed points the list draws inside the
+# profile row, so the one "Point" row is the point made on its own, and `variable 'Point'` makes
+# that point a variable and no joint.
+new
+line p0=0,0,0 p1=40,0,0 'a'
+line p0=40,0,0 p1=40,20,0 'b'
+line p0=40,20,0 p1=0,20,0 'c'
+line p0=0,20,0 p1=0,0,0 'd'
+point at=60,0,0
+variable 'Point'
+extrude profile=a height=10 'slab'
+variable 'a'
+variable 'Profile 1'
+expect target=slab volume=8000 tol=0.1%
+saveas file=target/ownership-p3-profile-variable.fform
+inline 'Profile 1'
+expect target=slab volume=8000 tol=0.1%
+saveas file=target/ownership-p3-profile-inline.fform
+
+# --- Phase 3, a curve (item 73's reported case): a closed four-line profile, extruded, its loop
+# then opened. The extrude names `a` and walks the rest, so with the loop open `a` alone is inside
+# it and the other three stand on their own; `a`'s own V acts now, so `variable 'a'` takes it out
+# of the extrude and `inline 'a'` puts it back. No verb breaks one joint, so `ungroup` takes the
+# four out, moving nothing, while the last line is still selected, and `set` pulls one corner 4 mm
+# apart, which opens the loop as a broken joint does.
+new
+line p0=0,0,0 p1=40,0,0 'a'
+line p0=40,0,0 p1=40,20,0 'b'
+line p0=40,20,0 p1=0,20,0 'c'
+line p0=0,20,0 p1=0,0,0 'd'
+ungroup
+extrude profile=a height=10 'slab'
+expect target=slab volume=8000 tol=0.1%
+set d.p1=0,4,0
+saveas file=target/ownership-p3-curve-open.fform
+variable 'a'
+saveas file=target/ownership-p3-curve-variable.fform
+inline 'a'
+saveas file=target/ownership-p3-curve-inline.fform
+
+# --- Phase 3, a parameter: `inline` writes its number back into the one field that reads it and
+# takes the parameter out, in one undo step. A parameter three fields read has no one field to go
+# back into, so the second `inline` is refused, naming the block (deliberate). A ball of radius 10
+# is 4/3*pi*1000 = 4188.79 whether its radius is the parameter or the number.
+new
+param name=r value=10
+sphere radius=r centre=0,0,0 'lone'
+inline 'r'
+expect target=lone volume=4188.79 tol=0.5%
+saveas file=target/ownership-p3-number-back.fform
+undo
+expect target=lone volume=4188.79 tol=0.5%
+saveas file=target/ownership-p3-number-undone.fform
+param name=edge value=20
+cube size=edge centre=60,0,0 'brick'
+inline name=edge
+expect target=brick volume=8000 tol=0.5%
+saveas file=target/ownership-p3-number-refused.fform
+
+# --- item 11: documents saved before 3.15 open with every row where the old rule had it, and are
+# not changed by being opened: the `new` after each open must find nothing to discard.
+#
+# The two in format-3.14/ are this script's own, and must stay 3.14. They are what curves.ffc and
+# phase-a.ffc saved with a build from before 3.15 (2026-10-11), copied out of the way of those
+# scripts: theirs go to benchmarks/smoke/*.fform, which is not kept and is written over in the
+# current format by every run, so reading those would have stopped testing an older file at the
+# next run and said nothing. `open` only warns at a file that is not there, and this run keeps
+# going, so the expect after each one is what fails the run without it -- the closed forms are
+# the ones its own script checks: a 40 x 20 x 10 slab, a 10 x 20 x 30 box.
+open file=benchmarks/smoke/format-3.14/curves.fform
+new
+open file=benchmarks/smoke/format-3.14/curves.fform
+expect target=slab volume=8000 tol=0.1%
+saveas file=target/ownership-11-curves.fform
+open file=benchmarks/smoke/format-3.14/phase-a.fform
+new
+open file=benchmarks/smoke/format-3.14/phase-a.fform
+expect target=probe volume=6000 tol=0.1%
+saveas file=target/ownership-11-phase-a.fform
+
+# --- item 112: an empty slot, saved and reopened.
+#
+# A block may be left waiting to be told what to read (`notebook-spec.md` §7.2, ruled by the
+# owner), and this is the only place that gesture is exercised end to end rather than in a unit
+# test. `target=none` is the console's half of it -- the same act as dragging a block out of a slot
+# -- and `shell target=none` makes the block rather than refusing, which is what lets a script
+# build a part top-down.
+#
+# Two things are being checked, and they pull opposite ways, which is why both are here:
+#
+#  - **The hole is left out, and its siblings are not.** `joined` still measures, with a holed
+#    block beside it in the same part. That is the viewport's prune said in a way a script can
+#    assert: a body that cannot compile no longer takes everything with it. `expect` compiles each
+#    block alone with what it reads, so this is honest about the target and says nothing about the
+#    hole's neighbours by accident.
+#  - **A statement about the whole part refuses.** Measure, wall thickness and the promise check
+#    decline while any slot is empty, rather than answering about a part with a body missing. No
+#    `expect` can hold that -- it measures one block, never the part -- so the log is the record:
+#    `thickness` below is a deliberate refusal and reads `!!`.
+#
+# Deliberately no expect on `hollow` itself: compiling it answers `EmptySlot`, so an expect there
+# would fail the run, and a refusal written as a failing assertion is a script nobody can read.
+new
+sphere radius=10 centre=20,0,0 'ball'
+cube size=40,40,40 centre=0,0,0 'box'
+boolean -u in=ball,box 'joined'
+shell target=none thickness=2 'hollow'
+expect target=joined volume=66094.40 tol=0.5%
+thickness min=1
+saveas file=target/ownership-112-empty-slot.fform
+
+# Reopened, the slot is still empty: an absent field read back as a hole, not as a damaged file.
+# `document.json` in the archive is the read-back -- the shell's entry carries no "input" key at
+# all, which is the whole of how an empty slot is spelled (§7.2, format 3.16). A null would read as
+# a malformed id and refuse the document, and a 3.15 build meets the respelled ownership entry and
+# refuses it: forwards opens, backwards does not, which is the bargain the format entry states.
+open file=target/ownership-112-empty-slot.fform
+expect target=joined volume=66094.40 tol=0.5%
+saveas file=target/ownership-112-reopened.fform
+
+# And filling it is the way back: the block that was waiting now reads the union, and measures.
+# A shell of 2 on the union's 66094.40 is not a closed form worth asserting, so the expect stays
+# on `joined`, whose volume a shell beside it must not change.
+shell target=joined thickness=2 'filled'
+expect target=joined volume=66094.40 tol=0.5%
+saveas file=target/ownership-112-filled.fform

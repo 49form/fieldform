@@ -1,0 +1,32 @@
+[package]
+name = "fidget-cli"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+env_logger.workspace = true
+image.workspace = true
+log.workspace = true
+nalgebra.workspace = true
+ordered-float.workspace = true
+pollster.workspace = true
+rayon.workspace = true
+rhai.workspace = true
+strum.workspace = true
+wgpu.workspace = true
+
+fidget = { workspace = true, default-features = true }
+workspace-hack.workspace = true
+
+[features]
+jit = ["fidget/jit"]
+logger-full = ["env_logger/auto-color", "env_logger/humantime", "env_logger/regex"]
+default = ["jit", "logger-full"]
+
+[[bin]]
+name = "fidget-cli"
+test = false
+doctest = false

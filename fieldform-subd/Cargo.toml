@@ -1,0 +1,18 @@
+[package]
+name = "fieldform-subd"
+version = "0.1.0"
+edition.workspace = true
+license = "MPL-2.0"
+authors = ["49form"]
+repository = "https://github.com/49form/fieldform"
+publish = false
+
+[dependencies]
+fieldform-cage.workspace = true
+nalgebra.workspace = true
+# No opensubdiv-petite: its bundled OpenSubdiv C++ fails to build on this project's MSVC
+# toolchain (spiked and confirmed — the failure is in OpenSubdiv's own sources). The
+# Catmull-Clark math is implemented natively in this crate instead.
+
+[dev-dependencies]
+approx.workspace = true

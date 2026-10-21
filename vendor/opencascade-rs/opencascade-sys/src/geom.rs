@@ -1,0 +1,132 @@
+pub use inner::*;
+
+#[cxx::bridge]
+mod inner {
+    unsafe extern "C++" {
+        include!("opencascade-sys/include/geom.hxx");
+
+        type gp_Ax3 = crate::gp::gp_Ax3;
+        type gp_Pnt = crate::gp::gp_Pnt;
+        type TColgp_Array2OfPnt = crate::t_col_gp::TColgp_Array2OfPnt;
+        type TColgp_HArray1OfPnt = crate::t_col_gp::TColgp_HArray1OfPnt;
+        #[cxx_name = "RustHandle_Standard_Type"]
+        type Handle_Standard_Type = crate::standard::Handle_Standard_Type;
+
+        // Handles
+        #[cxx_name = "RustHandle_Geom_Curve"]
+        type Handle_Geom_Curve;
+        pub fn IsNull(self: &Handle_Geom_Curve) -> bool;
+        pub fn HandleGeomCurve_Value(curve: &Handle_Geom_Curve, u: f64) -> UniquePtr<gp_Pnt>;
+
+        #[cxx_name = "RustHandle_Geom_BSplineCurve"]
+        type Handle_Geom_BSplineCurve;
+        pub fn IsNull(self: &Handle_Geom_BSplineCurve) -> bool;
+
+        // A curve of any kind as a B-spline. Exact for the conics too -- see `geom.hxx`.
+        pub fn curve_to_bspline(
+            curve: &Handle_Geom_Curve,
+            first: f64,
+            last: f64,
+        ) -> UniquePtr<Handle_Geom_BSplineCurve>;
+
+        // What the curve is made of. Every index here is OCCT's, so one-based.
+        pub fn bspline_degree(curve: &Handle_Geom_BSplineCurve) -> i32;
+        pub fn bspline_num_poles(curve: &Handle_Geom_BSplineCurve) -> i32;
+        pub fn bspline_num_knots(curve: &Handle_Geom_BSplineCurve) -> i32;
+        pub fn bspline_is_rational(curve: &Handle_Geom_BSplineCurve) -> bool;
+        pub fn bspline_is_periodic(curve: &Handle_Geom_BSplineCurve) -> bool;
+        // A periodic curve rewritten in clamped form -- see `geom.hxx`.
+        pub fn bspline_clamped(
+            curve: &Handle_Geom_BSplineCurve,
+        ) -> UniquePtr<Handle_Geom_BSplineCurve>;
+        pub fn bspline_pole(curve: &Handle_Geom_BSplineCurve, index: i32) -> UniquePtr<gp_Pnt>;
+        pub fn bspline_weight(curve: &Handle_Geom_BSplineCurve, index: i32) -> f64;
+        pub fn bspline_knot(curve: &Handle_Geom_BSplineCurve, index: i32) -> f64;
+        pub fn bspline_multiplicity(curve: &Handle_Geom_BSplineCurve, index: i32) -> i32;
+
+        #[cxx_name = "RustHandle_Geom_BezierCurve"]
+        type Handle_Geom_BezierCurve;
+        pub fn IsNull(self: &Handle_Geom_BezierCurve) -> bool;
+
+        #[cxx_name = "RustHandle_Geom_TrimmedCurve"]
+        type Handle_Geom_TrimmedCurve;
+        pub fn IsNull(self: &Handle_Geom_TrimmedCurve) -> bool;
+
+        #[cxx_name = "RustHandle_Geom_Surface"]
+        type Handle_Geom_Surface;
+        pub fn IsNull(self: &Handle_Geom_Surface) -> bool;
+        pub fn DynamicType(surface: &Handle_Geom_Surface) -> &Handle_Standard_Type;
+
+        #[cxx_name = "RustHandle_Geom_BezierSurface"]
+        type Handle_Geom_BezierSurface;
+        pub fn IsNull(self: &Handle_Geom_BezierSurface) -> bool;
+
+        #[cxx_name = "RustHandle_Geom_Plane"]
+        type Handle_Geom_Plane;
+        pub fn IsNull(self: &Handle_Geom_Plane) -> bool;
+
+        #[cxx_name = "RustHandle_Geom_CylindricalSurface"]
+        type Handle_Geom_CylindricalSurface;
+        pub fn IsNull(self: &Handle_Geom_CylindricalSurface) -> bool;
+        // End Handles
+
+        type Geom_TrimmedCurve;
+
+        type Geom_CylindricalSurface;
+        pub fn Geom_CylindricalSurface_new(
+            axis: &gp_Ax3,
+            radius: f64,
+        ) -> UniquePtr<Handle_Geom_CylindricalSurface>;
+        pub fn cylinder_to_surface(
+            cylinder_handle: &Handle_Geom_CylindricalSurface,
+        ) -> UniquePtr<Handle_Geom_Surface>;
+
+        type Geom_BezierSurface;
+        pub fn Geom_BezierSurface_new(
+            poles: &TColgp_Array2OfPnt,
+        ) -> UniquePtr<Handle_Geom_BezierSurface>;
+        pub fn bezier_to_surface(
+            bezier_handle: &Handle_Geom_BezierSurface,
+        ) -> UniquePtr<Handle_Geom_Surface>;
+
+        type Geom_BezierCurve;
+        #[cxx_name = "construct_unique"]
+        pub fn Geom_BezierCurve_new_points(
+            poles: &TColgp_HArray1OfPnt,
+        ) -> UniquePtr<Geom_BezierCurve>;
+
+        pub fn Geom_BezierCurve_to_handle(
+            law: UniquePtr<Geom_BezierCurve>,
+        ) -> UniquePtr<Handle_Geom_BezierCurve>;
+
+        pub fn handle_geom_plane_location(plane: &Handle_Geom_Plane) -> &gp_Pnt;
+
+        pub fn new_HandleGeomPlane_from_HandleGeomSurface(
+            geom_surface_handle: &Handle_Geom_Surface,
+        ) -> UniquePtr<Handle_Geom_Plane>;
+
+        #[cxx_name = "construct_unique"]
+        pub fn new_HandleGeomCurve_from_HandleGeom_BSplineCurve(
+            bspline_curve_handle: &Handle_Geom_BSplineCurve,
+        ) -> UniquePtr<Handle_Geom_Curve>;
+
+        #[cxx_name = "construct_unique"]
+        pub fn new_HandleGeomCurve_from_HandleGeom_BezierCurve(
+            bezier_curve_handle: &Handle_Geom_BezierCurve,
+        ) -> UniquePtr<Handle_Geom_Curve>;
+
+        #[cxx_name = "construct_unique"]
+        pub fn new_HandleGeomCurve_from_HandleGeom_TrimmedCurve(
+            trimmed_curve_handle: &Handle_Geom_TrimmedCurve,
+        ) -> UniquePtr<Handle_Geom_Curve>;
+    }
+
+    impl UniquePtr<Handle_Geom_CylindricalSurface> {}
+    impl UniquePtr<Handle_Geom_BezierSurface> {}
+    impl UniquePtr<Handle_Geom_BezierCurve> {}
+    impl UniquePtr<Handle_Geom_Plane> {}
+    impl UniquePtr<Handle_Geom_BSplineCurve> {}
+    impl UniquePtr<Handle_Geom_TrimmedCurve> {}
+    impl UniquePtr<Handle_Geom_Surface> {}
+    impl UniquePtr<Handle_Geom_Curve> {}
+}

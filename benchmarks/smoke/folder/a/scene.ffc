@@ -1,0 +1,4 @@
+# One of two benchmarks in a folder: each starts from a new document, so this cube cannot
+# be standing when b runs.
+cube size=10,10,10 centre=0,0,0 'only'
+expect target=only volume=1000 tol=0.1%
