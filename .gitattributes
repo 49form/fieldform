@@ -1,0 +1,9 @@
+# Line endings, for the two cases where getting them wrong is silent rather than loud.
+#
+# A shell script checked out with CRLF dies as "bad interpreter: /usr/bin/env bash^M", which at
+# least says so. A list of paths read by a shell loop is the quiet one: `read` leaves the
+# carriage return on every entry, each `rm` then matches nothing, and the script reports success
+# having removed none of them. The release tooling strips `\r` defensively as well; this is what
+# makes it impossible rather than handled.
+*.sh text eol=lf
+tools/release/export-exclude.txt text eol=lf

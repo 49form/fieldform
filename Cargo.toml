@@ -38,9 +38,9 @@ edition = "2024"
 # The vendored Fidget crates inherit this table and are MPL-2.0 upstream; every first-party crate
 # sets its own license, repository and authors.
 license = "MPL-2.0"
-authors = ["The Fidget authors"]
+authors = []
 rust-version = "1.92"
-repository = "https://github.com/mkeeter/fidget"
+repository = "https://github.com/49form/fieldform"
 
 [profile.release]
 debug = true
