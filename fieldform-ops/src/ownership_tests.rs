@@ -16,7 +16,7 @@ use fieldform_scene::{
     OwnershipChange, ParamRef, Part, PartId, PatternKind, Place, Sides, Sweep,
 };
 use nalgebra::Point3;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Numbers that are the same every run, so a seed that fails fails again — given lists to pick
 /// from that are the same every run too, which is what [`Born`] keeps.
@@ -187,14 +187,25 @@ fn name_of(doc: &Document, block: BlockKey) -> Option<String> {
 /// The application's half of a settle (spec §4.2), as far as the invariants need it: it takes the
 /// changes and leaves the document as it found it.
 ///
-/// **It used to name here, and since 112 there is nothing to name.** A second reader promoted a
-/// block to a variable, which arrived nameless, so the application invented a name off the history
-/// and an undo left it standing — an allowance every state comparison below had to carry. Settling
-/// never declares now (`notebook-spec.md` §12, R5): a `Variable` is written by the person asking
-/// and by nothing else, with the name they typed in the same entry, so every name is on the
-/// history and an undo has to put every one of them back exactly.
-fn drain(doc: &mut Document) -> Vec<OwnershipChange> {
-    std::mem::take(&mut doc.pending_ownership_changes)
+/// **It names again, 2026-10-24** (R1 inverted, `notebook-spec.md` §17). A second reader promotes
+/// the block, which arrives nameless, and the application gives it one off the history
+/// (`App::drain_ownership_changes`, §4.3) — so an undo leaves that name standing, and the blocks
+/// named are kept in `invented` for the state comparisons to allow for. This is the pre-112
+/// arrangement, restored with the rule that needs it.
+fn drain(doc: &mut Document, invented: &mut HashSet<BlockKey>) -> Vec<OwnershipChange> {
+    let changes = std::mem::take(&mut doc.pending_ownership_changes);
+    for change in &changes {
+        if let OwnershipChange::BecameVariable { block: BlockKey::Node(id), .. } = change
+            && doc.ownership_nodes.get(id) == Some(&Ownership::Variable)
+        {
+            let meta = doc.node_meta.entry(*id).or_default();
+            if meta.name.is_none() {
+                meta.name = Some(format!("Variable {}", invented.len() + 1));
+                invented.insert(BlockKey::Node(*id));
+            }
+        }
+    }
+    changes
 }
 
 /// I2 and I4 over every block, and nothing left for a settle to move.
@@ -255,11 +266,11 @@ impl State {
     /// The document is back at this state: the same blocks, the same ownership maps entry for
     /// entry, and every name exactly as it was.
     ///
-    /// **Every name, with no allowance, since 112.** Spec §4.3's last paragraph exempted the name
-    /// the application gave a nameless new variable, which no undo took back; settling never
-    /// declares now, so no name is written off the history and an undo that left one standing is a
-    /// failure rather than the one permitted drift.
-    fn assert_at(&self, doc: &Document, context: &str) {
+    /// **With one allowance, back again 2026-10-24** (§17): spec §4.3's last paragraph exempts
+    /// the name the application gave a nameless block a settle declared. That name is written off
+    /// the history, so no undo takes it back, and a block in `invented` may therefore have a name
+    /// where this state had none. Every other name must be exact.
+    fn assert_at(&self, doc: &Document, invented: &HashSet<BlockKey>, context: &str) {
         let now = State::of(doc);
         assert_eq!(
             now.names.keys().collect::<Vec<_>>(),
@@ -267,7 +278,13 @@ impl State {
             "{context}: not the same blocks",
         );
         assert_eq!(now.ownership, self.ownership, "{context}: ownership not put back exactly");
-        assert_eq!(now.names, self.names, "{context}: a name was not put back");
+        for (block, name) in &self.names {
+            let found = now.names.get(block).cloned().flatten();
+            assert!(
+                found == *name || (name.is_none() && invented.contains(block)),
+                "{context}: {block:?} was {name:?} and is {found:?}",
+            );
+        }
     }
 }
 
@@ -428,6 +445,8 @@ fn every_edit_leaves_the_invariants_holding() {
         // What each entry on the history found and what it left.
         let mut done: Vec<(State, State)> = Vec::new();
         let mut undone: Vec<(State, State)> = Vec::new();
+        // The blocks the drain named off the history, which an undo therefore leaves named (§4.3).
+        let mut invented: HashSet<BlockKey> = HashSet::new();
 
         for step in 0..60 {
             let context = format!("seed {seed}, step {step}");
@@ -525,9 +544,12 @@ fn every_edit_leaves_the_invariants_holding() {
                             3 => {
                                 *seen.entry("told where its readers do not put it").or_default() +=
                                     1;
-                                let (told, settled) = match readers.is_empty() {
-                                    true => (Ownership::Nested, Ownership::Free),
-                                    false => (Ownership::Free, Ownership::Nested),
+                                let (told, settled) = match readers.len() {
+                                    0 => (Ownership::Nested, Ownership::Free),
+                                    1 => (Ownership::Free, Ownership::Nested),
+                                    // Two or more declare it (§17), whatever it was told, and the
+                                    // drain names it as the application does.
+                                    _ => (Ownership::Free, Ownership::Variable),
                                 };
                                 asked = Some((block, settled));
                                 let cmd = SetOwnership::new(block, told, name.as_deref());
@@ -541,12 +563,16 @@ fn every_edit_leaves_the_invariants_holding() {
                                 let cmd = SetOwnership::new(block, variable, Some(&name));
                                 entry = Some((false, Box::new(cmd)));
                             }
-                            1 if was == Ownership::Variable => {
-                                // **Never refused for reader count** (`notebook-spec.md` §6.6):
-                                // two readers used to refuse, there being no one block to be
-                                // inside, and the block is simply drawn in both of them now — a
-                                // shared instance (§7.3). With no readers it is a top-level row.
-                                let target = doc.put_back_target(block);
+                            // **Refused for two or more readers** (`notebook-spec.md` §6.6 as
+                            // amended 2026-10-24, §17): there is no shared instance for the block
+                            // to become, so the gesture declines and the walk takes a different
+                            // step rather than asserting a command nobody can run. With no
+                            // readers it is a top-level row; with one it goes back inside it.
+                            1 if was == Ownership::Variable
+                                && doc.put_back_target(block).is_ok() =>
+                            {
+                                let target =
+                                    doc.put_back_target(block).expect("the guard just asked");
                                 *seen.entry("put back").or_default() += 1;
                                 if readers.len() > 1 {
                                     *seen.entry("put back into every reader").or_default() += 1;
@@ -554,6 +580,12 @@ fn every_edit_leaves_the_invariants_holding() {
                                 asked = Some((block, target));
                                 let cmd = SetOwnership::new(block, target, name.as_deref());
                                 entry = Some((false, Box::new(cmd)));
+                            }
+                            1 if was == Ownership::Variable => {
+                                // Two or more read it, so it stays a variable (§6.6). Counted, so
+                                // a run that never reaches the refusal says so rather than looking
+                                // like a run that passed it.
+                                *seen.entry("put back refused for reader count").or_default() += 1;
                             }
                             _ => {
                                 // A variable's name is never cleared: the application refuses that
@@ -597,8 +629,8 @@ fn every_edit_leaves_the_invariants_holding() {
                     match stack.undo(&mut doc) {
                         Some(_) => {
                             let (was, left) = done.pop().expect("the model has the entry");
-                            drain(&mut doc);
-                            was.assert_at(&doc, &format!("{context}, after undo"));
+                            drain(&mut doc, &mut invented);
+                            was.assert_at(&doc, &invented, &format!("{context}, after undo"));
                             *seen.entry("undo").or_default() += 1;
                             // The case a settle on undo could not get right: the entry made a
                             // variable of a block that was nested before it, and a settle leaves a
@@ -621,8 +653,8 @@ fn every_edit_leaves_the_invariants_holding() {
                     match stack.redo(&mut doc) {
                         Some(_) => {
                             let (was, left) = undone.pop().expect("the model has the entry");
-                            drain(&mut doc);
-                            left.assert_at(&doc, &format!("{context}, after redo"));
+                            drain(&mut doc, &mut invented);
+                            left.assert_at(&doc, &invented, &format!("{context}, after redo"));
                             *seen.entry("redo").or_default() += 1;
                             done.push((was, left));
                         }
@@ -637,7 +669,7 @@ fn every_edit_leaves_the_invariants_holding() {
                     false => stack.execute(&mut doc, cmd),
                 };
                 result.unwrap_or_else(|e| panic!("{context}: {e}"));
-                let changes = drain(&mut doc);
+                let changes = drain(&mut doc, &mut invented);
                 if let Some(wanted) = as_one {
                     assert_eq!(
                         State::of(&doc).ownership,
@@ -654,16 +686,14 @@ fn every_edit_leaves_the_invariants_holding() {
                         );
                     }
                 }
-                // **Two of the four kinds of change went with the stored parent.** `Rehomed`
-                // reported a nested block's one parent being replaced, which nothing can be now;
-                // `BecameVariable` reported the promotion a second reader used to cause, and
-                // settling declares nothing (`notebook-spec.md` §12, R5). What the wiring those
-                // two reported makes instead is counted below, off the document rather than off a
-                // change, because it is a state and no longer news.
+                // **`Rehomed` went with the stored parent and stays gone**: it reported a
+                // nested block's one parent being replaced, which nothing can be now.
+                // `BecameVariable` is back with the rule it reports (§17).
                 for change in changes {
                     let case = match change {
                         OwnershipChange::Adopted { .. } => "adopted",
                         OwnershipChange::Released { .. } => "released",
+                        OwnershipChange::BecameVariable { .. } => "became a variable",
                     };
                     *seen.entry(case).or_default() += 1;
                 }
@@ -684,17 +714,27 @@ fn every_edit_leaves_the_invariants_holding() {
             }
             assert_invariants(&doc, &context);
 
-            // The two states the reversed rule leaves, which the invariants above hold to the new
-            // rule wherever they are reached: a block two blocks read is nested, in both of them
-            // (§7.3), and a curve two *parts* read is nested too, drawn inside the reader in each
-            // of their lists. Both were variables under the old table, named and announced.
+            // The two states the rule leaves, counted off the document so a seed that never
+            // reaches one says so: a block two blocks read is a **variable** (§7.3 as amended
+            // 2026-10-24), and so is a curve two *parts* read. Both were nested under 112's
+            // table, drawn in each reader; both were variables before it, which is where this is
+            // again. Nothing nested may have two readers at all now, which `assert_invariants`
+            // does not say and this does.
             if every_block(&doc).into_iter().any(|b| {
-                ownership_of(&doc, b) == Some(Ownership::Nested) && readers_in(&doc, b).len() > 1
+                ownership_of(&doc, b) == Some(Ownership::Variable) && readers_in(&doc, b).len() > 1
             }) {
-                *seen.entry("a shared instance, nested in every reader").or_default() += 1;
+                *seen.entry("a block two blocks read, declared").or_default() += 1;
+            }
+            for b in every_block(&doc) {
+                assert!(
+                    ownership_of(&doc, b) != Some(Ownership::Nested)
+                        || readers_in(&doc, b).len() == 1,
+                    "{context}: {b:?} is nested with {} readers (R1)",
+                    readers_in(&doc, b).len(),
+                );
             }
             if doc.curves.keys().any(|id| {
-                ownership_of(&doc, BlockKey::Curve(*id)) == Some(Ownership::Nested)
+                ownership_of(&doc, BlockKey::Curve(*id)) == Some(Ownership::Variable)
                     && doc
                         .parts
                         .values()
@@ -702,7 +742,7 @@ fn every_edit_leaves_the_invariants_holding() {
                         .count()
                         > 1
             }) {
-                *seen.entry("a curve two parts read, nested in each").or_default() += 1;
+                *seen.entry("a curve two parts read, declared").or_default() += 1;
             }
         }
     }
@@ -720,7 +760,7 @@ fn every_edit_leaves_the_invariants_holding() {
         "a drag re-pointed a curve",
         "made a variable",
         "put back",
-        "put back into every reader",
+        "put back refused for reader count",
         "renamed",
         "told where its readers do not put it",
         "a batch",
@@ -728,8 +768,9 @@ fn every_edit_leaves_the_invariants_holding() {
         "redo",
         "adopted",
         "released",
-        "a shared instance, nested in every reader",
-        "a curve two parts read, nested in each",
+        "became a variable",
+        "a block two blocks read, declared",
+        "a curve two parts read, declared",
         "a variable put back by undo",
     ] {
         let count = seen.get(case).copied().unwrap_or(0);
@@ -744,9 +785,9 @@ fn undo_restores_ownership_exactly() {
     // A nested block the person makes a variable, and undo puts it back inside — which no settle
     // could do, since a settle leaves a variable where it is.
     //
-    // **A second reader is what used to take it out of the block it was in**, by promoting it; it
-    // makes a shared instance now (`notebook-spec.md` §12, §7.3), so it is asserted here as the
-    // thing that moves nothing, and only the person's act takes the block out of its readers.
+    // **A second reader takes it out of the block it was in, by declaring it** (§7.3 as amended
+    // 2026-10-24, §17) — so it is asserted here as a move the wiring makes, beside the one the
+    // person makes, and an undo has to put each back exactly. 112 had it move nothing.
     let (mut doc, parts, _) = document(1, 0);
     let part = parts[0];
     let mut stack = CommandStack::new(64);
@@ -762,25 +803,31 @@ fn undo_restores_ownership_exactly() {
     edit(&mut doc, &mut stack, part, g);
     assert_eq!(
         doc.ownership_nodes.get(&nested),
-        Some(&Ownership::Nested),
-        "a second reader makes a shared instance, not a variable",
+        Some(&Ownership::Variable),
+        "a second reader declares it (R1 inverted)",
     );
     let mut readers = vec![shell, union];
     readers.sort();
-    assert_eq!(doc.block_readers(BlockKey::Node(nested)), readers, "drawn inside both of them");
+    assert_eq!(doc.block_readers(BlockKey::Node(nested)), readers, "and both of them read it");
     let was = OwnershipSnapshot::of(&doc);
 
+    // The person asking for what the wiring already did writes the same entry, with the name they
+    // typed: nothing moves, and the undo of it is still exact.
     let out = SetOwnership::new(BlockKey::Node(nested), Ownership::Variable, Some("Ball"));
     stack.execute(&mut doc, Box::new(out)).expect("makes it a variable");
     assert_eq!(doc.ownership_nodes.get(&nested), Some(&Ownership::Variable), "the person asked");
     stack.undo(&mut doc).expect("undoes the variable");
-    assert_eq!(doc.ownership_nodes.get(&nested), Some(&Ownership::Nested));
+    assert_eq!(doc.ownership_nodes.get(&nested), Some(&Ownership::Variable), "declared either way");
     assert_eq!(OwnershipSnapshot::of(&doc), was, "both maps, entry for entry");
     stack.redo(&mut doc).expect("redoes it");
     assert_eq!(doc.ownership_nodes.get(&nested), Some(&Ownership::Variable), "a variable again");
     stack.undo(&mut doc).expect("undoes the variable again");
     stack.undo(&mut doc).expect("undoes the second reader");
-    assert_eq!(OwnershipSnapshot::of(&doc), alone, "and the second reader leaves no entry behind");
+    assert_eq!(
+        OwnershipSnapshot::of(&doc),
+        alone,
+        "and taking the second reader away puts it back inside the one that is left",
+    );
 
     // A block deleted and undeleted comes back with the ownership it had, not one worked out again:
     // a variable the person made of a block only one other reads, which that reader would adopt.
@@ -828,7 +875,7 @@ fn undo_restores_ownership_exactly() {
     assert_eq!(doc.ownership_nodes.get(&hub), Some(&Ownership::Variable));
     assert_eq!(
         doc.put_back_target(BlockKey::Node(hub)),
-        Ownership::Nested,
+        Ok(Ownership::Nested),
         "worked out again it would be nested in the block that reads it, so this was remembered",
     );
     assert_eq!(OwnershipSnapshot::of(&doc), was);
@@ -1014,9 +1061,9 @@ fn the_curve_an_opened_loop_s_extrude_names_comes_out_by_its_v_and_goes_back() {
     stack.redo(&mut doc).expect("one redo");
     assert_eq!(rows(&doc), on_their_own, "redone, out again");
 
-    // Never refused for reader count (`notebook-spec.md` §6.6); the extrude is the one block
-    // reading it, so back inside is back inside the extrude.
-    let back = doc.put_back_target(key);
+    // One reader, so it goes back inside it; two or more would refuse (`notebook-spec.md` §6.6
+    // as amended 2026-10-24).
+    let back = doc.put_back_target(key).expect("one reader");
     assert_eq!(back, Ownership::Nested);
     assert_eq!(doc.block_readers(key), vec![extrude], "and the extrude is who reads it");
     let back = SetOwnership::new(key, back, Some(&name));

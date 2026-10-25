@@ -21,7 +21,7 @@ use std::sync::Arc;
 ///
 /// Ids arrive as hex strings — the form `CageId`'s `Display` produces — because random 64-bit
 /// values exceed `i64` and would come through JSON as negative numbers.
-fn resolve_cage(op: &str, args: &Args, doc: &Document) -> Result<CageId, OpError> {
+pub(crate) fn resolve_cage(op: &str, args: &Args, doc: &Document) -> Result<CageId, OpError> {
     match args.get("cage") {
         Some(Value::Str(s)) => CageId::from_hex(s)
             .filter(|id| doc.cages.contains_key(id))
@@ -53,6 +53,7 @@ fn resolve_cage(op: &str, args: &Args, doc: &Document) -> Result<CageId, OpError
 }
 
 pub(crate) fn register_builtins(registry: &mut OpRegistry) {
+    crate::cage_edits::register(registry);
     registry.register("cage.translate_vertices", |args, doc| {
         const OP: &str = "cage.translate_vertices";
         let cage_id = resolve_cage(OP, args, doc)?;
@@ -121,7 +122,7 @@ impl TranslateVertices {
 
 /// Shared failure for an operation whose cage is gone — possible if a script holds an id
 /// across a document change, so it is an error rather than a panic.
-fn missing_cage(op: &str, cage: CageId) -> OpError {
+pub(crate) fn missing_cage(op: &str, cage: CageId) -> OpError {
     OpError::Failed {
         op: op.to_string(),
         detail: format!("cage {cage} is no longer in the document"),
@@ -136,7 +137,7 @@ impl Command for TranslateVertices {
     fn execute(&mut self, doc: &mut Document) -> Result<(), OpError> {
         let delta = self.delta;
         let cage = doc
-            .cage_mut(self.cage)
+            .cage_mesh_mut(self.cage)
             .ok_or_else(|| missing_cage("cage.translate_vertices", self.cage))?;
 
         self.previous = self
@@ -153,7 +154,7 @@ impl Command for TranslateVertices {
 
     fn undo(&mut self, doc: &mut Document) -> Result<(), OpError> {
         let cage = doc
-            .cage_mut(self.cage)
+            .cage_mesh_mut(self.cage)
             .ok_or_else(|| missing_cage("cage.translate_vertices", self.cage))?;
         for (&v, &p) in self.vertices.iter().zip(&self.previous) {
             cage.set_vertex_position(v, p);
@@ -192,7 +193,7 @@ impl SetVertexPositions {
 
     fn apply(&self, doc: &mut Document, positions: &[Point3<f64>]) -> Result<(), OpError> {
         let cage = doc
-            .cage_mut(self.cage)
+            .cage_mesh_mut(self.cage)
             .ok_or_else(|| missing_cage("cage.set_vertex_positions", self.cage))?;
         for (&v, &p) in self.vertices.iter().zip(positions) {
             cage.set_vertex_position(v, p);
@@ -1339,6 +1340,10 @@ impl Command for Batch {
         Ok(())
     }
 
+    fn byte_size(&self) -> usize {
+        self.commands.iter().map(|c| c.byte_size()).sum()
+    }
+
     fn undo(&mut self, doc: &mut Document) -> Result<(), OpError> {
         for cmd in self.commands.iter_mut().rev() {
             cmd.undo(doc)?;
@@ -1404,14 +1409,25 @@ fn check_refinable(op: &str, cage: &fieldform_cage::Cage) -> Result<(), OpError>
 /// deriving an inverse, as `TranslateVertices` does for positions: a cage is positions and
 /// quads, about 100 KB at the guard's ceiling, and a restore that is bit-for-bit is worth far
 /// more than the memory.
+///
+/// **Redo restores a snapshot too.** It used to run `subdivide` again, which was the one cage
+/// command re-running a primitive; a redo that recomputes is a redo that can differ from what
+/// was undone, and nothing would say so. The first execute subdivides once and keeps both
+/// meshes; every execute after that is the restore.
 pub(crate) struct RefineCage {
     cage: CageId,
-    previous: Option<fieldform_cage::Cage>,
+    snapshots: Option<(fieldform_cage::MeshSnapshot, fieldform_cage::MeshSnapshot)>,
 }
 
 impl RefineCage {
     pub fn new(cage: CageId) -> Self {
-        Self { cage, previous: None }
+        Self { cage, snapshots: None }
+    }
+
+    fn put(&self, doc: &mut Document, snapshot: &fieldform_cage::MeshSnapshot) -> Result<(), OpError> {
+        let body = doc.cage_body_mut(self.cage).ok_or_else(|| missing_cage("cage.refine", self.cage))?;
+        body.set_mesh(snapshot.restore());
+        Ok(())
     }
 }
 
@@ -1421,6 +1437,9 @@ impl Command for RefineCage {
     }
 
     fn execute(&mut self, doc: &mut Document) -> Result<(), OpError> {
+        if let Some((_, after)) = &self.snapshots {
+            return self.put(doc, &after.clone());
+        }
         let current = doc
             .cage(self.cage)
             .ok_or_else(|| missing_cage("cage.refine", self.cage))?;
@@ -1431,18 +1450,23 @@ impl Command for RefineCage {
             op: "cage.refine".to_string(),
             detail: e.to_string(),
         })?;
-        self.previous = Some(current.clone());
-        doc.cages.insert(self.cage, refined);
+        let before = fieldform_cage::MeshSnapshot::of(current);
+        let after = fieldform_cage::MeshSnapshot::of(&refined);
+        doc.cages.insert(self.cage, refined.into());
+        self.snapshots = Some((before, after));
         Ok(())
     }
 
     fn undo(&mut self, doc: &mut Document) -> Result<(), OpError> {
-        let previous = self.previous.take().ok_or_else(|| OpError::Failed {
+        let (before, _) = self.snapshots.as_ref().ok_or_else(|| OpError::Failed {
             op: "cage.refine".to_string(),
             detail: "there is no earlier cage to put back".to_string(),
         })?;
-        doc.cages.insert(self.cage, previous);
-        Ok(())
+        self.put(doc, &before.clone())
+    }
+
+    fn byte_size(&self) -> usize {
+        self.snapshots.as_ref().map_or(0, |(b, a)| b.byte_size() + a.byte_size())
     }
 }
 
@@ -1894,7 +1918,7 @@ mod tests {
     /// wrongly transcribed rule agree with the right one by accident.
     fn lopsided_doc() -> (Document, CageId) {
         let (mut d, id) = doc();
-        let cage = d.cage_mut(id).unwrap();
+        let cage = d.cage_mesh_mut(id).unwrap();
         let (a, b) = (VertexId::from_index(0), VertexId::from_index(5));
         let (pa, pb) = (cage.vertex_position(a), cage.vertex_position(b));
         cage.set_vertex_position(a, pa + Vector3::new(-0.31, -0.17, 0.22));

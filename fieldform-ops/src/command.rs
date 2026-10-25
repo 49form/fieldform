@@ -33,14 +33,31 @@ pub trait Command: Send {
 
     fn execute(&mut self, doc: &mut Document) -> Result<(), OpError>;
     fn undo(&mut self, doc: &mut Document) -> Result<(), OpError>;
+
+    /// What this entry holds, in bytes, for the stack's budget. Nought for the ordinary command,
+    /// whose before-state is a few numbers; a cage edit carries two copies of the mesh and says
+    /// so, since a thousand of those is what the budget is for.
+    fn byte_size(&self) -> usize {
+        0
+    }
 }
 
 /// Undo/redo history.
+///
+/// **Two limits, and the oldest entry goes when either is hit.** The count kept a drag from
+/// filling the history with its frames; it says nothing about size, and a cage edit holds a
+/// snapshot of the mesh before and after -- about a megabyte each at the largest cage measured --
+/// so 256 of those would be half a gigabyte with nothing to say so. The byte budget is what says
+/// so.
 pub struct CommandStack {
     done: Vec<Box<dyn Command>>,
     undone: Vec<Box<dyn Command>>,
     limit: usize,
+    byte_limit: usize,
 }
+
+/// The default byte budget for the history.
+pub const DEFAULT_BYTE_LIMIT: usize = 512 << 20;
 
 impl Default for CommandStack {
     fn default() -> Self {
@@ -54,7 +71,19 @@ impl CommandStack {
             done: Vec::new(),
             undone: Vec::new(),
             limit,
+            byte_limit: DEFAULT_BYTE_LIMIT,
         }
+    }
+
+    /// The same history under another byte budget -- for a test that wants to see an entry go.
+    pub fn with_byte_limit(mut self, bytes: usize) -> Self {
+        self.byte_limit = bytes;
+        self
+    }
+
+    /// What the entries that can be undone hold between them.
+    pub fn bytes_held(&self) -> usize {
+        self.done.iter().map(|c| c.byte_size()).sum()
     }
 
     /// Runs a command and records it for undo.
@@ -66,6 +95,11 @@ impl CommandStack {
         self.undone.clear();
         self.done.push(cmd);
         if self.done.len() > self.limit {
+            self.done.remove(0);
+        }
+        // The newest entry always stays, however large: a budget that dropped the edit just made
+        // would be an undo that does nothing, which is worse than a budget exceeded once.
+        while self.done.len() > 1 && self.bytes_held() > self.byte_limit {
             self.done.remove(0);
         }
         Ok(())

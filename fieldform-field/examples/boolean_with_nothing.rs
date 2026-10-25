@@ -198,7 +198,7 @@ fn blended_to(radius: f64, out: f64) -> GraphField {
         b: point.into(),
         // The only continuity there is, so "set it to G1" is the same instruction as "make it a
         // blend" — which is what the panel now does when a point is picked.
-        fillet: fieldform_scene::Fillet { radius: lit(radius), continuity: Continuity::G1 },
+        fillet: fieldform_scene::Fillet { radius: lit(radius), continuity: Continuity::G1, second: None },
     });
     GraphField::compile_graph(&Document::new(), &graph, 1e-4).expect("compiles")
 }

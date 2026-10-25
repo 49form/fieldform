@@ -208,7 +208,7 @@ impl TracedView {
             view.fov_deg,
             width as f64 / height as f64,
         );
-        camera.section = view.section;
+        camera.sections = fieldform_gpu::Sections::of(&view.sections);
         // The app's sphere is the union of every bounded body's extent, so it encloses all of
         // them exactly when there is no unbounded one -- which the rebuild checked.
         camera.start_at_scene = self.scene_bounded;

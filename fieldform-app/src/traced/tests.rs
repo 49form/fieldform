@@ -206,7 +206,7 @@
     #[test]
     fn a_tolerance_that_asks_for_another_cage_level_files_the_bake_under_another_key() {
         let mut document = fieldform_scene::Document::new();
-        let cube = Cage::cube_of(1000.0);
+        let cube = fieldform_cage::Cage::cube_of(1000.0);
         let leaf = fieldform_gpu::BakedLeaf::Cage(document.add_cage(cube.clone()));
         let bounds = (Point3::new(-600.0, -600.0, -600.0), Point3::new(600.0, 600.0, 600.0));
         let filed =
@@ -665,7 +665,7 @@
             scene: (Point3::new(0.0, 0.0, 10.0), 80.0),
             fov_deg: 45.0,
             orthographic: false,
-            section: None,
+            sections: Vec::new(),
             lookup,
             selected: None,
             material: Material::default(),
@@ -699,7 +699,7 @@
             scene: (Point3::new(0.0, middle_y, 10.0), reach),
             ..base()
         };
-        let cut = |normal, offset| View { section: Some((normal, offset)), ..base() };
+        let cut = |normal, offset| View { sections: vec![(normal, offset)], ..base() };
         let picked = |body| View { selected: Some(body), ..base() };
         let finish = |roughness| View {
             material: Material { roughness, ..Material::default() },
@@ -718,7 +718,7 @@
             scene: _,
             fov_deg: _,
             orthographic: _,
-            section: _,
+            sections: _,
             lookup: _,
             selected: _,
             material: _,
@@ -742,6 +742,7 @@
             ("a section", base(), cut(x, 0.0)),
             ("where the section cuts", cut(x, 0.0), cut(x, 2.0)),
             ("which way the section faces", cut(x, 0.0), cut(flipped, 0.0)),
+            ("a second section", cut(x, 0.0), View { sections: vec![(x, 0.0), (flipped, 5.0)], ..base() }),
             ("a body selected", base(), picked(0)),
             ("which body is selected", picked(0), picked(1)),
             ("the material", finish(0.65), finish(0.3)),
@@ -1131,7 +1132,7 @@
             ShadingResources::new(&gpu.device, &gpu.queue, &maps)
                 .expect("the lighting pass builds on a device the adapter has just given")
         };
-        let doc = fieldform_scene::Document::with_cage(Cage::cube_of(10.0));
+        let doc = fieldform_scene::Document::with_cage(fieldform_cage::Cage::cube_of(10.0));
         let cage = *doc.cages.keys().next().expect("with_cage inserts one");
 
         // The lighting pass through the same constructor a frame calls, and the rest of what a

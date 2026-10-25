@@ -39,7 +39,7 @@ fn ring(radius: f64) -> Graph {
         count: ParamRef::Literal(6.0),
         kind: PatternKind::Radial { frame: Frame::at_along(Axis::Z, [lit(0.0); 3]) },
         join: true,
-        fillet: Fillet { radius: lit(radius), continuity: Continuity::G1 },
+        fillet: Fillet { radius: lit(radius), continuity: Continuity::G1, second: None },
     });
     graph
 }

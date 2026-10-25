@@ -37,7 +37,7 @@ fn main() {
     //
     // Left unreferenced rather than added to the graph: it is here to satisfy that check, not
     // to be part of the demo, and it draws nothing in field mode.
-    doc.cages.insert(CageId::new(), fieldform_cage::Cage::cube_of(50.0));
+    doc.cages.insert(CageId::new(), fieldform_cage::Cage::cube_of(50.0).into());
 
     // The three numbers the demo is driven by. Named rather than literal so the panel offers
     // them by name and a change costs a buffer write.

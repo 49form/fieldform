@@ -33,7 +33,7 @@ pub use codegen::{
     generate_with_run_floor,
     BakedLeaf,
     CodegenError, CurveUse,
-    ShaderProgram, PRELUDE,
+    ShaderProgram, PRELUDE, bake_copy_names, prelude,
 };
 // `Environment`, `CubeLevel`, `Panel`, `SkipGridReading` and `Light` are named by nothing
 // outside, but another crate is handed each of them — `EnvironmentMaps::bake` takes an
@@ -47,7 +47,7 @@ pub use environment::{
 pub use render::{
     BuildCost,
     bake_resolution_limit, required_limits, timing_features, Camera, Hit, Occlusion,
-    RenderError, Renderer, SkipGridReading, TileMaskReading,
+    RenderError, Renderer, Sections, SkipGridReading, TileMaskReading, MAX_SECTIONS,
 };
 pub use shading::{
     halton_jitter, DisplayImage, Draft, Light, Look, ShadingResources, SubmissionCost,

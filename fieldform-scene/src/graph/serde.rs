@@ -275,6 +275,10 @@ fn rim_fields<E: serde::ser::Error>(rims: &Rims) -> Result<Vec<(&'static str, Va
     if rims.at != RimEnds::Both {
         fields.push(("rims_at", json(&rims.at)?));
     }
+    // A chamfer's second leg, 3.22's, only where there is one.
+    if let Some(second) = &rims.second {
+        fields.push(("rims_second", json(second)?));
+    }
     Ok(fields)
 }
 
@@ -299,6 +303,10 @@ fn read_rims<E: serde::de::Error>(
             at: match object.get("rims_at") {
                 Some(v) => read(kind, "rims_at", v)?,
                 None => RimEnds::Both,
+            },
+            second: match object.get("rims_second") {
+                Some(v) => Some(read(kind, "rims_second", v)?),
+                None => None,
             },
         }),
     }
@@ -334,6 +342,7 @@ fn read_edge<E: serde::de::Error>(
                 Some(v) => read(kind, "edge_continuity", v)?,
                 None => Continuity::G1,
             },
+            second: None,
         }),
     }
 }
@@ -763,6 +772,9 @@ impl Serialize for Node {
                     ("continuity", json(&fillet.continuity)?),
                 ]
                 .into_iter()
+                // A chamfer's second leg, 3.22's, written only where there is one: every blend
+                // written before it is written as it was.
+                .chain(fillet.second.as_ref().map(|s| json(s).map(|v| ("second", v))).transpose()?)
                 .chain(slot_field("a", a)?)
                 .chain(slot_field("b", b)?),
             ),
@@ -1057,14 +1069,14 @@ impl<'de> Deserialize<'de> for Node {
             // `rims` and `rims_continuity` are 3.17's, on all three profile solids
             // (`round-chamfer-spec.md` §4); a build before them meets an unknown field and keeps
             // the node rather than drawing it with a hard rim it was not.
-            "loft" => &[KIND, "sections", "spine", "smooth", "rims", "rims_continuity", "rims_at"],
+            "loft" => &[KIND, "sections", "spine", "smooth", "rims", "rims_continuity", "rims_at", "rims_second"],
             "sweep" if object.contains_key("wall") => &[
                 KIND, "wall", "thickness", "side", "ends", "spine", "section", "taper_scale",
-                "taper_draft", "twist", "law", "extent", "corners", "rims", "rims_continuity", "rims_at",
+                "taper_draft", "twist", "law", "extent", "corners", "rims", "rims_continuity", "rims_at", "rims_second",
             ],
             "sweep" => &[
                 KIND, "profile", "spine", "section", "taper_scale", "taper_draft", "twist", "law",
-                "extent", "corners", "rims", "rims_continuity", "rims_at",
+                "extent", "corners", "rims", "rims_continuity", "rims_at", "rims_second",
             ],
             // "frame" is listed beside "sweep" for the same reason a mirror's old spellings
             // are: an extrude used to carry one, documents written that way exist, and they
@@ -1084,11 +1096,11 @@ impl<'de> Deserialize<'de> for Node {
             // `height_2` says two things about its sides, and is refused below.
             "extrude" if object.contains_key("wall") => &[
                 KIND, "wall", "thickness", "side", "ends", "sweep", "start", "height", "draft",
-                "symmetric", "height_2", "draft_2", "corners", "rims", "rims_continuity", "rims_at",
+                "symmetric", "height_2", "draft_2", "corners", "rims", "rims_continuity", "rims_at", "rims_second",
             ],
             "extrude" => &[
                 KIND, "profile", "sweep", "start", "height", "draft", "symmetric", "height_2",
-                "draft_2", "corners", "frame", "rims", "rims_continuity", "rims_at",
+                "draft_2", "corners", "frame", "rims", "rims_continuity", "rims_at", "rims_second",
             ],
             // `angle`, `symmetric` and `angle_2` are format 3.8's: a partial revolve, and which
             // way about the profile's half-plane it turns (`extrude-revolve-options-spec.md`
@@ -1097,8 +1109,9 @@ impl<'de> Deserialize<'de> for Node {
                 &[KIND, "wall", "thickness", "side", "ends", "frame", "angle", "symmetric", "angle_2"]
             }
             // `rims`, `rims_continuity` and `rims_at` are 3.21's on a revolve.
-            "revolve" => &[KIND, "profile", "frame", "angle", "symmetric", "angle_2", "rims", "rims_continuity", "rims_at"],
-            "blend" => &[KIND, "op", "a", "b", "radius", "continuity"],
+            "revolve" => &[KIND, "profile", "frame", "angle", "symmetric", "angle_2", "rims", "rims_continuity", "rims_at", "rims_second"],
+            // `second` is 3.22's: a chamfer's second leg.
+            "blend" => &[KIND, "op", "a", "b", "radius", "continuity", "second"],
             "boolean" => &[KIND, "op", "inputs"],
             "morph" => &[KIND, "a", "b", "t"],
             "transform" => &[KIND, "input", "translation", "rotation", "scale", "about"],
@@ -1508,6 +1521,10 @@ impl<'de> Deserialize<'de> for Node {
                 fillet: Fillet {
                     radius: read(kind, "radius", field("radius")?)?,
                     continuity: read(kind, "continuity", field("continuity")?)?,
+                    second: match object.get("second") {
+                        Some(v) => Some(read(kind, "second", v)?),
+                        None => None,
+                    },
                 },
             },
             // The axis and its origin default when absent, because a twist written before
@@ -1547,6 +1564,7 @@ impl<'de> Deserialize<'de> for Node {
                             Some(v) => read(kind, "continuity", v)?,
                             None => Continuity::G1,
                         },
+                        second: None,
                     },
                     // Each absent option is what the pattern did before it had any, so an older
                     // document keeps meaning what it meant — the reasoning `join` is read by.

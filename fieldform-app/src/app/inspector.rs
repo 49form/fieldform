@@ -32,7 +32,7 @@ impl App {
         let mut new = if shaped.is_plainly_hard() {
             Rims::hard()
         } else {
-            Rims { radius: shaped.radius, continuity: shaped.continuity, at: rims.at }
+            Rims { radius: shaped.radius, continuity: shaped.continuity, at: rims.at, second: shaped.second }
         };
         if !new.is_plainly_hard() {
             // **Which ends**, asked by the owner (2026-10-17) after finding both ends rounded
@@ -67,6 +67,60 @@ impl App {
                 "How far back from the end the side wall starts to turn, and how far in from \
                  the side the end does. Nought is a hard rim.",
             );
+            // **A chamfer's two legs** (`round-chamfer-spec.md` §9.2): how far back from the
+            // end the side is cut, and how far in from the side the end is, where the two
+            // differ. The second is kept through a switch of shape and read only on a chamfer.
+            new.second = self.second_leg_rows(
+                ui,
+                new.continuity,
+                new.radius,
+                new.second,
+                "Into the end:",
+                "How far in from the side wall each end is cut. The number above is how far back \
+                 from the end the side wall is.",
+            );
+        }
+        new
+    }
+
+    /// The legs row a chamfer has -- *Equal* or *Two* -- and, with two, the second leg's number
+    /// under it: one editor for a blend's and a rim's (D9). Nothing for any other shape, whose
+    /// second leg is kept but not read.
+    pub(crate) fn second_leg_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        continuity: fieldform_scene::Continuity,
+        first: fieldform_scene::ParamRef,
+        second: Option<fieldform_scene::ParamRef>,
+        label: &str,
+        hover: &str,
+    ) -> Option<fieldform_scene::ParamRef> {
+        if continuity != fieldform_scene::Continuity::Chamfer {
+            return second;
+        }
+        let mut new = second;
+        ui.horizontal(|ui| {
+            row_label(ui, "Legs:");
+            if ui
+                .add(mode_button(new.is_none(), "Equal"))
+                .on_hover_text("The bevel reaches as far along one face as the other.")
+                .clicked()
+            {
+                new = None;
+            }
+            if ui
+                .add(mode_button(new.is_some(), "Two"))
+                .on_hover_text("The bevel reaches a different distance along each face.")
+                .clicked()
+                && new.is_none()
+            {
+                // Started equal, so switching moves nothing until the number is typed.
+                new = Some(fieldform_scene::ParamRef::Literal(self.resolve(first)));
+            }
+        });
+        if let Some(leg) = new {
+            let (edited, _changed) = self.parametric_field(ui, label, leg, 0.1, FROM_NOUGHT_MM, hover);
+            new = Some(edited);
         }
         new
     }
@@ -1095,6 +1149,9 @@ impl App {
                     }
                     self.block_row(ui, row, nesting, None);
                 }
+                // The view's own rows, after the part's: not blocks, and drawn by their own hand
+                // because they are in no `Block` list. See [`Section`] for why they are here at all.
+                self.section_rows(ui);
 
                 // The empty space under the rows deselects, the same as empty space in the
                 // viewport does. Without it the only way to stop pointing at something was to
@@ -1151,6 +1208,10 @@ impl App {
                         self.selected_curve = None;
                         self.clear_point_selection();
                         self.selection.clear();
+                        // The sections' rows are rows, so "none of this" drops their claim on
+                        // the handles too. The cut itself stays: a row's switch is the only
+                        // thing that turns it off.
+                        self.section_selected = None;
                     }
                 }
 

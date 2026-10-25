@@ -58,7 +58,7 @@ fn main() {
     // --- the same field the app composes, built the same way ---
     let mut doc = Document::new();
     let cage_id = CageId::new();
-    doc.cages.insert(cage_id, Cage::cube_of(CAGE_SIZE_MM));
+    doc.cages.insert(cage_id, Cage::cube_of(CAGE_SIZE_MM).into());
     let mut graph = Graph::from_cage(cage_id);
 
     if subtract {
@@ -91,7 +91,7 @@ fn main() {
         });
     }
 
-    let bounds = cage_bounds(&doc.cages[&cage_id]);
+    let bounds = cage_bounds(doc.cage(cage_id).unwrap());
     let extent = bounds.1 - bounds.0;
     let cell = extent.x.max(extent.y).max(extent.z) / mesh_resolution as f64;
     let tolerance = (cell * 0.5).max(1e-4);

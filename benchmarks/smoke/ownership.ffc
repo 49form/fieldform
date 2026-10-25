@@ -38,13 +38,13 @@ boolean -u in=ball,box 'joined'
 expect target=joined volume=66094.40 tol=0.5%
 saveas file=target/ownership-01-union.fform
 
-# --- item 5: a shell of the box is a second reader. **Reversed by item 112** (`notebook-spec.md`
-# §7.3, ruling 1): the box used to be promoted to a variable here, with the log saying "box is now
-# a variable -- joined and outer both use it". Settling never declares now, so the box stays nested
-# and is drawn inside *both* readers -- one block in two places, a shared instance -- and nothing
-# is said at all, because the line that said it is gone with the promotion. The union is untouched
-# either way, which is what the expect holds. The row is the read-back:
-# `history/ownership.json` says `"nested"` where a 3.15 file said `{"inside": "<id>"}`.
+# --- item 5: a shell of the box is a second reader. **Reversed back, 2026-10-24**
+# (`notebook-spec.md` §17): item 112 had the box stay nested and be drawn in both readers -- a
+# shared instance -- and the owner reversed that after driving it, so a second reader declares the
+# box again and the log says "box is now a variable -- joined and outer both use it". The union is
+# untouched either way, which is what the expect holds. The row is the read-back:
+# `history/ownership.json` says `"variable"` for the box, and the name it was given is in
+# `history/node-meta.json`.
 shell target=box thickness=2 'outer'
 expect target=joined volume=66094.40 tol=0.5%
 saveas file=target/ownership-05-shell.fform
@@ -55,10 +55,11 @@ undo
 undo
 saveas file=target/ownership-07-unshelled.fform
 
-# --- item 9: the ball, named and inside the union, typed into a second boolean. **Reversed by item
-# 112 the same way**: the log used to say it is a variable now; it is a shared instance, drawn in
-# both booleans, and the log says nothing. An undo still takes the second reader away, and the ball
-# is then drawn in the first alone. Disjoint, so 4188.79 + 1000.
+# --- item 9: the ball, named and inside the union, typed into a second boolean. **Reversed back
+# the same way, 2026-10-24**: the log says it is a variable now, naming both booleans. An undo
+# takes the second reader away; the ball stays a variable, since a declaration stands until *Put
+# back inside* takes it back (§6.6), and with one reader left that gesture is offered again.
+# Disjoint, so 4188.79 + 1000.
 cube size=10,10,10 centre=60,0,0 'far'
 boolean -u in=ball,far 'second'
 expect target=second volume=5188.79 tol=0.5%
@@ -71,12 +72,12 @@ saveas file=target/ownership-09-undone.fform
 # --- items 4, 6 and 7, typed: the V on a cube nobody named, found by the label its row shows.
 # `variable` gives it a row of its own and the name `Cube`, the union unchanged.
 #
-# **The refusal in the middle of this is gone, item 112 §6.6.** With a shell added as a second
-# reader, `inline` used to be refused, naming the union and the shell, because there was no single
-# block for the row to go back inside. A block goes back inside *every* reader now, so the first
-# `inline 'Cube'` below **succeeds** where it used to warn, and says "is part of joined and outer
-# again". It is no longer one of this file's deliberate refusals; the log is the read-back, and a
-# `!!` on that line now is a regression rather than the point.
+# **The refusal in the middle of this is back, 2026-10-24** (`notebook-spec.md` §6.6, §17). With
+# a shell added as a second reader, `inline` is refused again, naming the union and the shell:
+# there is no shared instance for the block to become, and a settle would declare it straight back.
+# So the first `inline 'Cube'` below **warns**, deliberately, and the second -- after the two undos
+# leave one reader -- succeeds and says "is part of joined again". Item 112 had the first one
+# succeed; between then and now it was not a refusal at all.
 new
 sphere radius=10 centre=20,0,0 'ball'
 cube size=40,40,40 centre=0,0,0
@@ -86,7 +87,7 @@ expect target=joined volume=66094.40 tol=0.5%
 saveas file=target/ownership-04-variable.fform
 shell target=Cube thickness=2 'outer'
 inline 'Cube'
-saveas file=target/ownership-06-shared.fform
+saveas file=target/ownership-06-refused.fform
 undo
 undo
 inline 'Cube'

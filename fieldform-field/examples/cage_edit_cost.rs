@@ -25,7 +25,7 @@ fn main() {
         // Moving a vertex: the leaf is a different leaf, so it is rebuilt.
         let v = doc.cage(id).unwrap().vertex_ids().next().unwrap();
         let was = doc.cage(id).unwrap().vertex_position(v);
-        doc.cage_mut(id).unwrap().set_vertex_position(v, was + nalgebra::Vector3::new(1.0, 1.0, 1.0));
+        doc.cage_mesh_mut(id).unwrap().set_vertex_position(v, was + nalgebra::Vector3::new(1.0, 1.0, 1.0));
         let t = std::time::Instant::now();
         let _ = GraphField::compile_cached(&doc, &graph, tolerance, &mut cache).expect("compiles");
         let after_move = t.elapsed().as_secs_f64();

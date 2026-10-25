@@ -89,7 +89,7 @@
                 count: fieldform_scene::ParamRef::Literal(6.0),
                 kind,
                 join: true,
-                fillet: Fillet { radius: lit(k), continuity: fieldform_scene::Continuity::G1 },
+                fillet: Fillet { radius: lit(k), continuity: fieldform_scene::Continuity::G1, second: None },
             });
             (graph, reach)
         };
@@ -115,7 +115,7 @@
                 op: fieldform_scene::BooleanOp::Union,
                 a: a.into(),
                 b: b.into(),
-                fillet: Fillet { radius: lit(k), continuity: fieldform_scene::Continuity::G1 },
+                fillet: Fillet { radius: lit(k), continuity: fieldform_scene::Continuity::G1, second: None },
             });
             graph
         };
@@ -1184,7 +1184,7 @@
                 op: fieldform_scene::BooleanOp::Union,
                 a: ball.into(),
                 b: point.into(),
-                fillet: Fillet { radius: lit(blend), continuity: Continuity::G1 },
+                fillet: Fillet { radius: lit(blend), continuity: Continuity::G1, second: None },
             });
             GraphField::compile_graph(&Document::new(), &graph, 1e-4).expect("compiles")
         };
@@ -1408,7 +1408,7 @@
 
         let cage = Cage::cube();
         let cage_id = fieldform_scene::CageId::new();
-        doc.cages.insert(cage_id, cage);
+        doc.cages.insert(cage_id, cage.into());
 
         let curve_id = CurveId::new();
         let curve = Curve::polyline(
@@ -1510,7 +1510,7 @@
             op: BooleanOp::Union,
             a: cage_node.into(),
             b: pipe.into(),
-            fillet: Fillet { radius: ParamRef::Literal(4.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: ParamRef::Literal(4.0), continuity: Continuity::G1, second: None },
         });
 
         let field = GraphField::compile(&doc, &part_with(graph), 0.01).unwrap();
@@ -1783,6 +1783,7 @@
             fillet: fieldform_scene::Fillet {
                 radius: ParamRef::Literal(3.0),
                 continuity: fieldform_scene::Continuity::Chamfer,
+                second: None,
             },
         });
         let doc = Document::new();
@@ -1932,7 +1933,7 @@
             op: BooleanOp::Union,
             a: cage_node.into(),
             b: pipe.into(),
-            fillet: Fillet { radius: ParamRef::Literal(12.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: ParamRef::Literal(12.0), continuity: Continuity::G1, second: None },
         });
         let field = GraphField::compile(&doc, &part_with(graph), 0.01).unwrap();
 
@@ -1976,7 +1977,7 @@
             op: BooleanOp::Union,
             a: cage_node.into(),
             b: pipe.into(),
-            fillet: Fillet { radius: ParamRef::Literal(4.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: ParamRef::Literal(4.0), continuity: Continuity::G1, second: None },
         });
 
         let field = GraphField::compile(&doc, &part_with(graph), 0.01).unwrap();
@@ -2286,10 +2287,10 @@
     fn two_cages() -> (Document, fieldform_scene::CageId, fieldform_scene::CageId) {
         let mut doc = Document::new();
         let a_id = fieldform_scene::CageId::new();
-        doc.cages.insert(a_id, fieldform_cage::Cage::cube_of(4.0));
+        doc.cages.insert(a_id, fieldform_cage::Cage::cube_of(4.0).into());
         let b_id = fieldform_scene::CageId::new();
         doc.cages
-            .insert(b_id, cube_at(4.0, Point3::new(3.0, 0.0, 0.0)));
+            .insert(b_id, cube_at(4.0, Point3::new(3.0, 0.0, 0.0)).into());
         (doc, a_id, b_id)
     }
 
@@ -2304,9 +2305,9 @@
         let (doc, a_id, b_id) = two_cages();
         let tolerance = 0.5;
         let standalone_a =
-            CageField::from_cage(&doc.cages[&a_id], levels_for_tolerance(4.0, tolerance)).unwrap();
+            CageField::from_cage(doc.cage(a_id).unwrap(), levels_for_tolerance(4.0, tolerance)).unwrap();
         let standalone_b =
-            CageField::from_cage(&doc.cages[&b_id], levels_for_tolerance(4.0, tolerance)).unwrap();
+            CageField::from_cage(doc.cage(b_id).unwrap(), levels_for_tolerance(4.0, tolerance)).unwrap();
 
         let mut graph = Graph::from_cage(a_id);
         let a_node = graph.roots()[0];
@@ -2340,9 +2341,9 @@
         let (doc, a_id, b_id) = two_cages();
         let tolerance = 0.5;
         let standalone_a =
-            CageField::from_cage(&doc.cages[&a_id], levels_for_tolerance(4.0, tolerance)).unwrap();
+            CageField::from_cage(doc.cage(a_id).unwrap(), levels_for_tolerance(4.0, tolerance)).unwrap();
         let standalone_b =
-            CageField::from_cage(&doc.cages[&b_id], levels_for_tolerance(4.0, tolerance)).unwrap();
+            CageField::from_cage(doc.cage(b_id).unwrap(), levels_for_tolerance(4.0, tolerance)).unwrap();
 
         let mut graph = Graph::from_cage(a_id);
         let a_node = graph.roots()[0];
@@ -2377,7 +2378,7 @@
         let (doc, a_id, b_id) = two_cages();
         let tolerance = 0.5;
         let standalone_a =
-            CageField::from_cage(&doc.cages[&a_id], levels_for_tolerance(4.0, tolerance)).unwrap();
+            CageField::from_cage(doc.cage(a_id).unwrap(), levels_for_tolerance(4.0, tolerance)).unwrap();
 
         let mut graph = Graph::from_cage(a_id);
         let a_node = graph.roots()[0];
@@ -2402,7 +2403,7 @@
         let (doc, a_id, b_id) = two_cages();
         let tolerance = 0.5;
         let standalone_b =
-            CageField::from_cage(&doc.cages[&b_id], levels_for_tolerance(4.0, tolerance)).unwrap();
+            CageField::from_cage(doc.cage(b_id).unwrap(), levels_for_tolerance(4.0, tolerance)).unwrap();
 
         let mut graph = Graph::from_cage(a_id);
         let a_node = graph.roots()[0];
@@ -2436,7 +2437,7 @@
             op: BooleanOp::Union,
             a: a_node.into(),
             b: b_node.into(),
-            fillet: Fillet { radius: ParamRef::Literal(1.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: ParamRef::Literal(1.0), continuity: Continuity::G1, second: None },
         });
         let field = GraphField::compile(&doc, &part_with(graph), 0.5).unwrap();
 
@@ -2638,7 +2639,7 @@
             op: BooleanOp::Union,
             a: grown.into(),
             b: b.into(),
-            fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1 },
+            fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         assert!(GraphField::compile(&doc, &part_with(graph), 0.05).is_ok());
     }
@@ -3885,7 +3886,7 @@
                 op: BooleanOp::Union,
                 a: solid.into(),
                 b: ball.into(),
-                fillet: Fillet { radius: lit(radius), continuity: fieldform_scene::Continuity::G1 },
+                fillet: Fillet { radius: lit(radius), continuity: fieldform_scene::Continuity::G1, second: None },
             });
 
             // The band has to reach the fillet's radius either side of the boundary, whatever
@@ -4451,7 +4452,7 @@
                 op: fieldform_scene::BooleanOp::Union,
                 a: sphere.into(),
                 b: lattice.into(),
-                fillet: Fillet { radius: lit(1.0), continuity: fieldform_scene::Continuity::G1 },
+                fillet: Fillet { radius: lit(1.0), continuity: fieldform_scene::Continuity::G1, second: None },
             });
             g
         };
@@ -4594,7 +4595,7 @@
                     centre: fieldform_scene::Place::At([ParamRef::Literal(0.0); 3]),
                     size: [ParamRef::Literal(10.0); 3],
                     turn: fieldform_scene::no_turn(),
-                    edge: fieldform_scene::Fillet { radius: ParamRef::Literal(1.0), continuity: fieldform_scene::Continuity::G1 },
+                    edge: fieldform_scene::Fillet { radius: ParamRef::Literal(1.0), continuity: fieldform_scene::Continuity::G1, second: None },
                 })
             }),
             ("box at G2", |g| {
@@ -4602,7 +4603,7 @@
                     centre: fieldform_scene::Place::At([ParamRef::Literal(0.0); 3]),
                     size: [ParamRef::Literal(10.0); 3],
                     turn: fieldform_scene::no_turn(),
-                    edge: fieldform_scene::Fillet { radius: ParamRef::Literal(1.0), continuity: fieldform_scene::Continuity::G2 },
+                    edge: fieldform_scene::Fillet { radius: ParamRef::Literal(1.0), continuity: fieldform_scene::Continuity::G2, second: None },
                 })
             }),
             ("cylinder chamfered", |g| {
@@ -4612,7 +4613,7 @@
                         fieldform_scene::Place::At([ParamRef::Literal(0.0), ParamRef::Literal(0.0), ParamRef::Literal(10.0)]),
                     ),
                     radius: ParamRef::Literal(4.0),
-                    edge: fieldform_scene::Fillet { radius: ParamRef::Literal(1.0), continuity: fieldform_scene::Continuity::Chamfer },
+                    edge: fieldform_scene::Fillet { radius: ParamRef::Literal(1.0), continuity: fieldform_scene::Continuity::Chamfer, second: None },
                 })
             }),
             ("cylinder chamfered back nought", |g| {
@@ -4622,7 +4623,7 @@
                         fieldform_scene::Place::At([ParamRef::Literal(0.0), ParamRef::Literal(0.0), ParamRef::Literal(10.0)]),
                     ),
                     radius: ParamRef::Literal(4.0),
-                    edge: fieldform_scene::Fillet { radius: ParamRef::Literal(0.0), continuity: fieldform_scene::Continuity::Chamfer },
+                    edge: fieldform_scene::Fillet { radius: ParamRef::Literal(0.0), continuity: fieldform_scene::Continuity::Chamfer, second: None },
                 })
             }),
             ("boolean of two spheres", |g| {
@@ -4745,7 +4746,7 @@
                 op: BooleanOp::Union,
                 a: operand.into(),
                 b: other.into(),
-                fillet: Fillet { radius: lit(0.5), continuity: fieldform_scene::Continuity::G1 },
+                fillet: Fillet { radius: lit(0.5), continuity: fieldform_scene::Continuity::G1, second: None },
             });
             // And the blend over it is reported as approximate exactly when the operand is
             // not a true distance. That is the consequence the answer now has, so it is what
@@ -4782,7 +4783,7 @@
         doc.curves.insert(profile, curve);
 
         let lean = 32f64.to_radians();
-        let rounded = Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1 };
+        let rounded = Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1, second: None };
         for (name, sweep, draft, rims) in [
             ("extruded straight", fieldform_scene::Sweep::Normal, 0.0, Fillet::hard()),
             ("extruded with a draft", fieldform_scene::Sweep::Normal, 15.0, Fillet::hard()),
@@ -4808,7 +4809,7 @@
                 "extruded straight with a rim of nought that names a shape",
                 fieldform_scene::Sweep::Normal,
                 0.0,
-                Fillet { radius: lit(0.0), continuity: fieldform_scene::Continuity::Chamfer },
+                Fillet { radius: lit(0.0), continuity: fieldform_scene::Continuity::Chamfer, second: None },
             ),
         ] {
             let mut graph = Graph::empty();
@@ -4839,7 +4840,7 @@
                 op: BooleanOp::Union,
                 a: operand.into(),
                 b: other.into(),
-                fillet: Fillet { radius: lit(0.5), continuity: fieldform_scene::Continuity::G1 },
+                fillet: Fillet { radius: lit(0.5), continuity: fieldform_scene::Continuity::G1, second: None },
             });
             let flagged = !approximate_blends(&doc, &graph).is_empty();
             assert_eq!(
@@ -4959,7 +4960,7 @@
                 op: BooleanOp::Union,
                 a,
                 b,
-                fillet: Fillet { radius: lit(1.0), continuity: fieldform_scene::Continuity::G1 },
+                fillet: Fillet { radius: lit(1.0), continuity: fieldform_scene::Continuity::G1, second: None },
             });
             assert!(
                 !carries_true_distance(&doc, &graph, blend),
@@ -4980,7 +4981,7 @@
             op: BooleanOp::Union,
             a: wired.into(),
             b: fieldform_scene::Operand::empty(),
-            fillet: Fillet { radius: lit(0.0), continuity: fieldform_scene::Continuity::G1 },
+            fillet: Fillet { radius: lit(0.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         assert!(carries_true_distance(&doc, &graph, wired), "the wired operand is a distance");
         assert!(
@@ -5952,7 +5953,7 @@
                     op: BooleanOp::Union,
                     a: pulled.into(),
                     b: ball.into(),
-                    fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1 },
+                    fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1, second: None },
                 });
             } else {
                 graph.add(Node::Boolean { op: BooleanOp::Union, inputs: vec![pulled.into(), ball.into()] });
@@ -6130,7 +6131,7 @@
                     op: BooleanOp::Union,
                     a: twist.into(),
                     b: ball.into(),
-                    fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1 },
+                    fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1, second: None },
                 });
             } else {
                 graph.add(Node::Boolean {
@@ -6583,7 +6584,7 @@
             op: BooleanOp::Union,
             a: mirror.into(),
             b: ball.into(),
-            fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1 },
+            fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         assert!(
             crate::approximate_blends(&doc, &graph).contains(&blend),
@@ -6835,7 +6836,7 @@
             op: BooleanOp::Union,
             a: mirrored.into(),
             b: b.into(),
-            fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1 },
+            fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         assert!(GraphField::compile(&doc, &part_with(graph), 0.05).is_ok());
     }
@@ -7135,7 +7136,7 @@
             op: BooleanOp::Union,
             a: walled.into(),
             b: ball.into(),
-            fillet: Fillet { radius: lit(3.0), continuity: fieldform_scene::Continuity::G1 },
+            fillet: Fillet { radius: lit(3.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         assert!(GraphField::compile(&doc, &part_with(graph), 0.05).is_ok());
     }
@@ -7289,7 +7290,7 @@
             op: BooleanOp::Union,
             a: varying.into(),
             b: other.into(),
-            fillet: Fillet { radius: lit(3.0), continuity: fieldform_scene::Continuity::G1 },
+            fillet: Fillet { radius: lit(3.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         // Allowed, and reported. A driven offset's gradient is not unit, so the fillet is
         // approximate -- which the panel now says rather than the compiler forbidding it.
@@ -7319,7 +7320,7 @@
             op: BooleanOp::Union,
             a: grown.into(),
             b: other.into(),
-            fillet: Fillet { radius: lit(3.0), continuity: fieldform_scene::Continuity::G1 },
+            fillet: Fillet { radius: lit(3.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         assert!(GraphField::compile(&doc, &part_with(graph), 0.05).is_ok());
     }
@@ -7507,7 +7508,7 @@
             op: BooleanOp::Union,
             a: a.into(),
             b: b.into(),
-            fillet: Fillet { radius: ParamRef::Field(ramp), continuity },
+            fillet: Fillet { radius: ParamRef::Field(ramp), continuity, second: None },
         });
         graph
     }
@@ -7520,7 +7521,7 @@
         for continuity in fieldform_scene::Continuity::ALL {
             let graph = driven_blend(2.0, 6.0, continuity, fieldform_scene::RampShape::Linear);
             let field = GraphField::compile(&doc, &part_with(graph), 0.05).unwrap();
-            let n = Fillet { radius: lit(1.0), continuity }.exponent();
+            let n = Fillet { radius: lit(1.0), continuity, second: None }.exponent();
             for (z, k) in [(-20.0, 2.0), (0.0, 4.0), (20.0, 6.0)] {
                 let expected = k * (1.0 - 2f64.powf(-1.0 / n));
                 // Bisect along the diagonal for the surface rather than trusting the value: a
@@ -7598,7 +7599,7 @@
         for continuity in fieldform_scene::Continuity::ALL {
             let graph = driven_blend(2.0, 6.0, continuity, fieldform_scene::RampShape::Linear);
             let blend = *graph.roots().first().expect("the blend is the only body");
-            let n = Fillet { radius: lit(1.0), continuity }.exponent();
+            let n = Fillet { radius: lit(1.0), continuity, second: None }.exponent();
             // The ramp runs four millimetres of radius over forty of height.
             let rate = 0.1;
             let moves = if n == 1.0 || n == 2.0 { 1.0 } else { 1.0 + 2f64.powf(-1.0 / n) };
@@ -7620,6 +7621,97 @@
             );
             // And the reach the graph reads for it is the ramp's top, not nought.
             assert!((crate::fillet_reach(&doc, &graph, graph.node(blend).unwrap().fillet().unwrap()) - 6.0).abs() < 1e-12);
+        }
+    }
+
+    /// Two boxes meeting at a right angle along x = y = 0 (as `driven_blend` has them),
+    /// chamfered with legs `s_a` along the first box's face and `s_b` along the second's.
+    fn two_leg_chamfer(s_a: f64, s_b: f64) -> Graph {
+        let mut graph = Graph::empty();
+        let a = graph.add(Node::Cuboid {
+            edge: Default::default(),
+            centre: fieldform_scene::Place::At([lit(-50.0), lit(0.0), lit(0.0)]),
+            size: [lit(100.0); 3],
+            turn: fieldform_scene::no_turn(),
+        });
+        let b = graph.add(Node::Cuboid {
+            edge: Default::default(),
+            centre: fieldform_scene::Place::At([lit(0.0), lit(-50.0), lit(0.0)]),
+            size: [lit(100.0); 3],
+            turn: fieldform_scene::no_turn(),
+        });
+        graph.add(Node::Blend {
+            op: BooleanOp::Union,
+            a: a.into(),
+            b: b.into(),
+            fillet: Fillet {
+                radius: lit(s_a),
+                continuity: fieldform_scene::Continuity::Chamfer,
+                second: Some(lit(s_b)),
+            },
+        });
+        graph
+    }
+
+    /// A chamfer's two legs are where its bevel leaves each face: `s_a` from the second face
+    /// along the first, `s_b` from the first along the second (`round-chamfer-spec.md` §9.2).
+    /// The first box's face is the plane x = 0, read by `x`; the second's is y = 0, read by
+    /// `y`. So on the first face (x just outside nought) the bevel begins `s_a` out in `y`, and
+    /// on the second `s_b` out in `x`; bisected along each face for where material ends.
+    #[test]
+    fn a_two_legged_chamfer_leaves_each_face_where_its_leg_says() {
+        let doc = Document::new();
+        for (s_a, s_b) in [(2.0, 6.0), (6.0, 2.0), (4.0, 4.0)] {
+            let field = GraphField::compile(&doc, &part_with(two_leg_chamfer(s_a, s_b)), 0.05).unwrap();
+            // Along the first face, a hair outside it: material (the bevel) until y = s_a.
+            let along = |probe: &dyn Fn(f64) -> Point3<f64>, expected: f64| {
+                let (mut lo, mut hi) = (0.0, 20.0);
+                for _ in 0..60 {
+                    let mid = 0.5 * (lo + hi);
+                    if field.distance(probe(mid)) < 0.0 { lo = mid } else { hi = mid }
+                }
+                assert!((lo - expected).abs() < 1e-3, "legs ({s_a}, {s_b}): found {lo}, expected {expected}");
+            };
+            along(&|t| Point3::new(1e-4, t, 0.0), s_a);
+            along(&|t| Point3::new(t, 1e-4, 0.0), s_b);
+            // And on the diagonal the bevel plane `x/s_b + y/s_a = 1` is crossed where it says.
+            let t = 1.0 / (1.0 / s_b + 1.0 / s_a);
+            along(&|u| Point3::new(u, u, 0.0), t);
+        }
+    }
+
+    /// The value of a two-legged chamfer never overstates the room before its surface: the
+    /// scaled operands move no faster than the unscaled ones did, so the bound holds. Marched
+    /// past every claim, as the driven blend's test is.
+    #[test]
+    fn a_two_legged_chamfer_never_overstates_the_room_before_its_surface() {
+        let doc = Document::new();
+        for (s_a, s_b) in [(2.0, 6.0), (6.0, 2.0), (1.0, 9.0)] {
+            let field = GraphField::compile(&doc, &part_with(two_leg_chamfer(s_a, s_b)), 0.05).unwrap();
+            for i in 0..16 {
+                for j in 0..8 {
+                    let from = Point3::new(-4.0 + i as f64 * 1.75, -3.0 + j as f64 * 3.0, -28.0 + (i % 7) as f64 * 9.0);
+                    let claimed = field.distance(from);
+                    if claimed <= 0.0 {
+                        continue;
+                    }
+                    for d in [
+                        Vector3::new(-1.0, 0.0, 0.0),
+                        Vector3::new(0.0, -1.0, 0.0),
+                        Vector3::new(-0.707, -0.707, 0.0),
+                        Vector3::new(-0.577, -0.577, 0.577),
+                    ] {
+                        let mut t = 0.0;
+                        while t < claimed * 1.2 {
+                            if field.distance(from + d * t) <= 0.0 {
+                                assert!(t >= claimed - 1e-6, "legs ({s_a}, {s_b}): claimed {claimed} at {from:?}, surface {t} away along {d:?}");
+                                break;
+                            }
+                            t += 0.02;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -7806,7 +7898,7 @@
             op: BooleanOp::Union,
             a: row.into(),
             b: bar.into(),
-            fillet: Fillet { radius: lit(1.0), continuity: fieldform_scene::Continuity::G1 },
+            fillet: Fillet { radius: lit(1.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         assert!(GraphField::compile(&doc, &part_with(graph), 0.05).is_ok());
     }
@@ -8009,7 +8101,7 @@
             op: BooleanOp::Union,
             a: placed.into(),
             b: sphere.into(),
-            fillet: Fillet { radius: lit(0.3), continuity: Continuity::G1 },
+            fillet: Fillet { radius: lit(0.3), continuity: Continuity::G1, second: None },
         });
         assert!(GraphField::compile(&doc, &part_with(graph), 0.05).is_ok());
     }
@@ -9237,7 +9329,7 @@
                 op: BooleanOp::Union,
                 a: a.into(),
                 b: b.into(),
-                fillet: Fillet { radius: ParamRef::Literal(k), continuity: fieldform_scene::Continuity::G1 },
+                fillet: Fillet { radius: ParamRef::Literal(k), continuity: fieldform_scene::Continuity::G1, second: None },
             });
             let reach = k * (1.0 - 2f64.powf(-0.5));
             let (hlo, hhi) = crate::graph_extent(&doc, &graph, hard).as_box().unwrap();

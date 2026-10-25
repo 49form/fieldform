@@ -135,7 +135,7 @@ fn cases() -> Vec<(&'static str, Build)> {
                     op: BooleanOp::Union,
                     a: a.into(),
                     b: b.into(),
-                    fillet: Fillet { radius: lit(12.0), continuity: Continuity::G1 },
+                    fillet: Fillet { radius: lit(12.0), continuity: Continuity::G1, second: None },
                 });
                 (Document::new(), g)
             }),

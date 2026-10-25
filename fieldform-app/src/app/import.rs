@@ -659,11 +659,14 @@ impl App {
         let faces: usize = cages.iter().map(|c| c.face_count()).sum();
         let points: usize = cages.iter().map(|c| c.vertex_count()).sum();
 
+        // An open mesh is a red cage (R16): said with its hole count, since the next thing to do
+        // is close it, and nothing else on screen says how many holes there are to close.
+        let holes: Vec<usize> = cages.iter().map(|c| c.holes().len()).filter(|&n| n > 0).collect();
         let mut graph = self.part_graph().clone();
         let mut first = None;
         let mut made = Vec::new();
         for cage in cages {
-            let id = self.doc.add_cage(cage);
+            let id = self.doc.add_cage_body(cage);
             made.push(id);
             let node = graph.add(Node::Cage(id));
             first.get_or_insert((node, id));
@@ -705,6 +708,13 @@ impl App {
             " — {:.1} x {:.1} x {:.1} mm",
             size.x, size.y, size.z,
         ));
+        if !holes.is_empty() {
+            let total: usize = holes.iter().sum();
+            said.push_str(&format!(
+                "; open, with {total} hole{} to fill before it is a solid",
+                if total == 1 { "" } else { "s" }
+            ));
+        }
         self.say(said);
     }
 

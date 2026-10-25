@@ -804,6 +804,8 @@ impl App {
                 chosen = picked;
             }
         });
+        // The spine itself, under the row that names it (`notebook-spec.md` §7.1, §17).
+        self.host_nested_curve(ui, chosen);
         // **The cost, said where the curve is chosen.** A sweep divides its value by
         // `1 / (1 - k r)` to stay a lower bound, and the tracer takes that many times
         // the steps. Measured by `fieldform-gpu/examples/sweep_cost.rs`: a 270 mm glyph
@@ -1750,6 +1752,8 @@ impl App {
                 chosen = picked;
             }
         });
+        // The curve itself, under the row that names it (`notebook-spec.md` §7.1, §17).
+        self.host_nested_curve(ui, chosen);
         // **The same switch an offset's distance has**, because it is the same
         // question: one number, or a number that varies through space. Backlog item 2,
         // and the third socket `ramp-decision.md` said each further consumer would have

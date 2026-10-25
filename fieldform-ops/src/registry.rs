@@ -24,6 +24,15 @@ pub enum Value {
     IntList(Vec<i64>),
 }
 
+/// `x,y,z` as three numbers, or `None` for anything else.
+pub fn parse_triple(s: &str) -> Option<[f64; 3]> {
+    let parts: Vec<f64> = s.split(',').map(|p| p.trim().parse::<f64>().ok()).collect::<Option<_>>()?;
+    match parts[..] {
+        [x, y, z] => Some([x, y, z]),
+        _ => None,
+    }
+}
+
 impl Value {
     /// The text of a string argument, for an operation whose choice is a word rather than a
     /// number — a lattice cell, say. Only `Str`: a number that happens to parse as a name is
@@ -62,6 +71,10 @@ impl Value {
     pub(crate) fn as_vec3(&self) -> Option<[f64; 3]> {
         match self {
             Value::Vec3(v) => Some(*v),
+            // The console types a word by how it parses, and `1,0,0` parses as nothing but a
+            // string -- so a triple typed at the console arrived here as `Str` and was refused,
+            // which is what made `cage.translate_vertices` unusable from a typed line.
+            Value::Str(s) => parse_triple(s),
             _ => None,
         }
     }
@@ -70,6 +83,8 @@ impl Value {
         match self {
             Value::IntList(v) => Some(v.clone()),
             Value::Int(i) => Some(vec![*i]),
+            // `faces=3,7,12` from the console arrives as text, as a triple does.
+            Value::Str(s) => s.split(',').map(|p| p.trim().parse::<i64>().ok()).collect(),
             _ => None,
         }
     }

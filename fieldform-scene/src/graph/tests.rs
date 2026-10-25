@@ -582,7 +582,7 @@
             op: BooleanOp::Union,
             a: cage.into(),
             b: pipe.into(),
-            fillet: Fillet { radius: ParamRef::Literal(3.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: ParamRef::Literal(3.0), continuity: Continuity::G1, second: None },
         });
 
         let back = round_trip(&g);
@@ -2285,7 +2285,7 @@
             op: BooleanOp::Union,
             a: cage.into(),
             b: sphere.into(),
-            fillet: Fillet { radius: ParamRef::Literal(1.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: ParamRef::Literal(1.0), continuity: Continuity::G1, second: None },
         });
         assert_eq!(g.roots(), vec![blend], "the blend is the only body to begin with");
 
@@ -3048,7 +3048,7 @@
                 let mut cut = graph.clone();
                 match cut.node_mut(id) {
                     Some(Node::Cuboid { edge, .. } | Node::Cylinder { edge, .. }) => {
-                        *edge = Fillet { radius: lit(1.5), continuity }
+                        *edge = Fillet { radius: lit(1.5), continuity, second: None }
                     }
                     other => panic!("{kind}: {other:?}"),
                 }
@@ -3109,7 +3109,7 @@
             let g: Graph = serde_json::from_str(&json).expect("a rimmed extrude opens");
             match g.node(NodeId::from_raw(2)) {
                 Some(Node::Extrude { rims, .. }) => {
-                    assert_eq!(*rims, crate::Rims { radius: ParamRef::Literal(2.0), continuity, at }, "{text}")
+                    assert_eq!(*rims, crate::Rims { radius: ParamRef::Literal(2.0), continuity, at, second: None }, "{text}")
                 }
                 other => panic!("{text}: {other:?}"),
             }
@@ -3350,7 +3350,7 @@
             op: BooleanOp::Union,
             a: a.into(),
             b: b.into(),
-            fillet: Fillet { radius: ParamRef::Literal(5.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: ParamRef::Literal(5.0), continuity: Continuity::G1, second: None },
         });
 
         let order = g.evaluation_order().unwrap();
@@ -3370,7 +3370,7 @@
             op: BooleanOp::Union,
             a: a.into(),
             b: b.into(),
-            fillet: Fillet { radius: ParamRef::Literal(1.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: ParamRef::Literal(1.0), continuity: Continuity::G1, second: None },
         });
         // Point a node at its own consumer.
         g.nodes.insert(
@@ -3379,7 +3379,7 @@
                 op: BooleanOp::Union,
                 a: blend.into(),
                 b: b.into(),
-                fillet: Fillet { radius: ParamRef::Literal(1.0), continuity: Continuity::G1 },
+                fillet: Fillet { radius: ParamRef::Literal(1.0), continuity: Continuity::G1, second: None },
             },
         );
         // Every node is now consumed by another, so the graph has no bodies at all — which is

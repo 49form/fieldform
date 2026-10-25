@@ -66,7 +66,7 @@ fn blend_at(
         op,
         a: a.into(),
         b: b.into(),
-        fillet: Fillet { radius: lit(radius), continuity },
+        fillet: Fillet { radius: lit(radius), continuity, second: None },
     })
 }
 

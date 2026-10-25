@@ -103,7 +103,7 @@ fn one_deep_body(count: usize, salt: f64) -> (Document, Graph) {
             op: BooleanOp::Union,
             a: joined.into(),
             b: next.into(),
-            fillet: Fillet { radius: lit(3.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: lit(3.0), continuity: Continuity::G1, second: None },
         });
     }
     (Document::new(), graph)
@@ -119,7 +119,7 @@ fn one_patterned_body(count: u32, salt: f64) -> (Document, Graph) {
         count: ParamRef::Literal(f64::from(count)),
         kind: PatternKind::Linear { step: [lit(15.0), lit(0.0), lit(0.0)] },
         join: true,
-        fillet: Fillet { radius: lit(0.0), continuity: Continuity::G1 },
+        fillet: Fillet { radius: lit(0.0), continuity: Continuity::G1, second: None },
     });
     (Document::new(), graph)
 }

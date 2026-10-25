@@ -98,7 +98,7 @@ fn ball_blended_with_a_curve(pipe_radius: f64, blend_radius: f64) -> (Document, 
         op: BooleanOp::Union,
         a: ball.into(),
         b: pipe.into(),
-        fillet: Fillet { radius: lit(blend_radius), continuity: Continuity::G1 },
+        fillet: Fillet { radius: lit(blend_radius), continuity: Continuity::G1, second: None },
     });
     (doc, graph)
 }

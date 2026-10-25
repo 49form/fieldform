@@ -184,8 +184,9 @@ pub fn display_graph_with_stand_ins(
     // Once for every root the closure is asked about (`is_visible_among`).
     let consumed = part.consumed();
     // **And once for the empty slots, for the same reason**: `incomplete` walks the whole graph,
-    // and the closure below is asked per root.
-    let holed = part.incomplete();
+    // and the closure below is asked per root. Of the document, so a body that is or reads an
+    // open cage is pruned too and the part's other bodies draw (R12).
+    let holed = document.incomplete_in(part);
     drawn_graph(part, &shown_ingredients_in(document, part), &|id| {
         !is_visible_among(document, part, &consumed, id)
             || is_reference_body(document, part, id)
@@ -409,7 +410,7 @@ mod tests {
         // came after the lift — so carrying it is not describing history, it is keeping the
         // agreement assertion about the sharing rather than about this one rule. Without it, the
         // first holed fixture anybody adds reads as the lift having changed an answer.
-        let holed = part.incomplete();
+        let holed = doc.incomplete_in(part);
         drawn_graph(part, &shown_ingredients_in(doc, part), &|id| {
             !is_visible_among(doc, part, &consumed, id)
                 || old_is_reference_body(doc, part, id)

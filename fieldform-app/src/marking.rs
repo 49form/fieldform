@@ -28,6 +28,8 @@ pub enum Subject {
     Profile,
     Plane,
     Cage,
+    /// Vertices, edges or faces of the cage picked: the cage tools' table (R10).
+    CageElements,
 }
 
 /// The eight directions, clockwise from up, by name, for the test that walks them. South is More….
@@ -103,6 +105,19 @@ pub fn slots(subject: Subject) -> [Option<&'static str>; 8] {
             Some("modify.pattern"),
             Some("modify.mirror"),
             Some("edit.duplicate"),
+        ],
+        // One table for any cage-element selection, as the owner ruled (R10): N Extrude,
+        // NE Inset, E Insert Edge, SE Bridge, S More…, SW Fill hole, W Knife, NW Weld. The three
+        // tools not built yet keep their directions empty rather than letting another move in.
+        Subject::CageElements => [
+            Some("cage.extrude"),
+            Some("cage.inset"),
+            Some("cage.insert_ring"),
+            Some("cage.bridge"),
+            None,
+            Some("cage.fill_hole"),
+            Some("cage.cut"),
+            Some("cage.weld"),
         ],
     }
 }

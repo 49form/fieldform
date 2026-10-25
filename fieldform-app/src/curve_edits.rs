@@ -549,13 +549,14 @@ pub(crate) fn copied_body(doc: &Document, graph: &Graph, root: NodeId) -> Clipbo
         nodes.push((id, node.clone()));
     }
     nodes.reverse();
-    let cages: Vec<(CageId, Cage)> = nodes
+    // The body as it is, red or not: a copy of an open cage is an open cage.
+    let cages: Vec<(CageId, fieldform_cage::CageBody)> = nodes
         .iter()
         .filter_map(|(_, n)| match n {
             Node::Cage(c) => Some(*c),
             _ => None,
         })
-        .filter_map(|c| doc.cage(c).map(|cage| (c, cage.clone())))
+        .filter_map(|c| doc.cage_body(c).map(|cage| (c, cage.clone())))
         .collect();
     let mut read: Vec<CurveId> = Vec::new();
     for (_, node) in &nodes {
@@ -607,7 +608,7 @@ pub(crate) fn paste_body(
     part: PartId,
     nodes: &[(NodeId, Node)],
     root: NodeId,
-    cages: &[(CageId, Cage)],
+    cages: &[(CageId, fieldform_cage::CageBody)],
     curves: &[(CurveId, fieldform_scene::Curve)],
 ) -> Result<NodeId, String> {
     let before = doc.parts.get(&part).ok_or("the part to paste into is gone")?.graph.clone();
@@ -623,7 +624,7 @@ pub(crate) fn paste_body(
     }
     let mut cage_map = std::collections::HashMap::new();
     for (old, cage) in cages {
-        cage_map.insert(*old, doc.add_cage(cage.clone()));
+        cage_map.insert(*old, doc.add_cage_body(cage.clone()));
     }
     let mut graph = before.clone();
     let mut node_map: std::collections::HashMap<NodeId, NodeId> = std::collections::HashMap::new();

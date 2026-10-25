@@ -3,10 +3,9 @@
 //! The control cage: a closed, 2-manifold, all-quad mesh that the designer edits directly.
 //!
 //! The cage is never the model — see the project plan. This crate owns the mesh data
-//! structure (invariant-enforcing: closed, manifold, all-quad) and, eventually, the polygon
-//! editing operations (extrude, bevel, insert loop, ...) that act on it. It has no dependency
-//! on Fidget; `fieldform-subd` and `fieldform-field` consume its output to build the field
-//! representation.
+//! structure (invariant-enforcing: manifold, all-quad, and for a [`Cage`] closed) and the
+//! topology edits that act on it ([`edit`]: insert ring, delete faces, fill hole, bridge, weld).
+//! `fieldform-subd` and `fieldform-field` consume its output to build the field representation.
 //!
 //! The mesh is stored as a half-edge (doubly-connected edge list) structure. Every half-edge
 //! has an explicit twin found during construction; a half-edge without a twin means the input
@@ -14,6 +13,12 @@
 
 use nalgebra::Point3;
 use std::collections::HashMap;
+
+pub mod body;
+pub mod edit;
+pub mod validate;
+pub use body::CageBody;
+pub use edit::{EditError, EditResult, Highlight};
 
 macro_rules! index_type {
     ($name:ident) => {
@@ -75,7 +80,7 @@ pub struct Face {
 
 /// Errors that reject an input from becoming a [`Cage`], keeping its invariants
 /// (closed, 2-manifold, all-quad) true by construction rather than by later validation.
-#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+#[derive(thiserror::Error, Debug, Clone, PartialEq, Eq)]
 pub enum CageError {
     #[error("face {face} has {len} vertices; cages are quad-only")]
     NonQuadFace { face: usize, len: usize },
@@ -92,6 +97,117 @@ pub enum CageError {
     UnmatchedEdge { from: VertexId, to: VertexId },
     #[error("cage has no faces")]
     Empty,
+    /// Two faces run the same edge the same way round: one of them is flipped. It used to be
+    /// reported as [`Self::NonManifoldEdge`], which names a different fault with a different fix.
+    #[error(
+        "edge ({from:?} -> {to:?}) is used twice in the same direction: a face is flipped \
+         (winding is inconsistent)"
+    )]
+    InconsistentWinding { from: VertexId, to: VertexId },
+    /// Two fans of faces meet at one vertex — a bowtie. The half-edge walk around a vertex sees
+    /// one fan, so this was invisible: valence, neighbours and the limit surface there all
+    /// answered for half the vertex.
+    #[error("vertex {vertex:?} joins two separate fans of faces (a bowtie); it is non-manifold")]
+    NonManifoldVertex { vertex: VertexId },
+    /// A vertex no face uses. It has no fan, so every neighbourhood query on it would answer for
+    /// whichever half-edge its placeholder pointed at, and the limit position panics on it.
+    #[error("vertex {vertex:?} is used by no face")]
+    UnusedVertex { vertex: VertexId },
+    /// A face that names one vertex twice: a self-loop edge, or a quad collapsed to a triangle.
+    #[error("face {face} uses the same vertex twice")]
+    DegenerateFace { face: usize },
+}
+
+impl CageError {
+    /// Whether this fault stops the half-edge structure being built at all, as opposed to one
+    /// found by walking a structure that could be built.
+    fn prevents_building(&self) -> bool {
+        matches!(
+            self,
+            CageError::Empty
+                | CageError::NonQuadFace { .. }
+                | CageError::VertexIndexOutOfRange { .. }
+                | CageError::DegenerateFace { .. }
+                | CageError::NonManifoldEdge { .. }
+                | CageError::InconsistentWinding { .. }
+        )
+    }
+}
+
+/// Every fault in a face list that can be found without building it, in face order: the shape of
+/// each face, then each edge, then each vertex no face uses.
+///
+/// **One pass that can list everything or stop at the first** is what lets [`QuadMesh::from_faces`]
+/// stay fail-fast while [`QuadMesh::check_faces`] names every offender in a refused file. Two
+/// separate checkers would drift, and a file refused on load would then be refused for a reason the
+/// editor never checks.
+fn face_errors(vertex_count: usize, faces: &[Vec<u32>]) -> Vec<CageError> {
+    let mut errors = Vec::new();
+    if faces.is_empty() {
+        errors.push(CageError::Empty);
+        return errors;
+    }
+
+    // A face that is malformed still *uses* its in-range vertices, so they are not reported unused
+    // on top of the face's own fault.
+    let mut referenced = vec![false; vertex_count];
+    let mut good = Vec::with_capacity(faces.len());
+    for (face, quad) in faces.iter().enumerate() {
+        for &i in quad {
+            if let Some(r) = referenced.get_mut(i as usize) {
+                *r = true;
+            }
+        }
+        if quad.len() != 4 {
+            errors.push(CageError::NonQuadFace { face, len: quad.len() });
+            continue;
+        }
+        if let Some(&index) = quad.iter().find(|&&i| i as usize >= vertex_count) {
+            errors.push(CageError::VertexIndexOutOfRange { face, index });
+            continue;
+        }
+        if (0..4).any(|a| (a + 1..4).any(|b| quad[a] == quad[b])) {
+            errors.push(CageError::DegenerateFace { face });
+            continue;
+        }
+        good.push(face);
+    }
+
+    // Directed uses of every edge. An undirected edge used more than twice is non-manifold; used
+    // exactly twice *the same way round* it is a flipped face, which is the case the old single
+    // check reported as non-manifold.
+    let mut directed: HashMap<(u32, u32), u32> = HashMap::with_capacity(good.len() * 4);
+    for &face in &good {
+        let q = &faces[face];
+        for c in 0..4 {
+            *directed.entry((q[c], q[(c + 1) % 4])).or_insert(0) += 1;
+        }
+    }
+    let mut reported = std::collections::HashSet::new();
+    for &face in &good {
+        let q = &faces[face];
+        for c in 0..4 {
+            let (a, b) = (q[c], q[(c + 1) % 4]);
+            if !reported.insert((a.min(b), a.max(b))) {
+                continue;
+            }
+            let forward = directed[&(a, b)];
+            let backward = directed.get(&(b, a)).copied().unwrap_or(0);
+            let (from, to) = (VertexId::new(a as usize), VertexId::new(b as usize));
+            if forward + backward > 2 {
+                errors.push(CageError::NonManifoldEdge { from, to });
+            } else if forward == 2 {
+                errors.push(CageError::InconsistentWinding { from, to });
+            }
+        }
+    }
+
+    for (v, used) in referenced.iter().enumerate() {
+        if !used {
+            errors.push(CageError::UnusedVertex { vertex: VertexId::new(v) });
+        }
+    }
+    errors
 }
 
 /// A 2-manifold, all-quad mesh, which may have a boundary.
@@ -115,17 +231,63 @@ impl QuadMesh {
     /// an arbitrary file might contain triangles or n-gons that must be rejected with a
     /// clear error rather than assumed away.
     ///
-    /// Fails if any face isn't a quad, references an out-of-range vertex, or any edge is
-    /// shared by more than two faces. A boundary is **allowed** — see [`Cage::from_faces`],
-    /// which is this plus the one check that makes a mesh closed.
+    /// Fails if any face isn't a quad, references an out-of-range vertex or names one vertex twice,
+    /// any edge is shared by more than two faces or run twice the same way round, any vertex is
+    /// unused, or two fans of faces meet at one vertex. A boundary is **allowed** — see
+    /// [`Cage::from_faces`], which is this plus the one check that makes a mesh closed.
+    ///
+    /// Fail-fast: it reports the first fault. [`Self::check_faces`] lists every one.
     pub fn from_faces(
         positions: Vec<Point3<f64>>,
         input_faces: &[Vec<u32>],
     ) -> Result<Self, CageError> {
-        if input_faces.is_empty() {
-            return Err(CageError::Empty);
+        if let Some(e) = face_errors(positions.len(), input_faces).into_iter().next() {
+            return Err(e);
         }
+        let mesh = Self::build(positions, input_faces);
+        if let Some(e) = mesh.fan_errors().into_iter().next() {
+            return Err(e);
+        }
+        Ok(mesh)
+    }
 
+    /// Every structural fault in a face list, not only the first — for a refused file or import
+    /// to name each offending element.
+    ///
+    /// The fan check needs the half-edge structure, so it runs only when nothing found before it
+    /// stops that structure being built; a list that has bad faces or edges names those, and the
+    /// bowties behind them surface once they are fixed.
+    pub fn check_faces(positions: &[Point3<f64>], faces: &[Vec<u32>]) -> Vec<CageError> {
+        let mut errors = face_errors(positions.len(), faces);
+        if !errors.iter().any(CageError::prevents_building) {
+            errors.extend(Self::build(positions.to_vec(), faces).fan_errors());
+        }
+        errors
+    }
+
+    /// Every vertex whose faces do not form one fan.
+    ///
+    /// **Valence against references is the whole test.** The walk around a vertex follows one fan
+    /// from its stored start, so where two fans meet it counts only one of them, while the face
+    /// list names the vertex once per face of both. The two agree exactly when there is one fan.
+    fn fan_errors(&self) -> Vec<CageError> {
+        let mut references = vec![0usize; self.vertices.len()];
+        for face in self.face_ids() {
+            for v in self.face_vertices(face) {
+                references[v.index()] += 1;
+            }
+        }
+        references
+            .iter()
+            .enumerate()
+            .filter(|&(v, &n)| n > 0 && self.valence(VertexId::new(v)) != n)
+            .map(|(v, _)| CageError::NonManifoldVertex { vertex: VertexId::new(v) })
+            .collect()
+    }
+
+    /// The half-edge structure of a face list [`face_errors`] has passed. Infallible because every
+    /// fault that would stop it has already been refused.
+    fn build(positions: Vec<Point3<f64>>, input_faces: &[Vec<u32>]) -> Self {
         let mut vertices: Vec<Vertex> = positions
             .into_iter()
             .map(|position| Vertex {
@@ -142,12 +304,6 @@ impl QuadMesh {
         let mut edge_lookup: HashMap<(VertexId, VertexId), HalfEdgeId> = HashMap::new();
 
         for (face_i, quad) in input_faces.iter().enumerate() {
-            if quad.len() != 4 {
-                return Err(CageError::NonQuadFace {
-                    face: face_i,
-                    len: quad.len(),
-                });
-            }
             let face_id = FaceId::new(face_i);
             let first_he = HalfEdgeId::new(half_edges.len());
             faces.push(Face {
@@ -155,24 +311,8 @@ impl QuadMesh {
             });
 
             for corner in 0..4 {
-                let from_idx = quad[corner];
-                let to_idx = quad[(corner + 1) % 4];
-                if from_idx as usize >= vertices.len() {
-                    return Err(CageError::VertexIndexOutOfRange {
-                        face: face_i,
-                        index: from_idx,
-                    });
-                }
-                let origin = VertexId::new(from_idx as usize);
-                let dest = VertexId::new({
-                    if to_idx as usize >= vertices.len() {
-                        return Err(CageError::VertexIndexOutOfRange {
-                            face: face_i,
-                            index: to_idx,
-                        });
-                    }
-                    to_idx as usize
-                });
+                let origin = VertexId::new(quad[corner] as usize);
+                let dest = VertexId::new(quad[(corner + 1) % 4] as usize);
 
                 let he_id = HalfEdgeId::new(half_edges.len());
                 let next = HalfEdgeId::new(
@@ -186,13 +326,7 @@ impl QuadMesh {
                     face: face_id,
                 });
                 vertices[origin.index()].half_edge = he_id;
-
-                if edge_lookup.insert((origin, dest), he_id).is_some() {
-                    return Err(CageError::NonManifoldEdge {
-                        from: origin,
-                        to: dest,
-                    });
-                }
+                edge_lookup.insert((origin, dest), he_id);
             }
         }
 
@@ -221,11 +355,11 @@ impl QuadMesh {
             }
         }
 
-        Ok(Self {
+        Self {
             vertices,
             half_edges,
             faces,
-        })
+        }
     }
 
     pub fn vertex_count(&self) -> usize {
@@ -279,6 +413,16 @@ impl QuadMesh {
                 (he.origin, destination)
             })
         })
+    }
+
+    /// The number of half-edges: four per face, however many of them are boundary.
+    pub fn half_edge_count(&self) -> usize {
+        self.half_edges.len()
+    }
+
+    /// The vertex a half-edge points at.
+    pub fn destination_of(&self, he: HalfEdgeId) -> VertexId {
+        self.half_edges[self.half_edges[he.index()].next.index()].origin
     }
 
     /// Whether this half-edge is on the mesh's boundary — nothing on the other side of it.
@@ -539,25 +683,36 @@ impl Cage {
         positions: Vec<Point3<f64>>,
         input_faces: &[Vec<u32>],
     ) -> Result<Self, CageError> {
-        let mesh = QuadMesh::from_faces(positions, input_faces)?;
-        for i in 0..mesh.half_edges.len() {
-            let he = HalfEdgeId::new(i);
-            if mesh.is_boundary(he) {
-                let origin = mesh.half_edges[i].origin;
-                let destination = mesh.half_edges[mesh.half_edges[i].next.index()].origin;
-                return Err(CageError::UnmatchedEdge {
-                    from: origin,
-                    to: destination,
-                });
+        Self::try_from_mesh(QuadMesh::from_faces(positions, input_faces)?).map_err(|(_, e)| e)
+    }
+
+    /// The closure check on a mesh that already exists, without rebuilding its half-edges.
+    ///
+    /// **The mesh comes back on failure**, so asking whether an edited mesh is a cage costs no
+    /// clone: the document keeps the edited [`QuadMesh`] either way, and only a closed one also
+    /// becomes a `Cage`. Besides [`Self::from_faces`], this is
+    /// the only route from a mesh to a cage, so a `CageField` keeps its compile-time guarantee.
+    pub fn try_from_mesh(mesh: QuadMesh) -> Result<Self, (QuadMesh, CageError)> {
+        let boundary = (0..mesh.half_edges.len()).find(|&i| mesh.is_boundary(HalfEdgeId::new(i)));
+        match boundary {
+            None => Ok(Self(mesh)),
+            Some(i) => {
+                let from = mesh.half_edges[i].origin;
+                let to = mesh.half_edges[mesh.half_edges[i].next.index()].origin;
+                Err((mesh, CageError::UnmatchedEdge { from, to }))
             }
         }
-        Ok(Self(mesh))
     }
 
     /// The mesh underneath, for a consumer that does not need the closure — the cell map is the
     /// one that does not.
     pub fn mesh(&self) -> &QuadMesh {
         &self.0
+    }
+
+    /// The mesh, with the guarantee given up — for an edit that may open it.
+    pub fn into_mesh(self) -> QuadMesh {
+        self.0
     }
 
     /// Builds a unit cube cage, centered on the origin, with all quad faces wound
@@ -621,12 +776,53 @@ impl Cage {
 /// Positions are plain `[x, y, z]` arrays rather than nalgebra's own serialized shape. The
 /// on-disk format should not change if a dependency changes how it serializes a point, and
 /// `{"coords":{...}}` per vertex is not what an inspectable format looks like.
-#[derive(serde::Serialize, serde::Deserialize)]
+///
+/// **And how an undo entry holds a cage.** A topology edit's before and after are each one of
+/// these rather than a `QuadMesh`: the half-edges are derived, so the snapshot is the smallest
+/// exact record there is, and restoring it goes through the one constructor like everything else.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CageData {
+pub struct MeshSnapshot {
     positions: Vec<[f64; 3]>,
     /// Each face's four vertex indices, wound as they were on the way in.
     faces: Vec<[u32; 4]>,
+}
+
+impl MeshSnapshot {
+    /// The positions and quads of `mesh`, and nothing derived.
+    pub fn of(mesh: &QuadMesh) -> Self {
+        Self {
+            positions: mesh
+                .vertices
+                .iter()
+                .map(|v| [v.position.x, v.position.y, v.position.z])
+                .collect(),
+            faces: mesh
+                .face_ids()
+                .map(|f| mesh.face_vertices(f).map(|v| v.index() as u32))
+                .collect(),
+        }
+    }
+
+    fn parts(self) -> (Vec<Point3<f64>>, Vec<Vec<u32>>) {
+        let positions = self.positions.into_iter().map(|[x, y, z]| Point3::new(x, y, z)).collect();
+        let faces = self.faces.into_iter().map(|f| f.to_vec()).collect();
+        (positions, faces)
+    }
+
+    /// The mesh again. A snapshot taken of a mesh the constructor accepted is one it accepts
+    /// again, so this cannot fail for one taken by [`Self::of`]; a snapshot read from a file goes
+    /// through `QuadMesh`'s own deserialize, which reports the refusal.
+    pub fn restore(&self) -> QuadMesh {
+        let (positions, faces) = self.clone().parts();
+        QuadMesh::from_faces(positions, &faces).expect("a snapshot of a valid mesh restores")
+    }
+
+    /// What this holds, for the undo stack's budget.
+    pub fn byte_size(&self) -> usize {
+        self.positions.len() * std::mem::size_of::<[f64; 3]>()
+            + self.faces.len() * std::mem::size_of::<[u32; 4]>()
+    }
 }
 
 /// An open mesh serializes **identically to a cage** — the same positions and quads — and its
@@ -635,60 +831,26 @@ struct CageData {
 /// the format says which, because nothing in the geometry does.
 impl serde::Serialize for QuadMesh {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let data = CageData {
-            positions: self
-                .vertices
-                .iter()
-                .map(|v| [v.position.x, v.position.y, v.position.z])
-                .collect(),
-            faces: self
-                .face_ids()
-                .map(|f| self.face_vertices(f).map(|v| v.index() as u32))
-                .collect(),
-        };
-        data.serialize(s)
+        MeshSnapshot::of(self).serialize(s)
     }
 }
 
 impl<'de> serde::Deserialize<'de> for QuadMesh {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let data = CageData::deserialize(d)?;
-        let positions = data
-            .positions
-            .into_iter()
-            .map(|[x, y, z]| Point3::new(x, y, z))
-            .collect();
-        let faces: Vec<Vec<u32>> = data.faces.into_iter().map(|f| f.to_vec()).collect();
+        let (positions, faces) = MeshSnapshot::deserialize(d)?.parts();
         QuadMesh::from_faces(positions, &faces).map_err(serde::de::Error::custom)
     }
 }
 
 impl serde::Serialize for Cage {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let data = CageData {
-            positions: self
-                .vertices
-                .iter()
-                .map(|v| [v.position.x, v.position.y, v.position.z])
-                .collect(),
-            faces: self
-                .face_ids()
-                .map(|f| self.face_vertices(f).map(|v| v.index() as u32))
-                .collect(),
-        };
-        data.serialize(s)
+        MeshSnapshot::of(self).serialize(s)
     }
 }
 
 impl<'de> serde::Deserialize<'de> for Cage {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let data = CageData::deserialize(d)?;
-        let positions = data
-            .positions
-            .into_iter()
-            .map(|[x, y, z]| Point3::new(x, y, z))
-            .collect();
-        let faces: Vec<Vec<u32>> = data.faces.into_iter().map(|f| f.to_vec()).collect();
+        let (positions, faces) = MeshSnapshot::deserialize(d)?.parts();
         Cage::from_faces(positions, &faces).map_err(serde::de::Error::custom)
     }
 }
@@ -1101,5 +1263,127 @@ mod tests {
             Cage::from_faces(vec![], &[]).unwrap_err(),
             CageError::Empty
         );
+    }
+
+    /// The unit cube's positions and faces, for building variants of it by hand.
+    fn cube_parts() -> (Vec<Point3<f64>>, Vec<Vec<u32>>) {
+        let cube = Cage::cube();
+        let positions = cube.vertex_ids().map(|v| cube.vertex_position(v)).collect();
+        let faces = cube
+            .face_ids()
+            .map(|f| cube.face_vertices(f).iter().map(|v| v.index() as u32).collect())
+            .collect();
+        (positions, faces)
+    }
+
+    /// **A flipped face is a winding fault, not a non-manifold edge.** Both used to be one error;
+    /// they have different fixes, and a file refused on load should name the one it has.
+    #[test]
+    fn a_flipped_face_is_reported_as_inconsistent_winding_not_a_non_manifold_edge() {
+        let (positions, mut faces) = cube_parts();
+        faces[1].reverse();
+        let err = QuadMesh::from_faces(positions, &faces).unwrap_err();
+        assert!(
+            matches!(err, CageError::InconsistentWinding { .. }),
+            "a reversed face runs each of its edges the same way as its neighbour: {err:?}"
+        );
+    }
+
+    /// **Two closed cubes sharing one corner are a bowtie**, and every check before this one let
+    /// them through — even `Cage::from_faces`, since each cube on its own is closed.
+    #[test]
+    fn two_closed_cubes_sharing_a_corner_are_refused_as_a_bowtie() {
+        let (mut positions, mut faces) = cube_parts();
+        let second: Vec<Vec<u32>> = faces.clone();
+        // The second cube's corner 0 sits on the first cube's corner 6, (0.5, 0.5, 0.5); its other
+        // seven corners are new vertices 8..15.
+        let remap = |k: u32| if k == 0 { 6 } else { 7 + k };
+        for k in 1..8 {
+            positions.push(positions[k] + nalgebra::Vector3::new(1.0, 1.0, 1.0));
+        }
+        faces.extend(second.iter().map(|f| f.iter().map(|&k| remap(k)).collect::<Vec<_>>()));
+
+        assert_eq!(
+            Cage::from_faces(positions.clone(), &faces).unwrap_err(),
+            CageError::NonManifoldVertex { vertex: VertexId::new(6) }
+        );
+        assert_eq!(
+            QuadMesh::check_faces(&positions, &faces),
+            vec![CageError::NonManifoldVertex { vertex: VertexId::new(6) }],
+            "the shared corner, and nothing else"
+        );
+    }
+
+    /// The same fault on an open mesh: two quads touching at one corner. The fan there is two arcs,
+    /// and the walk saw one.
+    #[test]
+    fn two_quads_touching_at_a_corner_are_a_bowtie() {
+        let positions = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(2.0, 1.0, 0.0),
+            Point3::new(2.0, 2.0, 0.0),
+            Point3::new(1.0, 2.0, 0.0),
+        ];
+        let faces = vec![vec![0, 1, 2, 3], vec![2, 4, 5, 6]];
+        assert_eq!(
+            QuadMesh::from_faces(positions, &faces).unwrap_err(),
+            CageError::NonManifoldVertex { vertex: VertexId::new(2) }
+        );
+    }
+
+    #[test]
+    fn a_vertex_no_face_uses_is_refused() {
+        let (mut positions, faces) = cube_parts();
+        positions.push(Point3::new(5.0, 5.0, 5.0));
+        assert_eq!(
+            QuadMesh::from_faces(positions, &faces).unwrap_err(),
+            CageError::UnusedVertex { vertex: VertexId::new(8) }
+        );
+    }
+
+    #[test]
+    fn a_face_naming_a_vertex_twice_is_refused() {
+        let (positions, mut faces) = cube_parts();
+        faces[0] = vec![0, 3, 3, 1];
+        assert_eq!(
+            QuadMesh::from_faces(positions, &faces).unwrap_err(),
+            CageError::DegenerateFace { face: 0 }
+        );
+    }
+
+    /// **A refused file lists every offender, not the first.** One flipped face and one stray
+    /// vertex give two entries; `from_faces` still stops at one.
+    #[test]
+    fn check_faces_lists_every_offender_in_a_file_with_two_problems() {
+        let (mut positions, mut faces) = cube_parts();
+        faces[1].reverse();
+        positions.push(Point3::new(5.0, 5.0, 5.0));
+        let errors = QuadMesh::check_faces(&positions, &faces);
+        assert!(errors.iter().any(|e| matches!(e, CageError::InconsistentWinding { .. })));
+        assert!(errors.contains(&CageError::UnusedVertex { vertex: VertexId::new(8) }));
+        assert!(
+            !errors.iter().any(|e| matches!(e, CageError::NonManifoldEdge { .. })),
+            "a flip is not also reported as non-manifold: {errors:?}"
+        );
+        assert!(QuadMesh::check_faces(&cube_parts().0, &cube_parts().1).is_empty());
+    }
+
+    /// **The mesh comes back when it is not a cage**, unchanged, so asking costs nothing.
+    #[test]
+    fn try_from_mesh_promotes_a_closed_mesh_and_hands_an_open_one_back() {
+        let (positions, faces) = cube_parts();
+        let closed = QuadMesh::from_faces(positions, &faces).unwrap();
+        let fingerprint = closed.geometry_fingerprint();
+        let cage = Cage::try_from_mesh(closed).expect("a cube is closed");
+        assert_eq!(cage.geometry_fingerprint(), fingerprint);
+
+        let open = one_quad();
+        let before = open.geometry_fingerprint();
+        let (back, err) = Cage::try_from_mesh(open).unwrap_err();
+        assert!(matches!(err, CageError::UnmatchedEdge { .. }));
+        assert_eq!(back.geometry_fingerprint(), before, "the same mesh, handed back");
     }
 }

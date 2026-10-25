@@ -260,6 +260,8 @@ fn main() {
         Scene::Morphed,
         Scene::MorphedDriven,
         Scene::BlendDriven,
+        Scene::TwoLegChamfers,
+        Scene::TwoLegRims,
         Scene::GyroidInfill,
         Scene::SchwarzPInfill,
         Scene::SchwarzDInfill,
@@ -366,7 +368,7 @@ fn main() {
             .iter()
             .map(|leaf| match leaf {
                 fieldform_gpu::BakedLeaf::Cage(id) => {
-                    fieldform_field::CageField::from_cage(&doc.cages[id], levels)
+                    fieldform_field::CageField::from_cage(doc.cage(*id).unwrap(), levels)
                         .expect("the cage builds")
                 }
                 // No scene here imports one, and a silent empty field would be a worse way to
@@ -1305,6 +1307,13 @@ enum Scene {
     /// an op the field reads; the divisor is `driven_blend_divisor` on both sides, and this is
     /// the scene that would show the two parting.
     BlendDriven,
+    /// The same sphere into the same block, chamfered with two legs -- further along the block
+    /// than the sphere -- and an upright extrude whose rims are a two-legged chamfer
+    /// (`round-chamfer-spec.md` §9.2): the operands scaled before the join on both sides, and
+    /// the rim's second leg riding in the vector's exponent slot.
+    TwoLegChamfers,
+    /// The two-sided extrude with rims that are a two-legged chamfer, by the rimmed-twin table.
+    TwoLegRims,
     /// A cage and a pipe as two bodies, unjoined — what building a pipe leaves before any
     /// boolean is applied, and the only scene where the union of bodies is what is drawn
     /// rather than a boolean somebody asked for.
@@ -1556,6 +1565,8 @@ impl Scene {
             Scene::Morphed => "a sphere and a cuboid, morphed half way",
             Scene::MorphedDriven => "the same, with the amount driven by a ramp",
             Scene::BlendDriven => "a sphere filleted into a block, the radius driven by a ramp up Z",
+            Scene::TwoLegChamfers => "a sphere chamfered into a block with two legs",
+            Scene::TwoLegRims => "the two-sided extrude, its rims a chamfer of two legs",
             Scene::GyroidInfill => "cube infilled with a gyroid",
             Scene::SchwarzPInfill => "cube infilled with a Schwarz P",
             Scene::SchwarzDInfill => "cube infilled with a Schwarz D",
@@ -1701,11 +1712,20 @@ impl Scene {
             radius: ParamRef::Literal(reach),
             continuity,
             at,
+            second: None,
         };
         let rims = |reach: f64, continuity: Continuity| at(reach, continuity, fieldform_scene::RimEnds::Both);
         use fieldform_scene::RimEnds::{End, Start};
         match self {
             Scene::EndRimmedTwoSided => Some((Scene::TwoSidedBegun, at(0.05 * CAGE_MM, Continuity::G2, End))),
+            // A two-legged chamfer's rims: twice as far in from the side as back from the end.
+            Scene::TwoLegRims => Some((
+                Scene::TwoSidedBegun,
+                fieldform_scene::Rims {
+                    second: Some(ParamRef::Literal(0.1 * CAGE_MM)),
+                    ..rims(0.05 * CAGE_MM, Continuity::Chamfer)
+                },
+            )),
             Scene::StartRimmedLoft => Some((Scene::Lofted, at(0.02 * CAGE_MM, Continuity::G1, Start))),
             Scene::EndRimmedSweep => Some((Scene::Swept, at(0.02 * CAGE_MM, Continuity::Chamfer, End))),
             Scene::RimmedWedge => Some((Scene::RevolvedWedge, rims(0.02 * CAGE_MM, Continuity::G2))),
@@ -1728,6 +1748,7 @@ impl Scene {
             let edge = |reach: f64, continuity: Continuity| fieldform_scene::Fillet {
                 radius: ParamRef::Literal(reach * CAGE_MM),
                 continuity,
+                second: None,
             };
             let cut = match self {
                 Scene::RoundedBoxCut => Some(edge(0.08, Continuity::G1)),
@@ -1849,7 +1870,7 @@ impl Scene {
         }
         let mut doc = Document::new();
         let cage_id = CageId::new();
-        doc.cages.insert(cage_id, Cage::cube_of(CAGE_MM));
+        doc.cages.insert(cage_id, Cage::cube_of(CAGE_MM).into());
 
         let curve_id = CurveId::new();
         let s = CAGE_MM;
@@ -3136,6 +3157,7 @@ impl Scene {
                 fillet: Fillet {
                     radius: ParamRef::Literal(CAGE_MM * 0.05),
                     continuity: Continuity::G2,
+                    second: None,
                 },
             });
             return (doc, graph, Vec::new());
@@ -3469,7 +3491,7 @@ impl Scene {
         if matches!(self, Scene::ProtectedBore) {
             let lit = ParamRef::Literal;
             let mm = CAGE_MM;
-            let fillet = |k: f64| Fillet { radius: lit(k * mm), continuity: Continuity::G1 };
+            let fillet = |k: f64| Fillet { radius: lit(k * mm), continuity: Continuity::G1, second: None };
             let mut graph = Graph::empty();
             let slab = |graph: &mut Graph, x: f64| {
                 graph.add(Node::Cuboid { edge: Default::default(),
@@ -3850,6 +3872,33 @@ impl Scene {
             return (doc, graph, Vec::new());
         }
 
+        if matches!(self, Scene::TwoLegChamfers) {
+            let mut graph = Graph::empty();
+            let mm = |f: f64| ParamRef::Literal(f * CAGE_MM);
+            // The sphere into the block of `BlendDriven`, chamfered with a leg twice as long along
+            // the block as along the sphere, so the bevel's two intercepts are read apart.
+            let ball = graph.add(Node::Sphere {
+                centre: fieldform_scene::Place::At([mm(0.25), mm(0.0), mm(0.0)]),
+                radius: mm(0.35),
+            });
+            let block = graph.add(Node::Cuboid {
+                edge: Default::default(),
+                centre: fieldform_scene::Place::At([mm(-0.2), mm(0.0), mm(0.0)]),
+                size: [mm(0.6), mm(0.5), mm(0.5)],
+                turn: fieldform_scene::no_turn(),
+            });
+            graph.add(Node::Blend {
+                op: BooleanOp::Union,
+                a: ball.into(),
+                b: block.into(),
+                fillet: Fillet {
+                    radius: mm(0.05),
+                    continuity: Continuity::Chamfer,
+                    second: Some(mm(0.1)),
+                },
+            });
+            return (doc, graph, Vec::new());
+        }
         if matches!(self, Scene::BlendDriven) {
             let mut graph = Graph::empty();
             let mm = |f: f64| ParamRef::Literal(f * CAGE_MM);
@@ -3883,7 +3932,7 @@ impl Scene {
                 op: BooleanOp::Union,
                 a: ball.into(),
                 b: block.into(),
-                fillet: Fillet { radius: ParamRef::Field(ramp), continuity: Continuity::G1 },
+                fillet: Fillet { radius: ParamRef::Field(ramp), continuity: Continuity::G1, second: None },
             });
             return (doc, graph, Vec::new());
         }
@@ -4101,6 +4150,8 @@ impl Scene {
             | Scene::Morphed
             | Scene::MorphedDriven
             | Scene::BlendDriven
+            | Scene::TwoLegChamfers
+            | Scene::TwoLegRims
             | Scene::GyroidInfill
             | Scene::SchwarzPInfill
             | Scene::SchwarzDInfill
@@ -4191,37 +4242,37 @@ impl Scene {
                 op: BooleanOp::Union,
                 a: cage_node.into(),
                 b: pipe.into(),
-                fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::G1 },
+                fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::G1, second: None },
             }),
             Scene::BlendedDifference => graph.add(Node::Blend {
                 op: BooleanOp::Difference,
                 a: cage_node.into(),
                 b: pipe.into(),
-                fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::G1 },
+                fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::G1, second: None },
             }),
             Scene::G2Blend => graph.add(Node::Blend {
                 op: BooleanOp::Union,
                 a: cage_node.into(),
                 b: pipe.into(),
-                fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::G2 },
+                fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::G2, second: None },
             }),
             Scene::G2BlendedDifference => graph.add(Node::Blend {
                 op: BooleanOp::Difference,
                 a: cage_node.into(),
                 b: pipe.into(),
-                fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::G2 },
+                fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::G2, second: None },
             }),
             Scene::ChamferBlend => graph.add(Node::Blend {
                 op: BooleanOp::Union,
                 a: cage_node.into(),
                 b: pipe.into(),
-                fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::Chamfer },
+                fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::Chamfer, second: None },
             }),
             Scene::ChamferedDifference => graph.add(Node::Blend {
                 op: BooleanOp::Difference,
                 a: cage_node.into(),
                 b: pipe.into(),
-                fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::Chamfer },
+                fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::Chamfer, second: None },
             }),
         };
 

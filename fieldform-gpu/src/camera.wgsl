@@ -21,13 +21,15 @@ struct Camera {
     lens: vec4<f32>,
     // x: width  y: height  z: step budget  w: 1 if orthographic
     frame: vec4<u32>,
-    // The section plane: xyz is its unit normal, w is its offset along that normal, so the
-    // kept half is where `dot(p, xyz) - w <= 0`.
+    // The section planes, packed from the front: xyz is a unit normal, w its offset along that
+    // normal, so the kept half of each is where `dot(p, xyz) - w <= 0`, and the kept region is
+    // where that holds for every one — the intersection, so two planes make a corner cutaway.
     //
-    // A zero normal means no section. That is not a sentinel standing in for a flag — a plane
-    // with no direction genuinely describes no half-space, so the disabled state and the
-    // degenerate state are the same state and there is nothing for the two to disagree about.
-    section: vec4<f32>,
+    // A zero normal means no section, and the first one ends the list. That is not a sentinel
+    // standing in for a count — a plane with no direction genuinely describes no half-space, so
+    // the disabled state and the degenerate state are the same state and there is nothing for
+    // the two to disagree about. Eight is `MAX_SECTIONS` in render.rs.
+    sections: array<vec4<f32>, 8>,
     // xyz: unit direction *toward* the key light, the one that casts the shadow.
     // w: 1 when this frame wants occlusion and shadows, 0 when it does not. A drag does not:
     // both cost field evaluations per pixel, and the interactive tier spends its budget on

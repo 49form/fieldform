@@ -44,6 +44,7 @@ mod baked_profile;
 mod lofted;
 mod profile;
 mod sdf;
+pub mod self_intersection;
 mod shared_faces;
 pub use shared_faces::{merge_loop_across_plane, merged_section_curve, with_shared_faces_merged};
 mod surface_map;
@@ -77,7 +78,7 @@ pub use graph_field::{
     operand_carries_true_distance, operand_extent, operand_lipschitz,
     outline_miters, packed_surfaces, part_extent, pattern_grid_anchor_in,
     pattern_origin_in, pattern_reach, pattern_reach_axes_in, pattern_reach_in,
-    profile_reads_out_to, reach_across_axis, reads_widened, surface_levels, sweep_axes,
+    profile_reads_out_to, reach_across_axis, reads_widened, red_cage_behind, surface_levels, sweep_axes,
     sweep_frame, sweep_law, sweep_lean, sweep_offset, sweep_reads_true, sweep_stretch, sweep_tube,
     taper_ratio, wall_bakes_under,
     resolve_frame, resolve_pivot, resolve_place, resolve_place_for, rotation_from_z,
@@ -808,6 +809,53 @@ mod tests {
             bound_hi < 0.0,
             "a box at the centre of a 100 mm cube should be provably inside, got {bound_hi}"
         );
+    }
+
+    /// **An extrude lifted at nought evaluates.** The extrude session shows its cap before it
+    /// has been pulled, and at that moment the four walls are quads of no height: every corner
+    /// of each sits on its twin. The validator calls that collapsed and would refuse it; the
+    /// session tolerates it as a draft. That is only honest if the field is finite there --
+    /// the limit normal at a collapsed wall is a cross product of nothing -- so this measures
+    /// it: the lifted cube's field is finite on a grid through the cap, and agrees with the
+    /// plain cube's away from the cap's edge.
+    #[test]
+    fn a_cage_whose_walls_have_no_height_yet_still_gives_a_finite_field() {
+        use fieldform_cage::edit::extrude::{extrude, Direction, Mode};
+        use fieldform_cage::FaceId;
+        let cube = Cage::cube_of(100.0);
+        let top = cube
+            .face_ids()
+            .find(|&f| cube.face_vertices(f).iter().all(|&v| cube.vertex_position(v).z > 0.0))
+            .expect("a cube has a top");
+        let lifted =
+            extrude(cube.mesh(), &[top], Mode::Region, Direction::Normal, 0.0).expect("the lift at nought");
+        let lifted = Cage::try_from_mesh(lifted.mesh).map_err(|(_, e)| e).expect("a closed lift");
+        let field = CageField::from_cage(&lifted, 3).expect("the lift bakes");
+        let plain = CageField::from_cage(&cube, 3).expect("the cube bakes");
+
+        let mut worst_gap: f64 = 0.0;
+        let mut worst_at = (Point3::origin(), 0.0, 0.0);
+        for i in -8i32..=8 {
+            for j in -8i32..=8 {
+                for k in -8i32..=8 {
+                    let p = Point3::new(i as f64 * 10.0, j as f64 * 10.0, k as f64 * 10.0);
+                    let d = field.distance(p);
+                    assert!(d.is_finite(), "the lifted field is {d} at {p:?}");
+                    // The twinned rim is a crease the plain cube does not have, and it pulls
+                    // the top of the limit surface out toward the cap: measured 22.7 mm at
+                    // (-60, -40, 80), which is the lift being a lift and not a fault. Only the
+                    // far half is held to the cube's own value.
+                    if p.z < -20.0 {
+                        let gap = (d - plain.distance(p)).abs();
+                        if gap > worst_gap {
+                            worst_gap = gap;
+                            worst_at = (p, d, plain.distance(p));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(worst_gap < 5.0, "the lifted cube reads {worst_gap} mm from the plain one at {worst_at:?}");
     }
 
     /// A field that moves faster than its position must widen its own bound to match, or the

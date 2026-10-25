@@ -12,14 +12,15 @@ impl App {
             redo: self.stack.peek_redo().map(str::to_string),
             selected: self.selected_body.is_some()
                 || self.selected_curve.is_some()
-                || self.selected_block.is_some(),
+                || self.selected_block.is_some()
+                || self.section_selected.is_some(),
             clipboard: self.clipboard.is_some(),
             clipboard_curve: matches!(self.clipboard, Some(Clipboard::Curve(_))),
             bodies: self.part_graph().roots().len(),
             pair_candidates: self.pair_candidates().len(),
             field_drawn: self.field_is_drawn(),
             cage_control: self.control == ControlMesh::Cage,
-            section_on: self.section.on,
+            section_on: self.sections.iter().any(|s| s.on),
             occlusion_possible: self.display_quality.occlusion(),
             control_points: self.show_control_points,
             view_cube: self.show_view_cube,
@@ -80,11 +81,24 @@ impl App {
         // happened.
         if command.keeps_session() {
             self.commit_session();
+            // A pending extrude or inset is kept the same way -- which is how E again chains:
+            // the cap is kept, and the next lift starts from it.
+            self.keep_cage_session();
+        }
+        // **And puts an armed cage tool down** (R7), unless it only changes how the document is
+        // looked at; a tool arming itself again is the tool, not another command.
+        if command.kind != commands::Kind::Tool && command.keeps_session() {
+            self.disarm_cage_tool();
         }
         self.note_recent(command.id);
         self.echo_settle();
         if command.kind == commands::Kind::Session {
             self.begin_session(command);
+            return;
+        }
+        // A cage tool arms and waits for clicks, each its own line (`app/cage_tools.rs`).
+        if command.kind == commands::Kind::Tool {
+            self.arm_cage_tool(command);
             return;
         }
         let moves = self.document_moves;

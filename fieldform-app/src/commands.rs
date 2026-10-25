@@ -33,6 +33,9 @@ pub enum Kind {
     Immediate,
     /// Makes a block that stays pending until it is kept or taken back (§3).
     Session,
+    /// A cage tool: armed until Esc or another command, each click its own operation and undo
+    /// step (R7, `app/cage_tools.rs`). Typed with its arguments it runs at once instead.
+    Tool,
 }
 
 /// What a parameter's number is measured in, for the tool panel's unit column.
@@ -345,6 +348,11 @@ impl Command {
         self.args = args;
         self
     }
+    const fn tool(mut self) -> Self {
+        self.kind = Kind::Tool;
+        self
+    }
+
     const fn session(mut self, params: &'static [Param]) -> Self {
         self.kind = Kind::Session;
         self.params = params;
@@ -430,10 +438,13 @@ const CREATE: &[&str] = &["Create"];
 const PRIMITIVES: &[&str] = &["Create", "Primitives"];
 const SWEEP: &[&str] = &["Create", "Sweep"];
 const MODIFY: &[&str] = &["Modify"];
+/// The cage tools, in a menu of their own (the owner, 2026-10-24): what edits the cage's
+/// topology, what grows a selection along it, and what checks it.
+const SUBD: &[&str] = &["Sub-D"];
 const HELP: &[&str] = &["Help"];
 
 /// The top-level menus, left to right.
-pub const MENUS: &[&str] = &["File", "Edit", "View", "Create", "Modify", "Help"];
+pub const MENUS: &[&str] = &["File", "Edit", "View", "Create", "Modify", "Sub-D", "Help"];
 
 /// Which separator group each submenu sits in, inside its parent: the submenu's own entries
 /// carry their groups *within* it.
@@ -619,7 +630,11 @@ fn build() -> Vec<Command> {
         op("view.section", "section", "Section").menu(VIEW, 0).checked(|c| c.section_on)
             .keys(&["X"])
             .hint("Cuts away everything past a plane so you can see inside. Drag the handles to \
-                   move it. Changes the view only — the part is not modified."),
+                   move it. Changes the view only — the part is not modified. The first makes a \
+                   section; after that it switches the current one on or off."),
+        op("view.section_new", "addsection", "New section").menu(VIEW, 0)
+            .hint("Another cut, made where the selection is and switched on beside the others: \
+                   what is past any of them is cut away. Each section has a row in the block list."),
         op("view.measure", "measure", "Measure").menu(VIEW, 0)
             .hint("Volume, surface area and balance point of the selected body — or of the whole \
                    part when nothing is selected. Reported in the console."),
@@ -820,13 +835,74 @@ fn build() -> Vec<Command> {
                    there is none, and moving it moves the cut — or along another body \
                    (`split body=… by=…`). Both halves are named, A on the plane's solid side and \
                    B on the rest; the original and the cutter stay."),
-        // Not a body modifier -- it acts on the cage the tools are editing -- and here because it
-        // changes what is already there rather than making something.
-        op("cage.refine", "refine", "Refine cage").menu(MODIFY, 2).when(cage_control)
+        // **The Sub-D menu: the cage's own tools** (the owner, 2026-10-24), between Modify and Help.
+        // Group 0 edits the cage's topology, group 1 grows a selection along it, group 2 checks it.
+        // Each is also a console verb (R11): one line, one undo step, a refusal by name. A tool
+        // whose elements a menu click cannot name reads them from the selection, and Insert Edge
+        // arms and waits for a click on an edge.
+        op("cage.refine", "refine", "Refine cage").menu(SUBD, 0).when(cage_control)
             .aliases(&["subdivide"])
             .hint("One Catmull-Clark step: four times the faces, so more control points to move. \
                    The surface does not change and does not get smoother. Undo puts the cage back \
                    exactly."),
+        op("cage.extrude", "cageextrude", "Extrude faces").menu(SUBD, 0).when(cage_control).tool()
+            .hint("Lifts the selected faces and lets you drag the cap out; Enter keeps, Esc puts \
+                   it back, E again extrudes from the new cap. Or `cageextrude faces=1 distance=10 \
+                   direction=normal|vertex_normals|x|y|z mode=region|individual`."),
+        op("cage.extrude_edges", "extrudeedges", "Extrude open edges").when(cage_control)
+            .hint("Grows an open mesh at its rim: `extrudeedges edges=0-1,1-2 distance=5`."),
+        op("cage.inset", "cageinset", "Inset faces").menu(SUBD, 0).when(cage_control).tool().keys(&["I"])
+            .hint("Insets the selected faces within their surface and lets you push the cap in or \
+                   out; Enter keeps, Esc puts it back. Or `cageinset faces=1 thickness=2 depth=0`."),
+        op("cage.insert_ring", "insertring", "Insert edge ring").menu(SUBD, 0).when(cage_control).tool().keys(&["Ctrl+R"])
+            .hint("A loop of new edges through the one named, splitting every face it crosses: \
+                   `insertring edge=0-1 t=0.5`, or `count=3` for three evenly spaced. From the menu \
+                   or the key, hover an edge and click; Shift for the midpoint, Esc to stop."),
+        op("cage.delete_faces", "deletefaces", "Delete faces").menu(SUBD, 0).when(cage_control)
+            .hint("Takes the selected faces off the cage: `deletefaces faces=1,2`. The cage is open \
+                   afterwards and shows red until the hole is filled."),
+        op("cage.fill_hole", "fillhole", "Fill hole").menu(SUBD, 0).when(cage_control)
+            .hint("Fills the hole whose rim the selected edge is on with quads: `fillhole edge=0-1`. \
+                   A rim with an odd number of edges cannot be filled; cut one first."),
+        op("cage.dissolve_edges", "dissolveedges", "Dissolve edges").menu(SUBD, 0).when(cage_control)
+            .hint("Takes the selected edges out, merging the faces either side -- the inverse of \
+                   Insert edge ring, and what Delete does with edges selected: \
+                   `dissolveedges edges=0-1,1-2`."),
+        op("cage.bridge_faces", "bridgefaces", "Bridge faces").menu(SUBD, 0).when(cage_control)
+            .hint("Takes a region of faces off each side and bridges the rims they leave: select \
+                   the two regions and run it, or `bridgefaces a=1,2 b=5,6 divisions=1`. B with \
+                   faces selected."),
+        op("cage.bridge", "bridge", "Bridge").menu(SUBD, 0).when(cage_control).tool()
+            .hint("Quads between two open edges, or two runs of them: click an edge, then the \
+                   edge to bridge it to; Shift-click adds edges to the side being gathered, and \
+                   the bridge runs once both sides have as many. Or \
+                   `bridge a=0-1,1-2 b=4-5,5-6 divisions=1`."),
+        op("cage.cut", "knife", "Knife").menu(SUBD, 0).when(cage_control).tool()
+            .hint("Click points on the cage's edges to draw a cut; every face stays a quad, so a \
+                   loop runs on from each end until it closes. Enter commits, Backspace takes the \
+                   last point back, Esc discards the path. Or `knife points=3-4@0.25,7-8@0.5`."),
+        op("cage.weld", "weld", "Weld").menu(SUBD, 0).when(cage_control).tool()
+            .hint("Click the vertex to move, then the vertex it moves onto; Shift on the second \
+                   meets halfway. Or `weld pairs=3-7,4-8 at=midpoint`."),
+        // Growing a selection along the cage's structure: a double-click on an edge is the loop,
+        // Alt and a double-click the ring.
+        op("select.loop", "selectloop", "Select edge loop").menu(SUBD, 1).when(cage_control)
+            .hint("Extends a selected edge along its loop: straight on through every four-way \
+                   vertex, stopping at a pole or a rim. Double-click an edge."),
+        op("select.ring", "selectring", "Select edge ring").menu(SUBD, 1).when(cage_control)
+            .hint("Extends a selected edge across its ring: the edge opposite it in each face. \
+                   Alt and double-click an edge."),
+        op("select.grow", "selectgrow", "Grow selection").menu(SUBD, 1).when(cage_control)
+            .hint("Everything one step out from what is picked."),
+        op("select.shrink", "selectshrink", "Shrink selection").menu(SUBD, 1).when(cage_control)
+            .hint("Takes the border off what is picked."),
+        op("cage.check", "check", "Check model").menu(SUBD, 2).when(cage_control)
+            .hint("What is wrong with the cage: the red faults that stop it being a solid and the \
+                   amber ones worth a look, listed with their counts; a click selects and frames \
+                   them. From a script, the list is printed."),
+        op("cage.set_positions", "setpositions", "Set cage positions").when(cage_control)
+            .hint("Puts vertices where it says, as a drag does: `setpositions vertices=0,1 \
+                   to=1,2,3;4,5,6`. What the echo writes for a cage vertex moved by hand."),
 
         // ---------------------------------------------------------------------------- Help
         // **The palette is in a menu as well as on Space**, because the menu is where a person
@@ -921,6 +997,28 @@ fn build() -> Vec<Command> {
 /// The entry a key binding runs: the one whose operation and fixed arguments it names.
 pub fn for_binding(op: &str, args: &Args) -> Option<&'static Command> {
     COMMANDS.iter().find(|c| c.built() && c.op == op && c.fixed_args() == *args)
+}
+
+/// **The cage's meaning of a key** (R9): with cage vertices, edges or faces selected, the letters
+/// that act on bodies and profiles act on the cage instead -- the same letter, aimed at what is
+/// selected. Only the operations built so far are here; extrude, inset and the knife join it with
+/// their own items.
+pub fn cage_element_op(op: &str, faces_selected: bool) -> Option<&'static str> {
+    match op {
+        // Delete takes faces off, or dissolves edges: a selected loop is taken out the way
+        // Insert Edge put it in (the owner, 2026-10-24).
+        "edit.delete_body" if faces_selected => Some("cage.delete_faces"),
+        "edit.delete_body" => Some("cage.dissolve_edges"),
+        // B bridges the selected faces' regions, or open edges.
+        "create.boolean" if faces_selected => Some("cage.bridge_faces"),
+        "create.boolean" => Some("cage.bridge"),
+        // K is the knife on the cage, as it is Split on a body.
+        "modify.split" => Some("cage.cut"),
+        // E extrudes the cage's faces, or its open edges, as it extrudes a profile.
+        "create.extrude" if faces_selected => Some("cage.extrude"),
+        "create.extrude" => Some("cage.extrude_edges"),
+        _ => None,
+    }
 }
 
 /// The entry with this id, if there is one in this build.
@@ -1208,14 +1306,17 @@ mod tests {
             ("O", m(false, false), "modify.offset"),
             ("S", m(false, true), "modify.shell"),
             ("K", m(false, false), "modify.split"),
+            ("R", m(true, false), "cage.insert_ring"),
+            ("I", m(false, false), "cage.inset"),
         ] {
             let bound = km.lookup(&Shortcut::new(key, mods)).map(|b| b.op.as_str());
             assert_eq!(bound, Some(op), "{key} {mods:?}");
         }
         // The fifteen it had with F for `/`, and the palette's Space, Duplicate's Ctrl+D and Show
-        // all's Alt+H from §9.1's table; Shift+R for repeat, F2 for rename, and the owner's
-        // thirteen modelling keys.
-        assert_eq!(km.bindings().len(), 33, "no binding added or lost beyond those");
+        // all's Alt+H from §9.1's table; Shift+R for repeat, F2 for rename, the owner's thirteen
+        // modelling keys, and Ctrl+R and I for the cage's Insert Edge and Inset (R9) -- which
+        // brings the modelling keys to the fifteen the cap allows.
+        assert_eq!(km.bindings().len(), 35, "no binding added or lost beyond those");
         assert!(km.lookup(&Shortcut::new("Slash", m(false, false))).is_none(), "F replaced /");
     }
 

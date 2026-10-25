@@ -23,10 +23,10 @@ impl App {
         // One panel for both, because the join control turns one into the other. A
         // boolean is a list; a blend is the pair it always was, since a fillet rolls
         // between two surfaces and no more.
-        let (op, operands, fillet, continuity) = match &node {
-            Node::Boolean { op, inputs } => (*op, inputs.clone(), None, None),
+        let (op, operands, fillet, continuity, second) = match &node {
+            Node::Boolean { op, inputs } => (*op, inputs.clone(), None, None, None),
             Node::Blend { op, a, b, fillet } => {
-                (*op, vec![*a, *b], Some(fillet.radius), Some(fillet.continuity))
+                (*op, vec![*a, *b], Some(fillet.radius), Some(fillet.continuity), fillet.second)
             }
             _ => unreachable!("matched above"),
         };
@@ -319,6 +319,9 @@ impl App {
         // A fillet radius the node already carries stays with it; one being added
         // starts from the tool's current setting.
         let mut new_fillet = fillet.unwrap_or(self.blend_radius);
+        // A chamfer's second leg, kept through a switch of shape: the kernel reads it only on a
+        // chamfer (`Fillet::second_leg`), so switching to a round and back loses nothing.
+        let mut new_second = second;
         // **Half again the gap**, when a blend is being made against a point and had no
         // radius of its own. The tool's usual default is a fixed number and would land
         // in the regime where the blend touches the point and does nothing visible --
@@ -386,6 +389,20 @@ impl App {
             {
                 ui.label(egui::RichText::new(note).small().weak());
             }
+            // A chamfer's two legs (`round-chamfer-spec.md` §9.2): the first is the number
+            // above, along A from B; the second along B from A. The rims' editor shows the
+            // same rows (D9). Not with a radius a ramp drives, which the kernel refuses.
+            if driver.is_none() {
+                new_second = self.second_leg_rows(
+                    ui,
+                    shape,
+                    new_fillet,
+                    new_second,
+                    "On B:",
+                    "How far along the second body the bevel reaches from the first. The number \
+                     above is how far along the first it reaches from the second.",
+                );
+            }
             // Beside the number, because that is the only place saying so is honest.
             // A blend against a lower-bound operand is allowed now, and what makes
             // that defensible is the radius announcing where it is nominal -- without
@@ -429,7 +446,7 @@ impl App {
                 op: new_op,
                 a: new_operands[0],
                 b: new_operands[1],
-                fillet: fieldform_scene::Fillet { radius: new_fillet, continuity },
+                fillet: fieldform_scene::Fillet { radius: new_fillet, continuity, second: new_second },
             },
             _ => Node::Boolean { op: new_op, inputs: new_operands },
         };

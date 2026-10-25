@@ -41,7 +41,6 @@
 
 use eframe::egui;
 use eframe::egui_wgpu;
-use fieldform_cage::Cage;
 use fieldform_field::{CageField, MeshField};
 use fieldform_gpu::{
     halton_jitter, BakedLeaf, Camera, Draft, EnvironmentChoice, EnvironmentMaps, Look,
@@ -571,11 +570,12 @@ pub struct View<'a> {
     /// Whether the viewport is orthographic. The traced view has to be told, because it builds
     /// its own rays rather than going through a projection matrix.
     pub orthographic: bool,
-    /// The half-space to keep, as a unit normal and an offset along it, or `None`.
+    /// The half-spaces to keep, each as a unit normal and an offset along it; empty for no
+    /// section. What is past any of them is cut away.
     ///
     /// Part of the *view* request rather than of the graph, which is the whole design of the
     /// section tool: it changes what is drawn and nothing about what the part is.
-    pub section: Option<(Vector3<f64>, f64)>,
+    pub sections: Vec<(Vector3<f64>, f64)>,
     /// Resolves a named parameter, so a value can change without recompiling anything.
     pub lookup: &'a dyn Fn(ParamId) -> Option<f64>,
     /// Which body is selected, by its position among the part's bodies — the same order the
@@ -633,7 +633,7 @@ struct ViewKey {
     scene: ([f64; 3], f64),
     fov_deg: f64,
     orthographic: bool,
-    section: Option<([f64; 3], f64)>,
+    sections: Vec<([f64; 3], f64)>,
     selected: Option<u32>,
     material: Material,
     occlusion: bool,
@@ -668,7 +668,7 @@ impl ViewKey {
             scene,
             fov_deg,
             orthographic,
-            section,
+            ref sections,
             lookup: _,
             selected,
             ref material,
@@ -687,7 +687,7 @@ impl ViewKey {
             scene: (scene.0.coords.into(), scene.1),
             fov_deg,
             orthographic,
-            section: section.map(|(n, d)| (n.into(), d)),
+            sections: sections.iter().map(|&(n, d)| (n.into(), d)).collect(),
             selected,
             material: material.clone(),
             occlusion,

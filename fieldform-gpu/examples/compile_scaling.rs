@@ -217,7 +217,7 @@ fn blends(n: usize) -> (Document, Graph) {
             op: BooleanOp::Union,
             a: acc.into(),
             b: next.into(),
-            fillet: Fillet { radius: lit(6.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: lit(6.0), continuity: Continuity::G1, second: None },
         });
     }
     (Document::new(), g)
@@ -352,7 +352,7 @@ fn wing_up_to(stage: usize) -> (Document, Graph) {
         op: BooleanOp::Union,
         a: fuselage.into(),
         b: both.into(),
-        fillet: Fillet { radius: lit(30.0), continuity: Continuity::G1 },
+        fillet: Fillet { radius: lit(30.0), continuity: Continuity::G1, second: None },
     });
     g.add(Node::Boolean { op: BooleanOp::Difference, inputs: vec![joined.into(), bore.into()] });
     (doc, g)

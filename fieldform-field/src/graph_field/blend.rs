@@ -218,17 +218,51 @@ pub struct Rim {
     /// `s ≥ 1`, which is what the angle between them can cost. `None` keeps the max-norm bound,
     /// which holds at any angle. The compile decides, since only it knows the solid.
     pub square: Option<f64>,
+    /// A chamfer's second leg: how far in from the side the end is cut, where that differs
+    /// from `reach`, how far back from the end the side is (`round-chamfer-spec.md` §9.2). Only
+    /// a chamfer carries one; the compile leaves it `None` for every other shape.
+    pub second: Option<f64>,
 }
 
 impl Default for Rim {
     fn default() -> Self {
-        Rim { reach: 0.0, exponent: 2.0, ends: fieldform_scene::RimEnds::Both, square: None }
+        Rim {
+            reach: 0.0,
+            exponent: 2.0,
+            ends: fieldform_scene::RimEnds::Both,
+            square: None,
+            second: None,
+        }
     }
 }
 
 impl Rim {
     pub fn is_hard(&self) -> bool {
         !(self.reach > 0.0)
+    }
+
+    /// The two legs of the bevel, `(along the side, along the end)`: the reach both ways unless
+    /// a second leg says otherwise.
+    pub fn legs(&self) -> (f64, f64) {
+        (self.reach, self.second.unwrap_or(self.reach))
+    }
+
+    /// The readings scaled so that a bevel of two legs is the one-number bevel's zero set, and
+    /// the number it is read at: `x·m/s_y`, `y·m/s_x`, `m = min(s_x, s_y)`.
+    ///
+    /// The bevel leaves the side `s_x` back from the end and the end `s_y` in from the side, so
+    /// its plane is `x/s_y + y/s_x = −1` in readings negative inside; scaled, that is
+    /// `x' + y' = −m`, the equal-legged bevel's. Each scale is at most one, so a reading that
+    /// moved a millimetre a millimetre moves no faster scaled, and every bound below holds as
+    /// it did. With equal legs the scales are one and nothing changes.
+    fn scaled(&self, x: f64, y: f64) -> (f64, f64, f64) {
+        match self.second {
+            Some(s_y) if self.exponent == 1.0 && s_y > 0.0 && self.reach > 0.0 => {
+                let m = self.reach.min(s_y);
+                (x * m / s_y, y * m / self.reach, m)
+            }
+            _ => (x, y, self.reach),
+        }
     }
 
     /// Where the side wall meets an end, rounded or chamfered: the section's reading `x` and the
@@ -248,7 +282,8 @@ impl Rim {
     /// meet at*: a solid already divided so each reading is a bound stays a bound, by the same
     /// divisor, with its rims rounded.
     pub fn join(&self, x: f64, y: f64) -> f64 {
-        -blend_bound(-x, -y, self.reach, self.exponent)
+        let (x, y, k) = self.scaled(x, y);
+        -blend_bound(-x, -y, k, self.exponent)
     }
 
     /// The rim's reading of `x` against `y`: the exact corner where the readings are square
@@ -288,11 +323,22 @@ impl Rim {
         if !(k > 0.0) {
             return x.max(y);
         }
-        let edge = crate::primitive::Edge { reach: k, exponent: self.exponent };
         // Clamped only where the readings lean (`scale > 1`): square readings are exact at any
         // distance, and clamping them would dull the far end for nothing.
         let yy = if scale > 1.0 { y.min(k) } else { y };
-        let near = crate::primitive::edged(&[x, yy], edge) - (y - yy);
+        let near = match self.second {
+            // A bevel of two legs between square faces, exactly: the hard corner, or the
+            // bevel's plane `s_x·x + s_y·y + s_x·s_y = 0` read as the true distance to it.
+            Some(s_y) if self.exponent == 1.0 && s_y > 0.0 => {
+                let hard = crate::primitive::edged(&[x, yy], crate::primitive::Edge { reach: 0.0, exponent: 1.0 });
+                let bevel = (k * x + s_y * yy + k * s_y) / k.hypot(s_y);
+                hard.max(bevel) - (y - yy)
+            }
+            _ => {
+                let edge = crate::primitive::Edge { reach: k, exponent: self.exponent };
+                crate::primitive::edged(&[x, yy], edge) - (y - yy)
+            }
+        };
         (near / scale).max(x.max(y))
     }
 

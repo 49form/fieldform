@@ -261,6 +261,7 @@ pub const VERBS: &[Verb] = &[
                 key("r", &["radius"]),
                 key("radius", &["radius"]),
                 key("g", &["continuity"]),
+                key("second", &["second"]),
             ],
             not_read: &[],
         },
@@ -370,6 +371,25 @@ pub const VERBS: &[Verb] = &[
     // blocks of kinds other verbs make, so it covers no field of its own; declared so a stray key
     // is refused like any other verb's, which until the registry's test found it it was not.
     Verb { op: "modify.split", keys: Keys::Declared { reads: &[switch("body"), switch("by")], not_read: &[] } },
+    // The cage's topology edits. Their keys name elements of the mesh, not fields of a block, so
+    // every one is a switch; `cage` picks which cage where the document holds several.
+    Verb { op: "cage.insert_ring", keys: Keys::Declared { reads: &[switch("cage"), switch("edge"), switch("t"), switch("count")], not_read: &[] } },
+    Verb { op: "cage.delete_faces", keys: Keys::Declared { reads: &[switch("cage"), switch("faces")], not_read: &[] } },
+    Verb { op: "cage.fill_hole", keys: Keys::Declared { reads: &[switch("cage"), switch("edge")], not_read: &[] } },
+    Verb { op: "cage.bridge", keys: Keys::Declared { reads: &[switch("cage"), switch("a"), switch("b"), switch("divisions")], not_read: &[] } },
+    Verb { op: "cage.bridge_faces", keys: Keys::Declared { reads: &[switch("cage"), switch("a"), switch("b"), switch("divisions")], not_read: &[] } },
+    Verb { op: "cage.weld", keys: Keys::Declared { reads: &[switch("cage"), switch("pairs"), switch("at")], not_read: &[] } },
+    Verb { op: "cage.cut", keys: Keys::Declared { reads: &[switch("cage"), switch("points")], not_read: &[] } },
+    Verb { op: "cage.dissolve_edges", keys: Keys::Declared { reads: &[switch("cage"), switch("edges")], not_read: &[] } },
+    Verb { op: "cage.extrude", keys: Keys::Declared { reads: &[switch("cage"), switch("faces"), switch("mode"), switch("direction"), switch("distance")], not_read: &[] } },
+    Verb { op: "cage.extrude_edges", keys: Keys::Declared { reads: &[switch("cage"), switch("edges"), switch("direction"), switch("distance")], not_read: &[] } },
+    Verb { op: "cage.inset", keys: Keys::Declared { reads: &[switch("cage"), switch("faces"), switch("mode"), switch("thickness"), switch("depth")], not_read: &[] } },
+    Verb { op: "cage.set_positions", keys: Keys::Declared { reads: &[switch("cage"), switch("vertices"), switch("to")], not_read: &[] } },
+    Verb { op: "cage.check", keys: Keys::Declared { reads: &[], not_read: &[] } },
+    Verb { op: "select.loop", keys: Keys::Declared { reads: &[], not_read: &[] } },
+    Verb { op: "select.ring", keys: Keys::Declared { reads: &[], not_read: &[] } },
+    Verb { op: "select.grow", keys: Keys::Declared { reads: &[], not_read: &[] } },
+    Verb { op: "select.shrink", keys: Keys::Declared { reads: &[], not_read: &[] } },
     // Verbs that make no block, declared so their keys are refused like any other's.
     Verb { op: "script.run", keys: Keys::Declared { reads: &[switch("file"), switch("keepgoing")], not_read: &[] } },
     Verb { op: "file.save_as", keys: Keys::Declared { reads: &[switch("file")], not_read: &[] } },
@@ -445,6 +465,7 @@ pub const VERBS: &[Verb] = &[
                 key("draft2", &["draft_2"]),
                 key("corners", &["corners"]),
                 key("rims", &["rims"]),
+                key("rims_second", &["rims_second"]),
                 key("rims_continuity", &["rims_continuity"]),
                 key("rims_at", &["rims_at"]),
             ],
@@ -471,6 +492,7 @@ pub const VERBS: &[Verb] = &[
                 key("angle_2", &["angle_2"]),
                 key("two", &["angle_2"]),
                 key("rims", &["rims"]),
+                key("rims_second", &["rims_second"]),
                 key("rims_continuity", &["rims_continuity"]),
                 key("rims_at", &["rims_at"]),
             ],
@@ -498,6 +520,7 @@ pub const VERBS: &[Verb] = &[
                 key("extent", &["extent"]),
                 key("corners", &["corners"]),
                 key("rims", &["rims"]),
+                key("rims_second", &["rims_second"]),
                 key("rims_continuity", &["rims_continuity"]),
                 key("rims_at", &["rims_at"]),
             ],
@@ -513,6 +536,7 @@ pub const VERBS: &[Verb] = &[
                 key("smooth", &["smooth"]),
                 key("g1", &["smooth"]),
                 key("rims", &["rims"]),
+                key("rims_second", &["rims_second"]),
                 key("rims_continuity", &["rims_continuity"]),
                 key("rims_at", &["rims_at"]),
             ],
@@ -797,10 +821,19 @@ pub(crate) fn rims_asked(
     current: fieldform_scene::Rims,
 ) -> Result<Option<fieldform_scene::Rims>, String> {
     let (reach, shape, at) = (args.get("rims"), args.get("rims_continuity"), args.get("rims_at"));
-    if reach.is_none() && shape.is_none() && at.is_none() {
+    let second = args.get("rims_second");
+    if reach.is_none() && shape.is_none() && at.is_none() && second.is_none() {
         return Ok(None);
     }
     let mut rims = current;
+    // A chamfer's second leg: how far in from the side each end is cut, where that differs from
+    // how far back from the end the side is (`round-chamfer-spec.md` §9.2). Nought takes it away.
+    if let Some(v) = second {
+        let mm = v.as_f64().filter(|mm| *mm >= 0.0).ok_or_else(|| {
+            format!("`{verb} rims_second=` is how far in from the side the ends are cut, in millimetres, not {}", v.text())
+        })?;
+        rims.second = (mm > 0.0).then_some(ParamRef::Literal(mm));
+    }
     if let Some(v) = reach {
         let mm = v.as_f64().filter(|mm| *mm >= 0.0).ok_or_else(|| {
             format!("`{verb} rims=` is how far back the rims are cut, in millimetres, not {}", v.text())
@@ -814,6 +847,11 @@ pub(crate) fn rims_asked(
                 "`{verb} rims_continuity=` shapes a rim, and these rims are hard -- say how far too, rims=2"
             ));
         }
+    }
+    if rims.second.is_some() && rims.continuity != Continuity::Chamfer {
+        return Err(format!(
+            "`{verb} rims_second=` is a chamfer's second leg -- say rims_continuity=chamfer with it"
+        ));
     }
     if let Some(v) = at {
         rims.at = match v.text().trim().to_ascii_lowercase().as_str() {
@@ -1554,11 +1592,20 @@ pub fn boolean_asked(args: &Args, lookup: &dyn Fn(&str) -> Lookup) -> Result<Boo
         .or(args.get("radius"))
         .map(|v| param_one(verb, "r", v, Slot::NumberOrField, lookup))
         .transpose()?;
+    // A chamfer's second leg (`round-chamfer-spec.md` §9.2): how far along the second body the
+    // bevel reaches, where that differs from `r=`. A number or a parameter; a leg follows no ramp.
+    let second = args
+        .get("second")
+        .map(|v| param_one(verb, "second", v, Slot::Number, lookup))
+        .transpose()?;
     let fillet = match radius {
         Some(ParamRef::Literal(r)) if r <= 0.0 => None,
         Some(radius) => {
             let continuity = args.get("g").map(|v| continuity(verb, v)).transpose()?.unwrap_or(Continuity::G1);
-            Some(Fillet { radius, continuity })
+            if second.is_some() && continuity != Continuity::Chamfer {
+                return Err("`boolean second=` is a chamfer's second leg — say g=chamfer with it".to_string());
+            }
+            Some(Fillet { radius, continuity, second })
         }
         None => {
             if args.get("g").is_some() {
@@ -1721,7 +1768,7 @@ pub fn pattern_with_keys(mut node: Node, args: &Args, lookup: &dyn Fn(&str) -> L
     if let Some(v) = args.get("r").or(args.get("radius")) {
         let radius = param_one(word, "r", v, Slot::Number, lookup)?;
         let continuity = args.get("g").map(|v| continuity(word, v)).transpose()?.unwrap_or(Continuity::G1);
-        *fillet = Fillet { radius, continuity };
+        *fillet = Fillet { radius, continuity, second: None };
         *join = true;
     } else if args.get("g").is_some() {
         return Err("`pattern g=` goes with a radius, `r=`".to_string());
@@ -2170,10 +2217,10 @@ pub(crate) mod tests {
             Node::Point { at: p(1.0, 2.0, 3.0) },
             Node::Plane { origin: Place::At(p(1.0, 2.0, 3.0)), flipped: true, turn: Turn::By(p(10.0, 20.0, 30.0)) },
             Node::Sphere { centre: Place::At(p(1.0, 2.0, 3.0)), radius: lit(5.0) },
-            Node::Cuboid { edge: fieldform_scene::Fillet { radius: lit(1.0), continuity: fieldform_scene::Continuity::Chamfer }, centre: Place::At(p(1.0, 2.0, 3.0)), size: p(4.0, 5.0, 6.0), turn: Turn::By(p(10.0, 20.0, 30.0)) },
+            Node::Cuboid { edge: fieldform_scene::Fillet { radius: lit(1.0), continuity: fieldform_scene::Continuity::Chamfer, second: None }, centre: Place::At(p(1.0, 2.0, 3.0)), size: p(4.0, 5.0, 6.0), turn: Turn::By(p(10.0, 20.0, 30.0)) },
             Node::SkewedBox { centre: Place::At(p(1.0, 2.0, 3.0)), edges: [p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0), p(0.0, 0.0, 1.0)] },
-            Node::Cylinder { edge: fieldform_scene::Fillet { radius: lit(0.5), continuity: fieldform_scene::Continuity::G2 }, ends: Ends::between(Place::At(p(0.0, 0.0, 0.0)), Place::At(p(0.0, 0.0, 9.0))), radius: lit(3.0) },
-            Node::Cone { edge: fieldform_scene::Fillet { radius: lit(0.5), continuity: fieldform_scene::Continuity::G2 }, ends: Ends::between(Place::At(p(0.0, 0.0, 0.0)), Place::At(p(0.0, 0.0, 9.0))), base_radius: lit(3.0), top_radius: lit(1.0) },
+            Node::Cylinder { edge: fieldform_scene::Fillet { radius: lit(0.5), continuity: fieldform_scene::Continuity::G2, second: None }, ends: Ends::between(Place::At(p(0.0, 0.0, 0.0)), Place::At(p(0.0, 0.0, 9.0))), radius: lit(3.0) },
+            Node::Cone { edge: fieldform_scene::Fillet { radius: lit(0.5), continuity: fieldform_scene::Continuity::G2, second: None }, ends: Ends::between(Place::At(p(0.0, 0.0, 0.0)), Place::At(p(0.0, 0.0, 9.0))), base_radius: lit(3.0), top_radius: lit(1.0) },
             Node::Torus { centre: Place::At(p(1.0, 2.0, 3.0)), major_radius: lit(5.0), minor_radius: lit(1.0), turn: Turn::By(p(10.0, 20.0, 30.0)) },
             Node::Capsule { ends: Ends::between(Place::At(p(0.0, 0.0, 0.0)), Place::At(p(0.0, 0.0, 9.0))), start_radius: lit(3.0), end_radius: lit(2.0) },
             lattice(LatticeCell::Gyroid, CellMap::Rectangular { cell: lit(8.0) }, LatticePhase::Sheet { thickness: lit(1.0), offset: lit(0.3) }),
@@ -2186,7 +2233,7 @@ pub(crate) mod tests {
             ),
             Node::Ramp { input: Operand::filled(id), in_min: lit(0.0), in_max: lit(1.0), out_min: lit(2.0), out_max: lit(3.0), shape: RampShape::Smooth },
             Node::Boolean { op: BooleanOp::Union, inputs: vec![Operand::filled(id), Operand::filled(other)] },
-            Node::Blend { op: BooleanOp::Union, a: Operand::filled(id), b: Operand::filled(other), fillet: Fillet { radius: lit(2.0), continuity: Continuity::G2 } },
+            Node::Blend { op: BooleanOp::Union, a: Operand::filled(id), b: Operand::filled(other), fillet: Fillet { radius: lit(2.0), continuity: Continuity::Chamfer, second: Some(lit(3.0)) } },
             Node::Morph { a: Operand::filled(id), b: Operand::filled(other), t: lit(0.5) },
             Node::Offset { input: Operand::filled(id), distance: lit(2.0) },
             Node::Shell { input: Operand::filled(id), thickness: lit(1.0) },
@@ -2199,7 +2246,7 @@ pub(crate) mod tests {
                 count: lit(4.0),
                 kind: PatternKind::Linear { step: p(10.0, 0.0, 0.0) },
                 join: true,
-                fillet: Fillet { radius: lit(1.0), continuity: Continuity::G1 },
+                fillet: Fillet { radius: lit(1.0), continuity: Continuity::G1, second: None },
                 options: PatternOptions {
                     spacing: Spacing::Extent,
                     symmetric: true,
@@ -2220,7 +2267,7 @@ pub(crate) mod tests {
             Node::Cage(fieldform_scene::CageId::new()),
             // The blocks built on curves, once with a profile and once as a wall, with every
             // number off its default so the serializer writes it.
-            Node::Extrude { rims: fieldform_scene::Rims { radius: lit(1.5), continuity: fieldform_scene::Continuity::G2, at: fieldform_scene::RimEnds::End },
+            Node::Extrude { rims: fieldform_scene::Rims { radius: lit(1.5), continuity: fieldform_scene::Continuity::Chamfer, at: fieldform_scene::RimEnds::End, second: Some(lit(0.5)) },
                 outline: Outline::closed(curve),
                 sweep: fieldform_scene::Sweep::Normal,
                 start: lit(1.0),
@@ -2243,7 +2290,7 @@ pub(crate) mod tests {
                 frame: frame.clone(),
                 angle: lit(90.0),
                 sides: AngleSides::Two { angle: lit(30.0) },
-                rims: fieldform_scene::Rims { radius: lit(1.5), continuity: fieldform_scene::Continuity::G2, at: fieldform_scene::RimEnds::End },
+                rims: fieldform_scene::Rims { radius: lit(1.5), continuity: fieldform_scene::Continuity::Chamfer, at: fieldform_scene::RimEnds::End, second: Some(lit(0.5)) },
             },
             Node::Revolve {
                 outline: Outline::Wall { curve, thickness: lit(2.0), side: WallSide::Right, ends: WallEnds::Round },
@@ -2252,7 +2299,7 @@ pub(crate) mod tests {
                 sides: AngleSides::Symmetric,
                 rims: Default::default(),
             },
-            Node::Sweep { rims: fieldform_scene::Rims { radius: lit(1.5), continuity: fieldform_scene::Continuity::G2, at: fieldform_scene::RimEnds::End },
+            Node::Sweep { rims: fieldform_scene::Rims { radius: lit(1.5), continuity: fieldform_scene::Continuity::Chamfer, at: fieldform_scene::RimEnds::End, second: Some(lit(0.5)) },
                 outline: Outline::closed(curve),
                 spine: curve,
                 section: fieldform_scene::Section::Skewed,
@@ -2283,7 +2330,7 @@ pub(crate) mod tests {
                 law: fieldform_scene::SweepLaw::default(),
             },
             Node::Pipe { curve, radius: lit(3.0) },
-            Node::Loft { rims: fieldform_scene::Rims { radius: lit(1.5), continuity: fieldform_scene::Continuity::G2, at: fieldform_scene::RimEnds::End },
+            Node::Loft { rims: fieldform_scene::Rims { radius: lit(1.5), continuity: fieldform_scene::Continuity::Chamfer, at: fieldform_scene::RimEnds::End, second: Some(lit(0.5)) },
                 sections: vec![Outline::closed(curve), Outline::closed(curve)],
                 spine: Some(curve),
                 smooth: fieldform_scene::LoftSmooth::G1,
@@ -2702,7 +2749,7 @@ pub(crate) mod tests {
         let asked = boolean_asked(&args(&[("u", Value::Bool(true)), ("in", s("box,ball")), ("r", Value::Int(2))]), &lookup).unwrap();
         assert_eq!(asked.op, Some(BooleanOp::Union));
         assert_eq!(asked.inputs, Some(vec![Operand::filled(a), Operand::filled(b)]));
-        assert_eq!(asked.fillet, Some(Fillet { radius: ParamRef::Literal(2.0), continuity: Continuity::G1 }));
+        assert_eq!(asked.fillet, Some(Fillet { radius: ParamRef::Literal(2.0), continuity: Continuity::G1, second: None }));
         let asked = boolean_asked(&args(&[("s", Value::Bool(true)), ("in", s("box,ball,rod"))]), &lookup).unwrap();
         assert_eq!(asked.inputs.map(|i| i.len()), Some(3));
         assert_eq!(asked.fillet, None);

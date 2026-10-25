@@ -170,6 +170,17 @@ impl App {
                 remove = true;
             }
         });
+        // **And the block it reads, under the row that reads it** (`notebook-spec.md` §7.1, §17).
+        // After the horizontal, so it opens *below* the label and the field rather than beside
+        // them: the row says which block, and this is the block.
+        //
+        // Every slot there is, because one row draws them all (D9) — a boolean's list, a blend's
+        // pair, a morph's two, a pattern's one and every single-input block through
+        // [`Self::operand_input`]. A slot reading a variable hosts nothing, which
+        // [`App::host_nested_block`] decides, since that block's row is at the top level.
+        if let Some(read) = slot.source() {
+            self.host_nested_block(ui, read);
+        }
         remove
     }
 

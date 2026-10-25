@@ -251,6 +251,8 @@ fn boolean_with_keys(node: Node, args: &Args, lookup: &dyn Fn(&str) -> Lookup) -
             radius => Some(Fillet {
                 radius,
                 continuity: fillet.map_or(Continuity::G1, |f| f.continuity),
+                // The second leg the blend had stays unless `second=` says otherwise.
+                second: fillet.and_then(|f| f.second),
             }),
         };
     }
@@ -258,11 +260,24 @@ fn boolean_with_keys(node: Node, args: &Args, lookup: &dyn Fn(&str) -> Lookup) -
         let continuity = match v.text().trim().to_ascii_lowercase().as_str() {
             "1" | "g1" => Continuity::G1,
             "2" | "g2" => Continuity::G2,
-            other => return Err(format!("`boolean g=` is 1 or 2, not {other:?}")),
+            "chamfer" | "c" => Continuity::Chamfer,
+            other => return Err(format!("`boolean g=` is 1, 2 or chamfer, not {other:?}")),
         };
         match &mut fillet {
             Some(f) => f.continuity = continuity,
             None => return Err("`boolean g=` goes with a radius, `radius=`".to_string()),
+        }
+    }
+    // A chamfer's second leg (`round-chamfer-spec.md` §9.2); nought takes it away.
+    if let Some(v) = args.get("second") {
+        let second = match param_one(verb, "second", v, Slot::Number, lookup)? {
+            ParamRef::Literal(s) if s <= 0.0 => None,
+            leg => Some(leg),
+        };
+        match &mut fillet {
+            Some(f) if f.continuity == Continuity::Chamfer || second.is_none() => f.second = second,
+            Some(_) => return Err("`boolean second=` is a chamfer's second leg — say g=chamfer with it".to_string()),
+            None => return Err("`boolean second=` goes with a radius, `radius=`".to_string()),
         }
     }
     Ok(match fillet {

@@ -35,6 +35,40 @@ impl App {
         self.say("Added a cage");
     }
 
+    /// Keeps the active cage -- the one the cage tools, Tab and the cage mode act on -- pointed at
+    /// a cage that is there to be worked on: the selected cage block's, else the one it already
+    /// is while its block is in the part and visible, else the first visible cage block's, else
+    /// the first cage block's. It used to be set only when a cage was made, so with two cages
+    /// it stayed on the second after that was hidden ("the cage block is hidden") and after it
+    /// was deleted ("this part has no cage block"), and Tab would not enter the first (the
+    /// owner, 2026-10-24).
+    pub(crate) fn resync_active_cage(&mut self) {
+        let graph = self.part_graph();
+        let cages: Vec<(NodeId, CageId)> =
+            graph.nodes().filter_map(|(id, n)| if let Node::Cage(c) = n { Some((id, *c)) } else { None }).collect();
+        if cages.is_empty() {
+            return;
+        }
+        let visible = |app: &App, node: NodeId| app.is_visible(node) && app.body_containing(node).is_none_or(|b| app.is_visible(b));
+        let selected = self.selected_body.and_then(|body| {
+            cages.iter().copied().find(|&(node, _)| node == body || self.body_containing(node) == Some(body))
+        });
+        let current_ok = cages.iter().any(|&(node, c)| c == self.active_cage && visible(self, node));
+        // A hidden cage is not there to be worked on, selected or not: the eye moves the tools.
+        let chosen = selected
+            .filter(|&(node, _)| visible(self, node))
+            .map(|(_, c)| c)
+            .or(if current_ok { Some(self.active_cage) } else { None })
+            .or_else(|| cages.iter().find(|&&(node, _)| visible(self, node)).map(|&(_, c)| c))
+            .or(selected.map(|(_, c)| c))
+            .unwrap_or(cages[0].1);
+        if chosen != self.active_cage {
+            self.active_cage = chosen;
+            // The control mesh drawn and picked is this cage's, so what is drawn moves with it.
+            self.rebuild_render_resources();
+        }
+    }
+
     /// A named plane at `origin`, facing `along`, ready for something to be aimed at it.
     ///
     /// **Because picking is only half of aiming**, which is the same gap `point_block_at` was
@@ -566,6 +600,11 @@ impl App {
                 chosen = Some(Some(picked));
             }
         });
+        // The ramp itself, under the row that names it (§7.1, §17): a graded wall's ramp is a
+        // block like any other, and a number driven by one is where it is read.
+        if let Some(ramp) = current {
+            self.host_nested_block(ui, ramp);
+        }
         chosen
     }
 
@@ -1454,6 +1493,17 @@ impl App {
                 *current = Some(picked);
             }
         });
+        // **And the block it reads, under the row that reads it** (`notebook-spec.md` §7.1, §17).
+        // This serves the five blocks still on [`Self::pick_input`] -- twist, mirror, shell,
+        // offset and a placement's transform -- and an attractor's body, which is why the owner
+        // saw a shell's block listed at the bottom while a boolean's were in their rows.
+        //
+        // **The D9 debt the comment on `operand_input` names is still owed**: these rows are this
+        // older field rather than the operand row, so they have no error state and no Clear. What
+        // they have now is the containment, which is what was asked for.
+        if let Some(read) = *current {
+            self.host_nested_block(ui, read);
+        }
     }
 
     /// The nodes that could stand in as an operand of `id`, with what to call each.
@@ -1545,7 +1595,9 @@ impl App {
             None
         };
         // Nothing holed, nothing to take out, and nothing cloned: this runs on every graph edit.
-        let holed = graph.incomplete();
+        // Of the document, so a body that is or reads an open cage is taken out here too: the
+        // gate would otherwise refuse every edit while a cage is red, and editing never blocks.
+        let holed = doc.incomplete_in(graph);
         if holed.is_empty() {
             return compilers(graph);
         }
@@ -1595,7 +1647,51 @@ impl App {
             || graph.node(id).map(std::mem::discriminant) != Some(std::mem::discriminant(&node))
             || graph.node(id).map(walled) != Some(walled(&node));
         let Some(slot) = graph.node_mut(id) else { return };
-        *slot = node;
+        let before = std::mem::replace(slot, node);
+        // **The second half of §7.3's move, in this same edit** -- see `App::completing_a_move`.
+        // The drop filled a slot of this node and said which block has to let go; doing it here is
+        // what makes the pair one undo step, and doing it only when this node now reads that block
+        // is what keeps an unrelated edit in the same frame from taking it.
+        if let Some((from, moved)) = self.completing_a_move
+            && graph.node(id).is_some_and(|n| n.operands().contains(&moved))
+        {
+            self.completing_a_move = None;
+            if from == id {
+                // **Out of a sibling slot of the same block**, where "every slot that names it"
+                // would empty the one just filled as well. The destination is the slot that
+                // changed, so the slots to empty are the ones that did not.
+                let after = graph.node(id).map(fieldform_scene::Node::operand_slots).unwrap_or_default();
+                let was = before.operand_slots();
+                let leaving: Vec<usize> = after
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, slot)| {
+                        slot.source() == Some(moved) && was.get(*i) == Some(slot)
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                if let Some(node) = graph.node_mut(id) {
+                    for i in leaving {
+                        node.empty_operand_slot(i);
+                    }
+                }
+            } else if let Some(node) = graph.node_mut(from) {
+                node.stop_reading(moved);
+            }
+            // **Said, because half of what happened is off screen.** The slot that was filled is
+            // under the pointer; the slot that emptied is in another row, possibly scrolled out
+            // of view or inside a block that is collapsed. Sharing says nothing, which is
+            // deliberate and older than this: a second reader is visible as a second row, and the
+            // line that used to announce one went with the promotion it was announcing.
+            let what = self.body_label(moved);
+            let left = self.body_label(from);
+            self.say(match from == id {
+                true => format!("\u{201c}{what}\u{201d} moved to another slot of {left}"),
+                false => format!(
+                    "\u{201c}{what}\u{201d} moved out of {left}, which is waiting to be told what to read instead"
+                ),
+            });
+        }
         // Refused here rather than accepted into a document that cannot be drawn. A blank
         // viewport with an error in the status bar is the worst of both: the edit is
         // committed, the model is gone, and nothing says which change did it.
@@ -1921,7 +2017,7 @@ impl App {
         // the default depth, and the echo of an extrude driven by a variable could not replay.
         self.apply_options_to_made(
             args,
-            &["start", "depth", "draft", "symmetric", "two", "draft2", "corners", "rims", "rims_continuity", "rims_at"],
+            &["start", "depth", "draft", "symmetric", "two", "draft2", "corners", "rims", "rims_continuity", "rims_at", "rims_second"],
             |n| matches!(n, Node::Extrude { .. }),
         );
     }
@@ -1953,7 +2049,7 @@ impl App {
         // with it: `apply_revolve_axis` was a second pass over the same block.
         self.apply_options_to_made(
             args,
-            &["angle", "symmetric", "two", "axis", "origin", "rims", "rims_continuity", "rims_at"],
+            &["angle", "symmetric", "two", "axis", "origin", "rims", "rims_continuity", "rims_at", "rims_second"],
             |n| matches!(n, Node::Revolve { .. }),
         );
     }
@@ -1976,7 +2072,7 @@ impl App {
     pub(crate) fn apply_sweep_options(&mut self, args: &Args) {
         self.apply_options_to_made(
             args,
-            &["taper_scale", "taper-scale", "taper_draft", "twist", "law", "extent", "corners", "rims", "rims_continuity", "rims_at"],
+            &["taper_scale", "taper-scale", "taper_draft", "twist", "law", "extent", "corners", "rims", "rims_continuity", "rims_at", "rims_second"],
             |n| matches!(n, Node::Sweep { .. }),
         );
     }
@@ -2617,7 +2713,7 @@ impl App {
         // A radius typed wins over the tool's remembered blend mode; nothing typed, and the
         // tool does what the panel last set it to.
         let fillet = asked.fillet.or_else(|| {
-            self.blend_mode.map(|continuity| fieldform_scene::Fillet { radius: self.blend_radius, continuity })
+            self.blend_mode.map(|continuity| fieldform_scene::Fillet { radius: self.blend_radius, continuity, second: None })
         });
         let mut graph = self.part_graph().clone();
         let node = match fillet {
@@ -3818,7 +3914,7 @@ mod tests {
             op: BooleanOp::Union,
             a: Operand::filled(ball),
             b: Operand::filled(lattice),
-            fillet: Fillet { radius: lit(2.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: lit(2.0), continuity: Continuity::G1, second: None },
         });
         assert_eq!(
             App::refusal_of(&doc, &graph, &explain),
@@ -3835,6 +3931,29 @@ mod tests {
     /// what lets a script build a part top-down: `shell` before there is anything to hollow, and
     /// the block it made is there to be filled by the next line.
     ///
+    /// **A red cage is pruned by the gate, not refused** (R12, R4): a cage opened by a tool is a
+    /// state, like an empty slot, and an edit to anything else in the part while it is open has
+    /// to go through. Both when the cage is one body of two and when it is the only one.
+    #[test]
+    fn a_red_cage_is_never_what_the_gate_refuses() {
+        let cube = fieldform_cage::Cage::cube_of(10.0);
+        let positions = cube.vertex_ids().map(|v| cube.vertex_position(v)).collect();
+        let faces: Vec<Vec<u32>> = cube
+            .face_ids()
+            .skip(1)
+            .map(|f| cube.face_vertices(f).iter().map(|v| v.index() as u32).collect())
+            .collect();
+        let mut doc = Document::new();
+        let red = doc.add_cage_body(fieldform_cage::CageBody::new(
+            fieldform_cage::QuadMesh::from_faces(positions, &faces).unwrap(),
+        ));
+
+        let mut graph = Graph::from_cage(red);
+        assert_eq!(App::refusal_of(&doc, &graph, &explain), None, "a part that is only a red cage is a part in the making");
+        ball_in(&mut graph, 40.0);
+        assert_eq!(App::refusal_of(&doc, &graph, &explain), None, "and the sphere beside it is what the gate asks about");
+    }
+
     /// Asked of [`App::target_operand`], which is the whole of that decision and is free of the
     /// `App` so it can be asked without a window. The block built from the answer is then held to
     /// the two things that make the state legal: `Graph::incomplete` names it, and the edit gate

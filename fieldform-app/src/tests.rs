@@ -2589,10 +2589,11 @@
                 }));
             }
             found.push(heard);
-            // The placement's two readers draw it twice and declare nothing, so the wrap is not a
-            // move to announce; the release is a move, and is said on its own frame and no other.
+            // The placement's two readers declare it (§17), which is said on the frame the wrap
+            // happens and no other; the release is said on its own frame and no other. Each line
+            // is one frame's, which is what this test is about.
             let first: Vec<String> = match released {
-                false => vec![],
+                false => vec!["Placement is now a variable \u{2014} Shell and Rim both use it".to_string()],
                 true => vec!["Sphere is on its own again".to_string()],
             };
             wanted.push(vec![first, vec![], vec![], vec![]]);
@@ -2604,11 +2605,10 @@
     /// all** (`block-ownership-spec.md` §4.2, §6.3).
     ///
     /// Adoption is what every consume does, and saying so would be a line for every boolean.
-    /// **A second reader is not said either, since 112**: it used to promote the block to a
-    /// variable and announce it, and it now makes a shared instance, which is the block being
-    /// drawn in both readers and no move anybody has to be told about (`notebook-spec.md` §12,
-    /// R5, §7.3). Losing every reader is the one move nobody asked for in so many words, so a
-    /// release is the one line left. And news an edit took back before the frame heard it is not
+    /// **A second reader is said again, 2026-10-24** (R1 inverted, `notebook-spec.md` §17): it
+    /// declares the block, which takes it out of the slot it was drawn in, and that is a move
+    /// nobody asked for in so many words. So two lines are left — the promotion and the release —
+    /// and both name who was involved. And news an edit took back before the frame heard it is not
     /// news: an undo puts the ownership back without settling, so the move it took back is still
     /// in the list, and so is a release that a later edit in the same frame adopted straight back.
     ///
@@ -2658,15 +2658,23 @@
 
         let hollow = g.add(shell(sphere.into()));
         let heard = edit(&mut doc, &mut stack, g.clone(), &[(hollow, "Shell")]);
-        assert_eq!(heard, Vec::<String>::new(), "a second reader is a shared instance, not news");
+        assert_eq!(
+            heard,
+            ["Sphere is now a variable \u{2014} Union and Shell both use it"],
+            "a second reader declares it, and the line names both",
+        );
 
-        // Three readers at once: three places the hub is drawn, and still nothing to say.
+        // Three readers at once: declared in one move, with all three named.
         let hub = g.add(ball());
         let spokes: Vec<NodeId> = (0..3).map(|_| g.add(shell(hub.into()))).collect();
         let mut made = vec![(hub, "Hub")];
         made.extend(spokes.iter().zip(["First", "Second", "Third"]).map(|(id, l)| (*id, l)));
         let heard = edit(&mut doc, &mut stack, g.clone(), &made);
-        assert_eq!(heard, Vec::<String>::new(), "nor is a third reader");
+        assert_eq!(
+            heard,
+            ["Hub is now a variable \u{2014} First, Second and Third all use it"],
+            "three readers at once are one promotion, with all three named in the order made",
+        );
 
         // The union deleted, which lets the cube go, and the delete taken back before anything
         // heard of it.
@@ -2680,14 +2688,15 @@
         let heard = ownership_news(&doc, &changes, |_| "?".to_string());
         assert_eq!(heard, Vec::<String>::new(), "and none of it is true any more");
 
-        // The union and its shell deleted: the cube is let go of, and so is the sphere, which was
-        // drawn in both of them and is now read by neither. Sorted, since the order the two come
-        // in is the order of their ids, and an id is random.
+        // The union and its shell deleted: the cube is let go of, which is the release line. The
+        // sphere is **not** — its second reader declared it earlier in this test, and a settle
+        // leaves a variable alone however few read it, so losing every reader is not a move for a
+        // declared block (R1 inverted, §17; the way back is Put back inside, §6.6).
         g.remove(hollow);
         g.remove(joined);
         let mut heard = edit(&mut doc, &mut stack, g.clone(), &[]);
         heard.sort();
-        assert_eq!(heard, ["Cube is on its own again", "Sphere is on its own again"]);
+        assert_eq!(heard, ["Cube is on its own again"]);
 
         // Let go of and taken straight back by the next edit, before the frame heard either.
         let mut freed = g.clone();
@@ -2707,13 +2716,19 @@
     ///
     /// What a settle reports is who read the block when it ran, and more than one edit can come
     /// before anything hears of it: every line of a script runs in one frame, and a reader can be
-    /// added and deleted again inside one. That used to be where the "is now a variable" line got
-    /// its readers wrong — a reader deleted since did not use the block and one added since went
-    /// unnamed — and since 112 a second reader declares nothing and the line is gone, so the whole
-    /// shuffle is silent. What is still owed when the frame finally asks is a release, and only if
-    /// the block is on its own by then, which is the second half here.
+    /// added and deleted again inside one. **This is where the "is now a variable" line gets its
+    /// readers right**, which is the reason the line is built from the document rather than from
+    /// the change: a reader deleted since does not use the block, and one added since would
+    /// otherwise go unnamed. The line came back with R1's inversion (`notebook-spec.md` §17), and
+    /// so did this hazard.
+    ///
+    /// **And once declared, it stays declared**: `settle_one` leaves a `Variable` alone however
+    /// many read it, so taking every reader away does *not* say "is on its own again" — that line
+    /// is a nested block's, and the way back for a declared one is *Put back inside* (§6.6), which
+    /// with no readers makes it a plain top-level block. Asserted here because the difference is
+    /// invisible on screen: both end up as a row of their own.
     #[test]
-    fn only_losing_every_reader_is_said_however_they_changed_before_the_frame_heard() {
+    fn the_readers_a_promotion_names_are_the_ones_it_has_when_the_frame_hears() {
         use super::{ownership_news, record_graph_edit};
         use fieldform_ops::{CommandStack, Document};
         use fieldform_scene::{BlockKey, BooleanOp, Graph, Node, ParamRef, Place};
@@ -2754,16 +2769,27 @@
         let changes = std::mem::take(&mut doc.pending_ownership_changes);
         assert_eq!(
             said(&doc, &changes),
-            Vec::<String>::new(),
-            "one reader, then two, then two others: drawn in each, and no line for any of it",
+            ["Sphere is now a variable \u{2014} Union and Pair both use it"],
+            "one reader, then two: the promotion is the line, naming who reads it now",
         );
 
-        // And both readers deleted, which is the move that is said.
+        // And both readers deleted: the declaration stands, so there is nothing to say. A
+        // *nested* block losing its one reader is what says "is on its own again", which
+        // `a_block_let_go_of_is_said_once_while_it_is_still_true_and_nothing_else_is` holds.
         g.remove(joined);
         g.remove(pair);
         record_graph_edit(&mut stack, &mut doc, &mut None, part, g).expect("both readers gone");
         let changes = std::mem::take(&mut doc.pending_ownership_changes);
-        assert_eq!(said(&doc, &changes), ["Sphere is on its own again"]);
+        assert_eq!(
+            said(&doc, &changes),
+            Vec::<String>::new(),
+            "a declared block stays declared with nothing reading it, and says nothing",
+        );
+        assert_eq!(
+            doc.ownership(BlockKey::Node(sphere)),
+            fieldform_scene::Ownership::Variable,
+            "which is the state Put back inside is the way out of",
+        );
     }
 
     /// **Opening a file names the unnamed variables two blocks read, and no other**
@@ -2821,9 +2847,11 @@
         g.remove(hollow);
         record_graph_edit(&mut stack, &mut doc, &mut None, part, g).expect("the shell deleted");
         doc.node_meta.entry(sphere).or_default().name = None;
-        assert!(
-            variables_to_name(&doc, false).is_empty(),
-            "a frame names nothing, the hub two blocks read included",
+        assert_eq!(
+            variables_to_name(&doc, false),
+            [hub],
+            "a frame names what the settle declared \u{2014} the hub, which two blocks read \u{2014} and \
+             not the sphere, whose name was cleared while one block reads it (R1 inverted, §17)",
         );
 
         let saved = fieldform_io::to_archive(&doc).expect("saved");
@@ -3078,7 +3106,7 @@
         // A drag of the cage, written live through `App::mesh_of_mut`, which moves the count on
         // every frame of it and records nothing until the hand comes off.
         let corner = doc.cage(cage).expect("the cage").vertex_ids().next().expect("a corner");
-        doc.cage_mut(cage)
+        doc.cage_mesh_mut(cage)
             .expect("the cage")
             .set_vertex_position(corner, nalgebra::Point3::new(0.0, -150.0, 0.0));
         moves += 1;
@@ -4943,8 +4971,8 @@
             stack.redo(&mut doc).expect("one redo");
             assert_eq!(rows(&doc), free);
 
-            // The extrude reads it, so it goes back inside the extrude.
-            let back = put_back_inside(&doc, named);
+            // The extrude reads it, and nothing else, so it goes back inside the extrude.
+            let back = put_back_inside(&doc, named).expect("one reader");
             stack.execute(&mut doc, Box::new(back)).expect("its V again");
             assert_eq!(rows(&doc), trapped, "back inside the extrude");
             assert_eq!(doc.curve(square[0]).map(|c| c.name.clone()), name, "its name kept");
@@ -5018,7 +5046,7 @@
                 stack.redo(&mut doc).expect("one redo");
                 assert_eq!(rows(&doc), out, "side {named}: redone");
 
-                let back = put_back_inside(&doc, v(&doc));
+                let back = put_back_inside(&doc, v(&doc)).expect("one reader");
                 stack.execute(&mut doc, Box::new(back)).expect("the bright V");
                 assert_eq!(rows(&doc), inside, "side {named}: back inside the extrude");
                 stack.undo(&mut doc).expect("one undo");
@@ -5036,13 +5064,14 @@
         /// split was a coin flip on walk order. And a file from before ownership was stored, whose
         /// list folded such a curve in, opened split.
         ///
-        /// A second reader declares nothing now (`notebook-spec.md` §12, R5): the curve is nested,
-        /// so the loop is one row drawn in full inside both readers — the shared instance of §7.3,
-        /// which is what the list does with any block two blocks read. The loop still may not
-        /// split, which is what each row holding every curve of it says. Asserted for every side,
-        /// so a rule that holds for the key alone fails.
+        /// **A second reader declares the curve** (R1 inverted 2026-10-24, `notebook-spec.md`
+        /// §17), so the loop is one profile row of its **own**, above the two blocks that read it,
+        /// and neither of them holds it. Between 112 and the inversion it was nested and drawn in
+        /// full inside both readers. The loop still may not split, which is what the one row
+        /// holding every curve of it says. Asserted for every side, so a rule that holds for the
+        /// key alone fails.
         #[test]
-        fn a_loop_two_blocks_read_is_one_row_in_each_of_them_whichever_curve_they_name() {
+        fn a_loop_two_blocks_read_is_one_row_of_its_own_whichever_curve_they_name() {
             use super::super::Block;
             use fieldform_scene::{Axis, BlockKey, Frame, Outline, Ownership, ParamRef};
             for named in 0..4 {
@@ -5057,17 +5086,19 @@
                 let revolve = read_through(&mut stack, &mut doc, part, revolve);
                 assert_eq!(
                     doc.ownership(BlockKey::Curve(square[named])),
-                    Ownership::Nested,
-                    "side {named}: two blocks read it, so it is drawn inside both",
+                    Ownership::Variable,
+                    "side {named}: two blocks read it, so it is declared (R1 inverted)",
                 );
                 let key = fieldform_field::profile_partition(&doc)[0][0];
                 assert_eq!(
                     square_rows(&doc, part, &square, &[extrude, revolve]),
                     vec![
-                        (Block::Node(extrude), vec![Block::Profile(key)]),
-                        (Block::Node(revolve), vec![Block::Profile(key)]),
+                        (Block::Profile(key), vec![]),
+                        (Block::Node(extrude), vec![]),
+                        (Block::Node(revolve), vec![]),
                     ],
-                    "side {named}: the one profile row, whole, inside each of the two",
+                    "side {named}: the one profile row is its own, and holds every curve of the \
+                     loop whichever of them the two blocks name",
                 );
             }
         }
@@ -6249,7 +6280,7 @@
         at.run(make);
         assert_eq!(at.name(cube).as_deref(), Some("box"));
 
-        let back = put_back_inside(&at.doc, BlockKey::Node(sphere));
+        let back = put_back_inside(&at.doc, BlockKey::Node(sphere)).expect("one reader");
         at.run(back);
         assert_eq!(at.doc.ownership_nodes.get(&sphere), Some(&Ownership::Nested));
         assert_eq!(at.owners(sphere), vec![joined], "back inside the one block reading it");
@@ -6257,7 +6288,11 @@
         at.step(true);
         assert!(at.owners(sphere).is_empty(), "one undo makes it a variable again");
 
-        // A second reader: it goes back inside both of them, and is one block in each.
+        // **A second reader refuses it, and names them** (`notebook-spec.md` §6.6 as amended
+        // 2026-10-24, §17). 112 had it go back inside both and be one block in each; a second
+        // reader declares the block now, so there is nowhere for it to go and a settle would put
+        // it straight back. The wiring itself has already made it a variable here, which is the
+        // other half of the same rule.
         let mut g = at.doc.parts[&at.part].graph.clone();
         let hollow = g.add(Node::Shell { input: sphere.into(), thickness: ParamRef::Literal(1.0) });
         record_graph_edit(&mut at.stack, &mut at.doc, &mut None, at.part, g.clone())
@@ -6265,19 +6300,23 @@
         // Ascending, since ids are random and that is the order the rows come in.
         let mut readers = vec![joined, hollow];
         readers.sort();
-        let back = put_back_inside(&at.doc, BlockKey::Node(sphere));
-        at.run(back);
-        assert_eq!(at.doc.ownership_nodes.get(&sphere), Some(&Ownership::Nested));
-        assert_eq!(at.owners(sphere), readers, "drawn inside the union and the shell both");
-        assert_eq!(at.name(sphere).as_deref(), Some("Sphere"), "and still named");
-        at.step(true);
-        assert!(at.owners(sphere).is_empty(), "one undo makes it a variable again");
+        assert_eq!(
+            at.doc.ownership_nodes.get(&sphere),
+            Some(&Ownership::Variable),
+            "the second reader declared it",
+        );
+        assert_eq!(
+            put_back_inside(&at.doc, BlockKey::Node(sphere)).err(),
+            Some(readers.clone()),
+            "so putting it back is refused, naming who reads it",
+        );
+        assert!(at.owners(sphere).is_empty(), "and its row stays its own");
 
         // None: it stands on its own.
         g.remove(hollow);
         g.remove(joined);
         record_graph_edit(&mut at.stack, &mut at.doc, &mut None, at.part, g).expect("both gone");
-        let back = put_back_inside(&at.doc, BlockKey::Node(sphere));
+        let back = put_back_inside(&at.doc, BlockKey::Node(sphere)).expect("nothing reads it");
         at.run(back);
         assert_eq!(at.doc.ownership_nodes.get(&sphere), Some(&Ownership::Free));
     }
@@ -6746,7 +6785,7 @@
             turn: fieldform_scene::no_turn(),
         });
 
-        let round = Fillet { radius: lit(2.0), continuity: Continuity::G1 };
+        let round = Fillet { radius: lit(2.0), continuity: Continuity::G1, second: None };
         let takers = [
             ("boolean", g.add(Node::Boolean {
                 op: fieldform_scene::BooleanOp::Union,
@@ -6932,6 +6971,7 @@
             fillet: fieldform_scene::Fillet {
                 radius: lit(0.0),
                 continuity: fieldform_scene::Continuity::G1,
+                second: None,
             },
         });
 
@@ -6959,6 +6999,7 @@
             fillet: fieldform_scene::Fillet {
                 radius: lit(0.0),
                 continuity: fieldform_scene::Continuity::G1,
+                second: None,
             },
         });
 

@@ -31,7 +31,7 @@ impl App {
     /// record, and after a document is opened or begun.
     pub(crate) fn echo_rebase(&mut self) {
         // Never past a pending session's block: its making is written when it is kept.
-        if self.session.is_some() {
+        if self.session.is_some() || self.cage_session.is_some() {
             return;
         }
         self.echo_base = self.echo_snapshot();
@@ -52,7 +52,7 @@ impl App {
     /// pending session's block go unnamed until it is kept (§3.5). Shallowest first and never by
     /// id ([`echo::new_blocks`]), so the same edits name the same blocks in every run.
     pub(crate) fn echo_settle(&mut self) {
-        if self.document_moves == self.echo_base.moves || self.session.is_some() {
+        if self.document_moves == self.echo_base.moves || self.session.is_some() || self.cage_session.is_some() {
             return;
         }
         if self.echo_base.part != self.active_part {
@@ -83,7 +83,7 @@ impl App {
     /// drag or placement mid-way. A drag is one edit and is written once, when the hand comes off.
     pub(crate) fn echo_when_quiet(&mut self, ctx: &egui::Context) {
         // A pending session is written when it is kept, with the values it was kept with.
-        if self.document_moves == self.echo_base.moves || self.script_running || self.session.is_some() {
+        if self.document_moves == self.echo_base.moves || self.script_running || self.session.is_some() || self.cage_session.is_some() {
             return;
         }
         let busy = ctx.input(|i| i.pointer.any_down())

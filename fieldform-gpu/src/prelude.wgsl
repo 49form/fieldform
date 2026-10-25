@@ -189,10 +189,16 @@ fn blend_bound_normal(
         }
         if abs(x - y) <= k && abs(k - (x + y)) * 0.5 < nearest {
             gradient = 0.5 * (ga + gb);
+            seam_scale = seam_scale_of(ga, gb);
         }
         return gradient;
     }
     if n != 2.0 {
+        // Within both operands' reach the divided form mixes the two gradients as the arc
+        // does, and reads short by about as much.
+        if k - a > 0.0 && k - b > 0.0 {
+            seam_scale = seam_scale_of(ga, gb);
+        }
         return blend_gradient(a, b, ga, gb, k, k, n) / pow(2.0, 1.0 / n);
     }
     let x = k - a;
@@ -216,6 +222,7 @@ fn blend_bound_normal(
             // d/d(x, y) of (along - x - y) / 2, and x, y fall as a, b rise.
             let lean = across / max(along, 1e-12);
             gradient = 0.5 * ((1.0 + lean) * ga + (1.0 - lean) * gb);
+            seam_scale = seam_scale_of(ga, gb);
         }
     }
     return gradient;
@@ -257,6 +264,28 @@ fn pattern_join_divisor(k: f32, reach: f32, count: f32, first: f32, n: f32) -> f
 var<private> crit_gap: f32 = 3.4e38;
 // Set by a blend's normal when the radius it used was on its way down. See `field_normal`.
 var<private> taper_hit: bool = false;
+// **What a reading along this hit's normal falls short by, for the still's occlusion to put
+// back** (`round-chamfer-spec.md` §4.4). A blend's value is the max-norm distance to its zero set
+// in the operands' plane, which along the seam's bisector moves by `cos(θ/2)` of a step, `θ` the
+// seam's angle: 0.707 square, a half at 120°. The field is right to read so -- no two values can
+// know the angle between their gradients -- but occlusion takes a short reading for nearby
+// material and paints every fillet as a trench. The blend's normal knows both gradients, so it
+// leaves `2 / |ĝa + ĝb|` here when the arc is the nearest piece, one otherwise; `field_normal`
+// keeps the hit body's, `march` writes it beside the pixel, and `occlude` multiplies its five
+// readings by it. An estimate, as occlusion is, and exact on the bisector; the shadow is left
+// alone, since its march goes toward the light and not along the normal.
+var<private> seam_scale: f32 = 1.0;
+
+// `2 / |ĝa + ĝb|`, which is `1 / cos(θ/2)`, capped: past 120° a seam is nearly flat and a
+// reading scaled three times is a crevice erased, which is the wrong picture the other way.
+fn seam_scale_of(ga: vec3<f32>, gb: vec3<f32>) -> f32 {
+    let la = length(ga);
+    let lb = length(gb);
+    if la < 1e-9 || lb < 1e-9 {
+        return 1.0;
+    }
+    return clamp(2.0 / max(length(ga / la + gb / lb), 1e-6), 1.0, 3.0);
+}
 
 // The radius a fillet gets here: nought on a critical surface and across its clearance band, the
 // whole radius once the gap exceeds it. Matches `tapered` in fieldform-field.
@@ -2034,6 +2063,22 @@ fn profile_distance(index: u32, q: vec2<f32>) -> f32 {
     return select(nearest, -nearest, inside);
 }
 
+// The section as the normal pass reads it: the bake, and nothing else where every section has
+// one. See the profile-solids marker below for why the normal pass has a reader of its own: what
+// the value pass walks is what the driver's compile pays for, and a differenced normal does not
+// need the exact finish. A section the tolerance could not bake (`bake_cells`) has nothing here
+// but the walk; the renderer keeps the walk's line only in a document holding such a section,
+// and cuts it to `return 1e30;` otherwise, so the normal pass of every other document compiles
+// without a loop in it. That edit is the one place the source the driver sees differs from the
+// generator's, and the renderer's pipeline cache compares the edited text.
+fn profile_distance_bake(index: u32, q: vec2<f32>) -> f32 {
+    let span = curve_spans[index];
+    if (span.bake_wide > 0u) {
+        return baked_profile_distance(span, q);
+    }
+    return profile_distance(index, q); // unbaked-section-walk
+}
+
 // The section offset outward by `t` with its corners **mitred**: the same walk, over a
 // boundary whose every vertex has moved by `t` times its own miter vector.
 //
@@ -2246,6 +2291,24 @@ fn sample_bake(span: CurveSpan, x: f32, y: f32) -> f32 {
 // Outside both the profile and the slab the true distance is the diagonal, not the larger of
 // the two — taking the max there understates it, which is safe but makes a ray crawl along the
 // rim. Matches the CPU exactly.
+// ---- profile solids: instantiated again for the normal pass ----
+//
+// **Every `fn` from here to the end marker is emitted a second time by codegen, renamed `_bake`,
+// with each call to another of them renamed too and `profile_distance` read as
+// `profile_distance_bake`.** The normal pass calls the copies. The reason is the driver's
+// compile: the value pass must finish on the outline (item 115) and walk a section without a
+// bake, and both are loops, inlined wherever a section is read -- and a differenced normal reads
+// a section six or seven times per solid, inside a loop of its own. Four partial revolves took
+// 9.7 s to compile with the normal pass reading the exact section and 2.5 s with it reading the
+// bake alone; four extrudes 8.2 s (`document_cost`, 2026-10-19, after the wedge's own loops had
+// taken it from 106 s); four sweeps 27.6 s with the normal pass and 5.2 s without it, four lofts
+// 6.5 s and 3.7 s, which is why the region runs through the sweeps and the lofts to the pipe.
+// A normal from the bake is the bilinear grid's gradient, which the normal was before item 115
+// and is accurate to the cell; the surface itself is the value pass's and unchanged. Structs
+// and constants in the region are not copied; `profile_mitred` is not a section with a bake and
+// walks in both copies, so a drafted extrude with mitred corners keeps its cost.
+// `the_normal_pass_reads_every_profile_solid_through_its_bake_copy` holds the list.
+
 // A profile swept along `dir`, given in the profile's own frame.
 //
 // One function for the straight sweep and the leaning one, because the straight sweep *is* the
@@ -2450,11 +2513,41 @@ fn extrude_combine(plane: f32, slab: f32, dir: vec3<f32>, steepest: f32) -> f32 
 
 // A rim's join, matching `Rim::join`: the blend's bound with both signs turned, at the shape's
 // exponent. Moves no faster than the faster of its two readings at any angle between them.
+// A rim's shape and its second leg, from the vector's `y`: the exponent, or -- negative -- a
+// chamfer whose leg along the end is `−y` (see `rim_vector` in codegen). `x` the exponent, `y`
+// the second leg or nought.
+fn rim_shape(rim: vec4<f32>) -> vec2<f32> {
+    return select(vec2<f32>(rim.y, 0.0), vec2<f32>(1.0, -rim.y), rim.y < 0.0);
+}
+
+// The readings scaled so a bevel of two legs is the equal-legged bevel's zero set, and the
+// number it is read at -- `Rim::scaled`: `x·m/s_y`, `y·m/s_x`, `m = min(s_x, s_y)`, the scales
+// at most one so every bound holds as it did. `(x, y, k)` unchanged with one leg.
+fn rim_two_legs(x: f32, y: f32, rim: vec4<f32>) -> vec3<f32> {
+    let legs = rim_shape(rim);
+    if (legs.y > 0.0 && rim.x > 0.0) {
+        let m = min(rim.x, legs.y);
+        return vec3<f32>(x * m / legs.y, y * m / rim.x, m);
+    }
+    return vec3<f32>(x, y, rim.x);
+}
+
 fn rim_join(x: f32, y: f32, rim: vec4<f32>) -> f32 {
     if (rim.w > 0.0) {
         return rim_join_square(x, y, rim);
     }
-    return -blend_bound(-x, -y, rim.x, rim.y);
+    // **What this bound reads short by along the rim's normal, for the still's occlusion** --
+    // the blend's arrangement (`seam_scale`), with the angle known rather than measured: a
+    // rim's two readings are a section's and a slab's, square but for a lean, and the max-norm
+    // bound reads `cos 45°` of a step along the arc's normal (spec `round-chamfer-spec.md` §4.4:
+    // 0.707 on every bound rim). Left only where the arc is the nearest piece, which is where
+    // both readings are within the reach and no further apart than it; a rim's normal is
+    // differenced, so this is the one place that knows.
+    let k = rim.x;
+    let on_arc = k > 0.0 && x > -k && y > -k && abs(x - y) <= k;
+    seam_scale = select(1.0, 1.4142135, on_arc);
+    let s = rim_two_legs(x, y, rim);
+    return -blend_bound(-s.x, -s.y, s.z, rim_shape(rim).x);
 }
 
 // The exact rounded corner of the (x, y) plane -- `edged2`, the two-axis form the cylinder's
@@ -2463,7 +2556,21 @@ fn rim_join(x: f32, y: f32, rim: vec4<f32>) -> f32 {
 fn rim_join_square(x: f32, y: f32, rim: vec4<f32>) -> f32 {
     let k = rim.x;
     let yy = select(y, min(y, k), rim.w > 1.0);
-    let near = edged2(vec2<f32>(x, yy), rim.xy) - (y - yy);
+    let shape = rim_shape(rim);
+    var near: f32;
+    if (shape.y > 0.0) {
+        // A bevel of two legs between square faces, exactly: the hard corner, or the bevel's
+        // plane `s_x·x + s_y·y + s_x·s_y = 0` read as the true distance to it (`Rim::join_square`).
+        let hard = edged2(vec2<f32>(x, yy), vec2<f32>(0.0, 1.0));
+        let bevel = (k * x + shape.y * yy + k * shape.y) / length(vec2<f32>(k, shape.y));
+        near = max(hard, bevel) - (y - yy);
+    } else {
+        near = edged2(vec2<f32>(x, yy), vec2<f32>(k, shape.x)) - (y - yy);
+    }
+    // Exact at the circle and the chamfer; the cube norm of the G2 corner reads 0.891 of a step
+    // along its normal (measured in `rim_ao_reading`), put back as `rim_join` puts back its own.
+    let g2_corner = shape.x != 1.0 && shape.x != 2.0 && k > 0.0 && x > -k && y > -k;
+    seam_scale = select(1.0, 1.122, g2_corner);
     return max(near / rim.w, max(x, y));
 }
 
@@ -2608,6 +2715,7 @@ fn extrude_normal(
     return extrude_rim_normal(index, p, dir, depth, euler, NO_RIM);
 }
 
+// In one loop and not six calls, as the wedge's is and for its reason.
 fn extrude_rim_normal(
     index: u32,
     p: vec3<f32>,
@@ -2617,14 +2725,14 @@ fn extrude_rim_normal(
     rim: vec4<f32>,
 ) -> vec3<f32> {
     let h = 1e-3;
-    let n = vec3<f32>(
-        extrude_rim_distance(index, p + vec3<f32>(h, 0.0, 0.0), dir, depth, rim)
-            - extrude_rim_distance(index, p - vec3<f32>(h, 0.0, 0.0), dir, depth, rim),
-        extrude_rim_distance(index, p + vec3<f32>(0.0, h, 0.0), dir, depth, rim)
-            - extrude_rim_distance(index, p - vec3<f32>(0.0, h, 0.0), dir, depth, rim),
-        extrude_rim_distance(index, p + vec3<f32>(0.0, 0.0, h), dir, depth, rim)
-            - extrude_rim_distance(index, p - vec3<f32>(0.0, 0.0, h), dir, depth, rim),
-    );
+    var n = vec3<f32>(0.0, 0.0, 0.0);
+    for (var k = 0u; k < 6u; k = k + 1u) {
+        let axis = k / 2u;
+        let weight = 1.0 - 2.0 * f32(k % 2u);
+        var step = vec3<f32>(0.0, 0.0, 0.0);
+        step[axis] = h * weight;
+        n[axis] += weight * extrude_rim_distance(index, p + step, dir, depth, rim);
+    }
     return normalize(euler_rotation(euler) * n);
 }
 
@@ -2683,16 +2791,17 @@ fn wall_revolve_normal(
     return normalize(euler_rotation(euler) * n);
 }
 
+// In one loop and not six calls, as the wedge's is and for its reason.
 fn revolve_normal(index: u32, p: vec3<f32>, euler: vec3<f32>) -> vec3<f32> {
     let h = 1e-3;
-    let n = vec3<f32>(
-        revolve_distance(index, p + vec3<f32>(h, 0.0, 0.0))
-            - revolve_distance(index, p - vec3<f32>(h, 0.0, 0.0)),
-        revolve_distance(index, p + vec3<f32>(0.0, h, 0.0))
-            - revolve_distance(index, p - vec3<f32>(0.0, h, 0.0)),
-        revolve_distance(index, p + vec3<f32>(0.0, 0.0, h))
-            - revolve_distance(index, p - vec3<f32>(0.0, 0.0, h)),
-    );
+    var n = vec3<f32>(0.0, 0.0, 0.0);
+    for (var k = 0u; k < 6u; k = k + 1u) {
+        let axis = k / 2u;
+        let weight = 1.0 - 2.0 * f32(k % 2u);
+        var step = vec3<f32>(0.0, 0.0, 0.0);
+        step[axis] = h * weight;
+        n[axis] += weight * revolve_distance(index, p + step);
+    }
     return normalize(euler_rotation(euler) * n);
 }
 
@@ -3313,18 +3422,16 @@ fn wall_extrude_rim_normal(
     euler: vec3<f32>,
     rim: vec4<f32>,
 ) -> vec3<f32> {
+    // In one loop and not six calls, as the wedge's is and for its reason.
     let h = 1e-3;
-    let x = vec3<f32>(h, 0.0, 0.0);
-    let y = vec3<f32>(0.0, h, 0.0);
-    let z = vec3<f32>(0.0, 0.0, h);
-    let n = vec3<f32>(
-        wall_extrude_rim_distance(chain, faces, sides, p + x, dir, depth, thickness, facing, round, closed, rim)
-            - wall_extrude_rim_distance(chain, faces, sides, p - x, dir, depth, thickness, facing, round, closed, rim),
-        wall_extrude_rim_distance(chain, faces, sides, p + y, dir, depth, thickness, facing, round, closed, rim)
-            - wall_extrude_rim_distance(chain, faces, sides, p - y, dir, depth, thickness, facing, round, closed, rim),
-        wall_extrude_rim_distance(chain, faces, sides, p + z, dir, depth, thickness, facing, round, closed, rim)
-            - wall_extrude_rim_distance(chain, faces, sides, p - z, dir, depth, thickness, facing, round, closed, rim),
-    );
+    var n = vec3<f32>(0.0, 0.0, 0.0);
+    for (var k = 0u; k < 6u; k = k + 1u) {
+        let axis = k / 2u;
+        let weight = 1.0 - 2.0 * f32(k % 2u);
+        var step = vec3<f32>(0.0, 0.0, 0.0);
+        step[axis] = h * weight;
+        n[axis] += weight * wall_extrude_rim_distance(chain, faces, sides, p + step, dir, depth, thickness, facing, round, closed, rim);
+    }
     return normalize(euler_rotation(euler) * n);
 }
 
@@ -4969,6 +5076,8 @@ fn loft_rim_value_normal(
     }
     return vec4<f32>(n / l, value);
 }
+
+// ---- end of profile solids ----
 
 fn pipe_distance(index: u32, p: vec3<f32>, radius: f32) -> f32 {
     let span = curve_spans[index];

@@ -26,7 +26,7 @@ const CAGE_SIZE_MM: f64 = 1000.0;
 
 fn main() {
     let (doc, graph) = scene();
-    let cage = &doc.cages[doc.cages.keys().next().unwrap()];
+    let cage = doc.cage(*doc.cages.keys().next().unwrap()).unwrap();
 
     println!("scene: {CAGE_SIZE_MM} mm cube cage, minus a pipe along a curve\n");
 
@@ -92,7 +92,7 @@ fn main() {
 fn scene() -> (Document, Graph) {
     let mut doc = Document::new();
     let cage_id = CageId::new();
-    doc.cages.insert(cage_id, Cage::cube_of(CAGE_SIZE_MM));
+    doc.cages.insert(cage_id, Cage::cube_of(CAGE_SIZE_MM).into());
 
     let curve_id = CurveId::new();
     let s = CAGE_SIZE_MM;

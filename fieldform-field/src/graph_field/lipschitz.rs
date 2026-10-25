@@ -380,7 +380,7 @@ pub fn approximate_blends(document: &Document, graph: &Graph) -> Vec<NodeId> {
         return approximate_blends(&merged, &merged_graph);
     }
     // Derived from the edges each time it is asked, like `roots` and for the same reason.
-    let holed = graph.incomplete();
+    let holed = document.incomplete_in(graph);
     let mut out: Vec<NodeId> = graph
         .nodes()
         .filter(|(id, _)| !holed.contains(id))
@@ -470,7 +470,7 @@ pub fn driven_blend_divisor(document: &Document, graph: &Graph, blend: NodeId) -
 /// of it, a step budget that buys no steps for it. Nought for a ramp whose ends cannot be
 /// resolved, which the compile refuses by name.
 pub fn fillet_reach(document: &Document, graph: &Graph, fillet: &fieldform_scene::Fillet) -> f64 {
-    match fillet.radius.driver() {
+    let first = match fillet.radius.driver() {
         None => document.resolve(&fillet.radius).unwrap_or(0.0),
         Some(driver) => match graph.node(driver) {
             Some(Node::Ramp { out_min, out_max, .. }) => {
@@ -480,7 +480,10 @@ pub fn fillet_reach(document: &Document, graph: &Graph, fillet: &fieldform_scene
             }
             _ => 0.0,
         },
-    }
+    };
+    // The further of a chamfer's two legs, since the bevel reaches that far into one face.
+    let second = fillet.second_leg().and_then(|s| document.resolve(s)).unwrap_or(0.0);
+    first.max(second)
 }
 
 /// What a lattice with a driven phase divides its value by, from the graph alone.

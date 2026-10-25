@@ -58,7 +58,7 @@ fn main() {
 
     let mut doc = Document::new();
     let cage_id = CageId::new();
-    doc.cages.insert(cage_id, cage);
+    doc.cages.insert(cage_id, cage.into());
     let curve_id = curve.id;
     doc.curves.insert(curve_id, curve);
 

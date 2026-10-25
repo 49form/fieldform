@@ -115,13 +115,132 @@ fn a_menu_setting_and_its_console_line_reach_the_same_state() {
     assert!(app.show_shortcuts);
 
     // A command that is not on offer says why and does nothing: Flip section with no section.
-    assert!(!app.section.on);
-    let flipped = app.section.flipped;
+    assert!(app.sections.is_empty(), "no section until one is asked for");
     app.invoke_command(by("view.section_flip"));
-    assert_eq!(app.section.flipped, flipped, "refused while there is no section");
+    assert!(app.sections.is_empty(), "refused while there is no section");
     app.invoke_command(by("view.section"));
+    assert_eq!(app.sections.len(), 1, "the first toggle makes one");
     app.invoke_command(by("view.section_flip"));
-    assert_eq!(app.section.flipped, !flipped);
+    assert!(app.sections[0].flipped);
+}
+
+/// **A section is a view that stays on, and where it was, through the direct layer's edits**
+/// (the owner, 2026-10-24). Made and on it has the handles; a cage face picked in the viewport
+/// takes them and leaves the cut on and unmoved; dragging the face moves the cage and not the
+/// plane; the row gives the handles back without moving it either. A second section cuts beside the
+/// first, each row's switch is its own, and Delete with a row selected removes that section and
+/// nothing of the part.
+#[test]
+fn the_section_stays_on_and_unmoved_while_a_cage_face_is_picked_and_moved() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cage");
+    frame(&mut app, Vec::new());
+    // Polygon mode, so a click picks on the cage: picking follows what the mode draws.
+    app.dispatch("view.display", &Args::new().with("mode", Value::Str("polygon".into())));
+    frame(&mut app, Vec::new());
+    assert!(app.view_mode.cage_is_editable());
+
+    app.invoke_command(by("view.section"));
+    frame(&mut app, Vec::new());
+    assert!(app.sections[0].on && app.section_selected == Some(0), "turning it on reaches for it");
+    let placed = app.sections[0];
+
+    // A point on a face on screen, as the camera draws it: one the pick agrees is that face and
+    // that no handle of the section's manipulator is over -- the handles sit at the scene's
+    // centre, which is where the cage's near faces project, and a press on a handle is the
+    // handle's, as it should be. So the centre of each face and points toward its corners are
+    // tried until one is clear.
+    let rect = app.viewport_rect.expect("a frame sets the viewport");
+    let aspect = rect.width() / rect.height().max(1.0);
+    let placement = app.control_placement();
+    let gizmo = app.gizmo_frame().expect("the section has the handles");
+    let eye = app.camera.eye.cast::<f64>();
+    let (face, at) = {
+        let project = app.gizmo_project(aspect, rect);
+        app.cage()
+        .face_ids()
+        .find_map(|f| {
+            let corners: Vec<Point3<f64>> = app
+                .cage()
+                .face_vertices(f)
+                .iter()
+                .map(|&v| placement * app.cage().vertex_position(v))
+                .collect();
+            let centre = Point3::from(corners.iter().map(|c| c.coords).sum::<Vector3<f64>>() / 4.0);
+            std::iter::once(centre)
+                .chain(corners.iter().map(|c| centre + (c - centre) * 0.6))
+                .find_map(|p| {
+                    let at = app.camera.project_to_screen(aspect, rect, p.cast::<f32>())?;
+                    let under = crate::pick::pick(app.control(), &placement, &app.cage_mesh, &app.camera, aspect, rect, at);
+                    let clear = gizmo::hit_test(&gizmo, at, &project, eye).is_none();
+                    (under == Selection::Face(f) && clear).then_some((f, at))
+                })
+        })
+        .expect("some point of some face faces the camera clear of the handles")
+    };
+    left_click(&mut app, at);
+    assert!(app.selection.contains(Selection::Face(face)), "the click picked the face");
+    assert!(app.sections[0].on, "picking leaves the section on");
+    assert!(app.section_selected.is_none(), "and takes the handles from it");
+
+    // Dragging the face: a press on what is picked, pulled across the view, let go.
+    let vertices = app.cage().face_vertices(face);
+    let before: Vec<Point3<f64>> = vertices.iter().map(|&v| app.cage().vertex_position(v)).collect();
+    frame(&mut app, vec![press(at, egui::PointerButton::Primary, true)]);
+    let mut pos = at;
+    for _ in 0..6 {
+        pos += egui::vec2(15.0, 0.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
+    }
+    frame(&mut app, vec![press(pos, egui::PointerButton::Primary, false)]);
+    frame(&mut app, Vec::new());
+    let after: Vec<Point3<f64>> = vertices.iter().map(|&v| app.cage().vertex_position(v)).collect();
+    assert!(
+        before.iter().zip(&after).any(|(b, a)| (a - b).norm() > 1e-6),
+        "the drag moved the face: {before:?} -> {after:?}"
+    );
+    assert!(app.sections[0].on, "the cut is still on after the edit");
+    assert_eq!(app.sections[0].origin, placed.origin, "and the plane did not move with the face");
+    assert_eq!(app.sections[0].rotation, placed.rotation);
+    assert_eq!(app.sections[0].flipped, placed.flipped);
+
+    // The row gives the handles back and moves nothing; the face is no longer picked.
+    app.select_section(0);
+    assert!(app.sections[0].on && app.section_selected == Some(0));
+    assert!(app.selection.is_empty());
+    assert_eq!(app.sections[0].origin, placed.origin);
+    // And the switch is the only thing that turns it off: the row stays, with nothing to move.
+    app.invoke_command(by("view.section"));
+    assert!(!app.sections[0].on && app.selected_section().is_none());
+    assert!(app.section_half_spaces().is_empty(), "nothing is cut while none is on");
+    app.invoke_command(by("view.section"));
+    assert!(app.sections[0].on, "the toggle switches the current one back on, it makes no second");
+    assert_eq!(app.sections.len(), 1);
+
+    // A second section: on beside the first, numbered after it, and the manipulator's; both cut.
+    app.invoke_command(by("view.section_new"));
+    assert_eq!(app.sections.len(), 2);
+    assert!(app.sections[0].on && app.sections[1].on, "several may be on at once");
+    assert_eq!(app.section_half_spaces().len(), 2);
+    assert_eq!((app.sections[0].number, app.sections[1].number), (1, 2));
+    assert_eq!(app.section_selected, Some(1));
+    // The first's row takes the handles and switches nothing off; its own switch switches it off.
+    app.select_section(0);
+    assert!(app.sections[0].on && app.sections[1].on && app.section_selected == Some(0));
+    assert!(app.set_section_on(0, false));
+    assert!(!app.sections[0].on && app.sections[1].on);
+    assert_eq!(app.section_half_spaces().len(), 1);
+    // Delete, with a section's row selected, removes that section and nothing of the part; the
+    // one behind it keeps its number, and the claim goes with the row.
+    let bodies = app.part_graph().roots().len();
+    app.invoke_command(by("edit.delete_body"));
+    assert_eq!(app.sections.len(), 1);
+    assert_eq!(app.sections[0].number, 2);
+    assert!(app.section_selected.is_none());
+    assert_eq!(app.part_graph().roots().len(), bodies, "the part is untouched");
+    app.remove_section(0);
+    assert!(app.sections.is_empty() && app.section_half_spaces().is_empty());
 }
 
 // ----------------------------------------------------------------------- the smoke scripts
@@ -433,12 +552,12 @@ fn t1_the_echo_of_a_gui_session_replays_to_the_same_graph() {
     edit(&mut app, "Extrude_0", |n| {
         if let Node::Extrude { height, rims, .. } = n {
             *height = ParamRef::Literal(42.0);
-            *rims = fieldform_scene::Rims { radius: ParamRef::Literal(1.5), continuity: fieldform_scene::Continuity::G2, at: fieldform_scene::RimEnds::End };
+            *rims = fieldform_scene::Rims { radius: ParamRef::Literal(1.5), continuity: fieldform_scene::Continuity::G2, at: fieldform_scene::RimEnds::End, second: None };
         }
     });
     edit(&mut app, "Loft_0", |n| {
         if let Node::Loft { rims, .. } = n {
-            *rims = fieldform_scene::Rims { radius: ParamRef::Literal(1.0), continuity: fieldform_scene::Continuity::Chamfer, at: fieldform_scene::RimEnds::Both };
+            *rims = fieldform_scene::Rims { radius: ParamRef::Literal(1.0), continuity: fieldform_scene::Continuity::Chamfer, at: fieldform_scene::RimEnds::Both, second: None };
         }
     });
     edit(&mut app, "Boolean_0", |n| {
@@ -449,7 +568,7 @@ fn t1_the_echo_of_a_gui_session_replays_to_the_same_graph() {
                 op,
                 a,
                 b,
-                fillet: fieldform_scene::Fillet { radius: ParamRef::Literal(2.0), continuity: fieldform_scene::Continuity::G2 },
+                fillet: fieldform_scene::Fillet { radius: ParamRef::Literal(2.0), continuity: fieldform_scene::Continuity::G2, second: None },
             };
         }
     });
@@ -1256,15 +1375,15 @@ fn dragging_a_nested_block_out_onto_the_list_leaves_a_plain_block_and_an_empty_s
     assert_eq!(app.doc.ownership(key), fieldform_scene::Ownership::Nested, "nested again");
 }
 
-/// **A shared instance dragged out of one slot leaves that slot only** (`notebook-spec.md` §7.2):
-/// it stays nested in its other readers, and does not appear at the top level.
+/// **A block the wiring declared is dragged out of nothing: its row is already its own**
+/// (`notebook-spec.md` §7.2 as amended 2026-10-24, §17).
 ///
-/// This is why the drag carries its holder rather than the block alone. A shared block has a row
-/// in every reader -- `listed_blocks` clones it per owner -- so "the slot it came from" is a fact
-/// about the row that was grabbed, and a handler given only the block would have to guess which of
-/// the readers was meant or let go of all of them.
+/// This asserted the shared instance until the owner drove it: a block two blocks read was nested
+/// in both, and dragging it off one row left it nested in the other. A second reader declares it
+/// now, so there is no second slot to be in and no row inside a reader to grab — the drag-out has
+/// nothing to do, and does nothing, which is the state the grip's own tooltip describes.
 #[test]
-fn dragging_a_shared_instance_out_of_one_slot_leaves_it_nested_in_the_others() {
+fn a_block_two_readers_declared_is_already_out_of_every_slot() {
     let Some(mut app) = headless_app() else { return };
     app.run_command("sphere radius=10 centre=20,0,0 'ball'");
     app.run_command("cube size=40,40,40 centre=0,0,0 'box'");
@@ -1276,22 +1395,160 @@ fn dragging_a_shared_instance_out_of_one_slot_leaves_it_nested_in_the_others() {
     let ball = app.node_named("ball").expect("the ball");
     let second = app.node_named("second").expect("the second union");
     let key = fieldform_scene::BlockKey::Node(ball);
-    assert_eq!(app.doc.ownership(key), fieldform_scene::Ownership::Nested, "shared, so nested");
+    assert_eq!(
+        app.doc.ownership(key),
+        fieldform_scene::Ownership::Variable,
+        "two readers declared it",
+    );
+    assert_eq!(
+        slots_of(&app, "joined").iter().filter(|s| s.source() == Some(ball)).count()
+            + slots_of(&app, "second").iter().filter(|s| s.source() == Some(ball)).count(),
+        2,
+        "and both still read it, by name rather than by holding it",
+    );
 
-    app.drop_on_the_list(DraggedBlock { id: ball, from: Some(second) }, None);
+    // A drop on the list carries no holder for it, since its row is at the top level, so §7.2
+    // finds no slot to empty and leaves everything as it is.
+    app.drop_on_the_list(DraggedBlock { id: ball, from: None }, None);
+    frame(&mut app, Vec::new());
+    assert_eq!(app.doc.ownership(key), fieldform_scene::Ownership::Variable, "still declared");
+    assert_eq!(
+        slots_of(&app, "second").iter().filter(|s| s.source() == Some(ball)).count(),
+        1,
+        "and no slot was emptied",
+    );
+    let _ = second;
+}
+
+/// **A block dragged from one input to another moves: the slot it left empties** (§7.3 read with
+/// §7.1 and §7.2 — plain moves, Ctrl shares). One gesture, so **one** undo step.
+///
+/// The drop arms the move and `replace_node` completes it in the same graph edit, which is what
+/// this drives: `completing_a_move` set exactly as the release sets it, then the destination write
+/// the panel row makes. **What it does not reach** is the release itself — that the payload
+/// carries the row's holder, and that Ctrl is read off the frame the button came up in. Those live
+/// in the egui drag plumbing, which no test here drives.
+#[test]
+fn a_block_dragged_from_one_input_to_another_leaves_the_slot_it_came_from_empty() {
+    let Some(mut app) = headless_app() else { return };
+    app.run_command("sphere radius=10 centre=20,0,0 'ball'");
+    app.run_command("cube size=40,40,40 centre=0,0,0 'box'");
+    app.run_command("boolean -u in=ball,box 'joined'");
+    app.run_command("shell target=none thickness=2 'hollow'");
     frame(&mut app, Vec::new());
 
-    assert!(slots_of(&app, "second").iter().any(|s| s.is_empty()), "the slot it was dragged from");
+    let ball = app.node_named("ball").expect("the ball");
+    let joined = app.node_named("joined").expect("the union");
+    let hollow = app.node_named("hollow").expect("the shell");
+    let depth = app.stack.history().0.len();
+
+    // The release: the ball, out of the union's slot, onto the shell's empty one, no Ctrl.
+    app.completing_a_move = Some((joined, ball));
+    let mut node = app.part_graph().node(hollow).cloned().expect("the shell's node");
+    match &mut node {
+        Node::Shell { input, .. } => *input = ball.into(),
+        other => panic!("a shell, not {other:?}"),
+    }
+    app.replace_node(hollow, node);
+    frame(&mut app, Vec::new());
+
+    assert_eq!(slots_of(&app, "hollow")[0].source(), Some(ball), "the slot it was dropped on");
+    assert!(
+        slots_of(&app, "joined").iter().all(|s| s.source() != Some(ball)),
+        "and the slot it came from let go: {:?}",
+        slots_of(&app, "joined"),
+    );
+    assert_eq!(
+        app.doc.ownership(fieldform_scene::BlockKey::Node(ball)),
+        fieldform_scene::Ownership::Nested,
+        "it is nested in its new reader, not left at the top level",
+    );
+    assert_eq!(app.stack.history().0.len(), depth + 1, "one undo step for the move");
+    assert!(app.completing_a_move.is_none(), "and the pending half is spent");
+
+    app.run_command("undo");
+    frame(&mut app, Vec::new());
     assert_eq!(
         slots_of(&app, "joined").iter().filter(|s| s.source() == Some(ball)).count(),
         1,
-        "and the reader it was not dragged from still reads it",
+        "one undo puts both slots back",
+    );
+    assert!(slots_of(&app, "hollow")[0].is_empty(), "including the one it was dropped on");
+}
+
+/// **Ctrl+drag shares instead of moving** (§7.3): the block ends up read by both, which since the
+/// owner's ruling of 2026-10-24 (§17) makes it a **variable** — one block, a row of its own, and a
+/// chip in each reader. The gesture is unchanged; what it produces is.
+///
+/// Ctrl is the *absence* of an armed move, which is what makes this the control for the test
+/// above: the same destination write, with nothing armed, must leave the first slot alone.
+#[test]
+fn a_block_shared_onto_a_second_input_stays_in_the_first() {
+    let Some(mut app) = headless_app() else { return };
+    app.run_command("sphere radius=10 centre=20,0,0 'ball'");
+    app.run_command("cube size=40,40,40 centre=0,0,0 'box'");
+    app.run_command("boolean -u in=ball,box 'joined'");
+    app.run_command("shell target=none thickness=2 'hollow'");
+    frame(&mut app, Vec::new());
+
+    let ball = app.node_named("ball").expect("the ball");
+    let hollow = app.node_named("hollow").expect("the shell");
+
+    // The same release with Ctrl held: nothing is armed, so nothing lets go.
+    let mut node = app.part_graph().node(hollow).cloned().expect("the shell's node");
+    match &mut node {
+        Node::Shell { input, .. } => *input = ball.into(),
+        other => panic!("a shell, not {other:?}"),
+    }
+    app.replace_node(hollow, node);
+    frame(&mut app, Vec::new());
+
+    assert_eq!(slots_of(&app, "hollow")[0].source(), Some(ball), "the shell reads it");
+    assert_eq!(
+        slots_of(&app, "joined").iter().filter(|s| s.source() == Some(ball)).count(),
+        1,
+        "and so does the union it was already in",
     );
     assert_eq!(
-        app.doc.ownership(key),
-        fieldform_scene::Ownership::Nested,
-        "so it is still nested, not a row at the top level",
+        app.doc.ownership(fieldform_scene::BlockKey::Node(ball)),
+        fieldform_scene::Ownership::Variable,
+        "so the wiring declared it: one block, a row of its own, referenced by both (§17)",
     );
+}
+
+/// **Moved to a sibling slot of the same block, only the slot it left empties.**
+///
+/// The case that decides the gesture needs an index at all: "every slot that names it"
+/// ([`fieldform_scene::Node::stop_reading`], which §7.2's drag-out wants) would empty the slot the
+/// drop had just filled, and the move would read as a delete. The destination is the slot that
+/// changed, so the one to empty is the one that did not.
+#[test]
+fn a_block_moved_to_a_sibling_slot_empties_only_the_slot_it_left() {
+    let Some(mut app) = headless_app() else { return };
+    app.run_command("sphere radius=10 centre=20,0,0 'ball'");
+    app.run_command("cube size=40,40,40 centre=0,0,0 'box'");
+    app.run_command("boolean -s in=ball,box 'cut'");
+    frame(&mut app, Vec::new());
+
+    let ball = app.node_named("ball").expect("the ball");
+    let cut = app.node_named("cut").expect("the subtraction");
+    assert_eq!(slots_of(&app, "cut")[0].source(), Some(ball), "the ball is the first operand");
+
+    // Dragged from the first slot onto the second, within the one block.
+    app.completing_a_move = Some((cut, ball));
+    let mut node = app.part_graph().node(cut).cloned().expect("the node");
+    match &mut node {
+        Node::Boolean { inputs, .. } => inputs[1] = ball.into(),
+        Node::Blend { b, .. } => *b = ball.into(),
+        other => panic!("a boolean, not {other:?}"),
+    }
+    app.replace_node(cut, node);
+    frame(&mut app, Vec::new());
+
+    let slots = slots_of(&app, "cut");
+    assert_eq!(slots[1].source(), Some(ball), "it is in the slot it was dropped on: {slots:?}");
+    assert!(slots[0].is_empty(), "and out of the one it left: {slots:?}");
+    assert_eq!(slots.len(), 2, "both rows are still there");
 }
 
 /// **A block put back into the slot it came from recovers it**, which is the second half of §7.2's
@@ -1330,4 +1587,150 @@ fn a_block_put_back_into_an_empty_slot_fills_it_in_one_undo_step() {
     app.run_command("undo");
     frame(&mut app, Vec::new());
     assert!(slots_of(&app, "hollow")[0].is_empty(), "the undo leaves the hole as it was");
+}
+
+/// **The active cage follows the cage being worked on**: the selected cage block's, a visible one
+/// when the active one is hidden, and the one left when the active one is deleted -- so Tab and
+/// the cage tools reach the cage on screen with two in the part (the owner, 2026-10-24).
+#[test]
+fn the_active_cage_follows_the_selected_visible_or_remaining_cage_block() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cage");
+    frame(&mut app, Vec::new());
+    let first = app.active_cage;
+    app.run_command("cage");
+    frame(&mut app, Vec::new());
+    let second = app.active_cage;
+    assert_ne!(first, second, "a second cage is a new one");
+    let node_of = |app: &App, cage: CageId| app.part_graph().nodes().find(|(_, n)| matches!(n, Node::Cage(c) if *c == cage)).map(|(id, _)| id).unwrap();
+
+    // Selecting the first cage's block makes it active.
+    let first_node = node_of(&app, first);
+    app.select_body(Some(first_node));
+    assert_eq!(app.active_cage, first);
+    // Hiding it moves the tools to the cage still on screen.
+    app.toggle_visibility(first_node);
+    frame(&mut app, Vec::new());
+    assert_eq!(app.active_cage, second, "the visible cage is the one to work on");
+    // Deleting the second leaves the first, hidden or not, as the only cage to work on.
+    let second_node = node_of(&app, second);
+    app.select_body(Some(second_node));
+    assert!(app.delete_body(second_node));
+    frame(&mut app, Vec::new());
+    let left: Vec<CageId> = app.part_graph().nodes().filter_map(|(_, n)| if let Node::Cage(c) = n { Some(*c) } else { None }).collect();
+    assert_eq!(app.active_cage, first, "cages left in the part: {left:?}; first {first:?}, second {second:?}");
+    // Shown again, Tab's reading of the part finds its block.
+    app.toggle_visibility(first_node);
+    frame(&mut app, Vec::new());
+    assert!(app.is_visible(first_node));
+    assert_eq!(app.active_cage, first);
+}
+
+/// **A Cut Through line across the whole view cuts the cube in one closed loop**, resolved to edge
+/// points and committed as one `knife` line; a line that spans nothing is refused by name.
+#[test]
+fn a_cut_through_line_across_the_view_cuts_the_cube_in_one_loop() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cage");
+    frame(&mut app, Vec::new());
+    app.invoke_command(by("cage.cut"));
+    frame(&mut app, Vec::new());
+    assert!(app.cage_tool.as_ref().is_some_and(|t| t.command.op == "cage.cut"), "the knife is armed");
+    let rect = app.viewport_rect.expect("a frame sets the viewport");
+    let aspect = rect.width() / rect.height().max(1.0);
+    let y = rect.center().y;
+    let (a, b) = (egui::pos2(rect.min.x + 10.0, y), egui::pos2(rect.max.x - 10.0, y));
+    let paths = app.through_paths(aspect, rect, a, b).expect("a line across the view cuts the cube");
+    assert_eq!(paths.len(), 1, "one loop round the cube: {paths:?}");
+    assert_eq!(paths[0].first(), paths[0].last(), "closed");
+    assert!(paths[0].len() >= 5, "at least four edges crossed: {}", paths[0].len());
+    // A short line off in a corner spans nothing.
+    let corner = egui::pos2(rect.min.x + 5.0, rect.min.y + 5.0);
+    assert!(app.through_paths(aspect, rect, corner, corner + egui::vec2(20.0, 0.0)).is_err());
+
+    // Placed as the tool places it, read against the view each frame, and cut on Enter.
+    if let Some(tool) = app.cage_tool.as_mut() {
+        tool.knife.through = Some((a, Some(b)));
+    }
+    frame(&mut app, Vec::new());
+    assert_eq!(app.cage_tool.as_ref().map(|t| t.knife.through_paths.len()), Some(1));
+    if let Some((path, Err((why, faces)))) = app.cage_tool.as_ref().and_then(|t| t.knife.through_paths.first()) {
+        panic!("the loop's plan was refused: {why} at {faces:?}; path {path:?}");
+    }
+    let history = app.console_history.len();
+    let faces_before = app.cage().face_count();
+    frame(&mut app, vec![key(egui::Key::Enter)]);
+    // A typed line is its own record, in the console's history rather than the echo.
+    let lines: Vec<&String> = app.console_history[history..].iter().filter(|l| l.starts_with("knife points=")).collect();
+    let said = app.console_log.len();
+    assert_eq!(lines.len(), 1, "one knife line: {lines:?}; the console has {said} lines");
+    assert!(app.cage().face_count() > faces_before, "the loop split every face it crossed");
+    assert!(!app.doc.cage_is_red(app.active_cage), "and left the cage closed");
+    assert!(app.cage_tool.as_ref().is_some_and(|t| t.knife.through.is_none()), "the line is spent; the knife stays armed");
+}
+
+/// **An extrude's panel: a typed distance places the cap, a typed direction re-places it, and the
+/// kept line says the numbers rather than positions** (R8). An inset's thickness re-runs the inset.
+#[test]
+fn a_cage_session_s_panel_places_the_cap_and_the_kept_line_says_the_distance() {
+    use fieldform_cage::FaceId;
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cage");
+    frame(&mut app, Vec::new());
+    let cage = app.active_cage;
+    let before = app.doc.cage_body(cage).unwrap().mesh().clone();
+    let face = FaceId::from_index(1);
+    let normal = fieldform_cage::validate::face_normal(&before, face).normalize();
+
+    app.selection.toggle(Selection::Face(face));
+    app.invoke_command(by("cage.extrude"));
+    frame(&mut app, Vec::new());
+    assert!(app.cage_session.is_some(), "E on a face opens a session");
+    let rows: Vec<&str> = app.cage_panel_rows().iter().map(|r| r.key).collect::<Vec<_>>().iter().map(|s| *s).collect();
+    assert_eq!(rows, vec!["distance", "direction", "mode"]);
+    assert_eq!(app.cage_panel_rows()[0].text, "0", "lifted at nought");
+
+    app.cage_panel_set("distance", "10").expect("a number");
+    frame(&mut app, Vec::new());
+    assert_eq!(app.cage_panel_rows()[0].text, "10", "the row reads the cap");
+    let session = app.cage_session.as_ref().unwrap();
+    let mesh = app.cage();
+    for (&v, b) in session.cap.iter().zip(&session.cap_before) {
+        assert!((mesh.vertex_position(v) - (b + normal * 10.0)).norm() < 1e-9, "the cap stands 10 off along the normal");
+    }
+    app.cage_panel_set("direction", "sideways").expect_err("not a direction");
+    app.cage_panel_set("direction", "z").expect("an axis");
+    frame(&mut app, Vec::new());
+    let session = app.cage_session.as_ref().unwrap();
+    let mesh = app.cage();
+    for (&v, b) in session.cap.iter().zip(&session.cap_before) {
+        assert!((mesh.vertex_position(v) - (b + nalgebra::Vector3::z() * 10.0)).norm() < 1e-9, "the same distance, along z");
+    }
+
+    let echoed = app.echo_log.len();
+    frame(&mut app, vec![key(egui::Key::Enter)]);
+    assert!(app.cage_session.is_none(), "Enter keeps");
+    let lines = &app.echo_log[echoed..];
+    assert_eq!(lines, &["cageextrude faces=1 distance=10 direction=z".to_string()], "the line says the numbers, not positions");
+    assert!(!app.doc.cage_is_red(cage), "kept at a height, the cage is a solid");
+    app.run_command("undo");
+    frame(&mut app, Vec::new());
+    assert_eq!(app.doc.cage_body(cage).unwrap().geometry_fingerprint(), before.geometry_fingerprint(), "one undo step");
+
+    // An inset: thickness typed re-runs it, and the kept line carries thickness and depth.
+    app.selection.clear();
+    app.selection.toggle(Selection::Face(face));
+    app.invoke_command(by("cage.inset"));
+    frame(&mut app, Vec::new());
+    assert_eq!(app.cage_panel_rows().iter().map(|r| r.key).collect::<Vec<_>>(), vec!["thickness", "depth", "mode"]);
+    app.cage_panel_set("thickness", "2.5").expect("a number");
+    app.cage_panel_set("depth", "-1").expect("a number");
+    frame(&mut app, Vec::new());
+    let echoed = app.echo_log.len();
+    frame(&mut app, vec![key(egui::Key::Enter)]);
+    let lines = &app.echo_log[echoed..];
+    assert_eq!(lines, &["cageinset faces=1 thickness=2.5 depth=-1".to_string()]);
 }

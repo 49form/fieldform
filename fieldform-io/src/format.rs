@@ -338,7 +338,12 @@ pub(crate) const FORMAT_MAJOR: u32 = 3;
 /// 3.21 adds `rims`, `rims_continuity` and `rims_at` to a revolve (`round-chamfer-spec.md`
 /// §4.3): a partial revolve's two flat ends rounded or chamfered where the turned side meets
 /// them, written as an extrude's are and only when not hard. A 3.20 build keeps such a node.
-pub(crate) const FORMAT_MINOR: u32 = 21;
+///
+/// 3.22 adds a chamfer's second leg (`round-chamfer-spec.md` §9.2): `second` on a blend and
+/// `rims_second` on an extrude, a sweep, a loft and a revolve, how far the bevel reaches along
+/// the second face where that differs from the first, written only when it does. A 3.21 build
+/// keeps such a node rather than drawing the bevel with equal legs it was not given.
+pub(crate) const FORMAT_MINOR: u32 = 22;
 
 #[derive(thiserror::Error, Debug)]
 pub enum FormatError {

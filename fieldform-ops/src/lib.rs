@@ -23,6 +23,7 @@
 //!                                        doc mutated          pushed for undo
 //! ```
 
+mod cage_edits;
 mod command;
 mod keymap;
 mod ops;
@@ -30,7 +31,8 @@ mod ops;
 mod ownership_tests;
 mod registry;
 
-pub use command::{Command, CommandStack, OpError, StackMark};
+pub use cage_edits::SetCageMesh;
+pub use command::{Command, CommandStack, OpError, StackMark, DEFAULT_BYTE_LIMIT};
 // The document model lives in `fieldform-scene`; ops operate on it rather than defining it.
 pub use fieldform_scene::Document;
 pub use keymap::{Keymap, Modifiers, Shortcut};

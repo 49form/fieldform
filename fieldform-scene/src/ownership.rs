@@ -120,28 +120,32 @@ pub enum BlockKey {
 /// bar — is the application's, and this is how it finds out. Each says the block and who reads it
 /// now, which is what the line says: "Sphere is now inside Boolean and Shell".
 ///
-/// **Two variants went with 112.** `Rehomed` reported a nested block's one parent being replaced
-/// by another; no parent is stored now, so sliding a transform under a block is `Nested` to
-/// `Nested` and there is nothing to report. `BecameVariable` reported the promotion a second
-/// reader used to cause, and settling no longer declares anything (spec §12, R5), so nothing
-/// produces it — which also retires the application's "is now a variable" line and the names it
-/// invented to go with it.
+/// **`Rehomed` went with 112 and stays gone.** It reported a nested block's one parent being
+/// replaced by another; no parent is stored now, so sliding a transform under a block is `Nested`
+/// to `Nested` and there is nothing to report.
+///
+/// **`BecameVariable` is back, 2026-10-24, with the rule it reports** (R1 inverted by the owner —
+/// see [`settle_one`]). A block a second block starts reading is declared, so the promotion is
+/// news again, and so is the name the application invents for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnershipChange {
     /// A top-level block is read now, so it is drawn inside what reads it. Every reader,
-    /// ascending: one adopts, and so do two, which is a shared instance (spec §7.3).
+    /// ascending — which for an adoption is exactly one, two being a variable now.
     Adopted { block: BlockKey, readers: Vec<NodeId> },
     /// Nothing reads it any more, so it is a row of its own again.
     Released { block: BlockKey },
+    /// Two or more blocks read it, so it is declared and referenced by name. Every reader,
+    /// ascending, for the line that says who uses it.
+    BecameVariable { block: BlockKey, readers: Vec<NodeId> },
 }
 
 impl OwnershipChange {
     /// The block that moved.
     pub fn block(&self) -> BlockKey {
         match self {
-            OwnershipChange::Adopted { block, .. } | OwnershipChange::Released { block, .. } => {
-                *block
-            }
+            OwnershipChange::Adopted { block, .. }
+            | OwnershipChange::Released { block, .. }
+            | OwnershipChange::BecameVariable { block, .. } => *block,
         }
     }
 }
@@ -166,19 +170,31 @@ impl Readers {
 /// Spec §4's table: what a block stored as `stored` becomes when `readers` read it.
 ///
 /// No entry reads as free, which is what a block made by a path that has not settled yet is (spec
-/// §3); from there the free rows apply. Anything read at all is nested, by however many blocks:
-/// one reader draws it, and so do two, which is the shared instance of §7.3.
+/// §3); from there the free rows apply.
 ///
-/// **Settling never declares, since 112** (spec §12, R5). A second reader used to promote the
-/// block to a `Variable` here, on the reasoning that two owners is not ownership — true of one
-/// stored parent, and no longer the model: a nested block names no parent, so two readers simply
-/// draw it twice. `Variable` is now written by one thing only, the person asking for it, which is
-/// what makes the stored entry a record of a decision rather than of a wiring.
+/// **A second reader declares the block, ruled by the owner 2026-10-24**, which inverts R1 and
+/// §7.3 and restores what this did before 112. The reasoning is the containment the notebook is
+/// being built toward: a slot *holds* the block it reads, drawn inside the field, so a block can
+/// be in one slot and no more. Two readers cannot each contain it, and the honest way to be read
+/// twice is the one the reference model uses — declared once, referenced by name in each reader.
+/// R1's shared instance only worked while a nested block was a row in a flat list that could be
+/// cloned per owner; put the block in the field and the same expandable block is drawn twice,
+/// which is the redundancy the owner objected to.
+///
+/// So the stored entry is a record of a *decision* where a person made it, and of a *wiring* where
+/// two readers force it. 112's argument for the other way — that `Variable` should be written by
+/// nothing but the person asking — is the thing being given up, deliberately: the promotion is
+/// announced and the block is named, so nothing happens silently.
+///
+/// What has not changed: a stored `Variable` stays one however many read it, and a block nothing
+/// reads is free.
 fn settle_one(stored: Option<Ownership>, readers: &[NodeId]) -> Ownership {
     match (stored.unwrap_or(Ownership::Free), readers) {
         (Ownership::Variable, _) => Ownership::Variable,
         (_, []) => Ownership::Free,
-        (_, _) => Ownership::Nested,
+        (_, [_]) => Ownership::Nested,
+        // Two or more: declared, because one slot cannot hold it twice.
+        (_, _) => Ownership::Variable,
     }
 }
 
@@ -196,9 +212,15 @@ fn change(
         (_, Ownership::Nested) => {
             Some(OwnershipChange::Adopted { block, readers: readers.to_vec() })
         }
-        // Settling never writes a variable (spec §12), it frees only what nothing reads — which a
-        // variable is never asked about — and free to free was the first arm.
-        (_, Ownership::Free | Ownership::Variable) => None,
+        // Settling writes a variable again (R1 inverted, 2026-10-24), and that is the one move
+        // worth announcing: the block leaves the slot it was drawn in for a row of its own, which
+        // nobody asked for in so many words.
+        (_, Ownership::Variable) => {
+            Some(OwnershipChange::BecameVariable { block, readers: readers.to_vec() })
+        }
+        // Free to free was the first arm; what is left is a release of something that was not
+        // nested, which is not a move anybody sees.
+        (_, Ownership::Free) => None,
     }
 }
 
@@ -335,18 +357,22 @@ impl Document {
         stored.copied().unwrap_or(Ownership::Free)
     }
 
-    /// Where *put back inside* (`notebook-spec.md` §6.6) takes a block.
+    /// Where *put back inside* (`notebook-spec.md` §6.6) takes a block, or the readers that
+    /// refuse it.
     ///
-    /// Nested when anything reads it, free when nothing does. **Never refused for reader count,
-    /// since 112**: two readers used to refuse, there being no one block to be inside, and with no
-    /// parent stored the block is simply drawn in both — a shared instance (§7.3). The one refusal
-    /// left is a value variable whose contents are an expression, which is the parameter's matter
-    /// and stays where the name is typed. Writes nothing — the write is a command's, so that it
-    /// can be undone.
-    pub fn put_back_target(&self, block: BlockKey) -> Ownership {
+    /// Nested when one block reads it, free when nothing does. Writes nothing — the write is a
+    /// command's, so that it can be undone. The other refusal is a value variable whose contents
+    /// are an expression, which is the parameter's matter and stays where the name is typed.
+    /// **Refused again for two or more readers, 2026-10-24** (R1 inverted, [`settle_one`]).
+    /// §6.6's "never refused for reader count" rested on the shared instance: with two readers the
+    /// block could be nested in both. It cannot now — a settle would declare it straight back —
+    /// so putting it back would be a gesture that undid itself silently. The answer is who the
+    /// readers are, ascending, for the refusal to name them ("used by Boolean and Shell").
+    pub fn put_back_target(&self, block: BlockKey) -> Result<Ownership, Vec<NodeId>> {
         match self.readers().of(block) {
-            [] => Ownership::Free,
-            _ => Ownership::Nested,
+            [] => Ok(Ownership::Free),
+            [_] => Ok(Ownership::Nested),
+            more => Err(more.to_vec()),
         }
     }
 
@@ -1302,22 +1328,24 @@ mod tests {
         );
     }
 
-    /// **A second reader makes a shared instance**: the block stays nested, is drawn inside both
-    /// readers, and is not declared (`notebook-spec.md` §7.3, ruled §14 Q1).
+    /// **A second reader makes a variable**: the block leaves the slot it was drawn in for a row
+    /// of its own, and the move is announced (`notebook-spec.md` §7.3 and §17, ruled 2026-10-24).
     ///
-    /// **Reversed from "a second reader makes a variable" (§12).** That was the answer while a
-    /// nested block stored the one parent it belonged to, where two readers meant no one block
-    /// could be named — true of a stored parent, and no longer the model: nesting is read off the
-    /// readers, so two of them simply draw the same block twice, and `Variable` is left to the one
-    /// thing that writes it, the person asking (R5).
+    /// **Inverted back from the shared instance (§17), which 112 had inverted from this.** The
+    /// reason is containment: a slot holds the block it reads, so a block is in one slot or none,
+    /// and two readers cannot each hold it. Recorded in both directions here because the rule has
+    /// now been written twice and the owner has seen both working.
     ///
-    /// So the sphere, already nested in one block, hears **nothing** when a second starts reading
-    /// it: it was nested and it is nested, and a block the list already draws inside what reads it
-    /// has not moved. The free block two readers pick up at once is adopted, by both at once —
-    /// one `Adopted`, naming each of them, where the old model announced a promotion it had made
-    /// on the person's behalf and then had to invent a name for.
+    /// Two starting states, because they differ in what is said. The sphere is **nested in one
+    /// block already** and a second starts reading it: it is declared, and `BecameVariable` names
+    /// both readers. The loose block is **free** and two readers pick it up in the same settle: it
+    /// goes straight to a variable as well, in one change rather than an adoption followed by a
+    /// promotion — the settle sees the end state, not the path to it.
+    ///
+    /// Neither is named here: naming a promoted block is the application's (`variables_to_name`),
+    /// which is why the settle leaves `node_meta` alone.
     #[test]
-    fn a_second_reader_makes_a_shared_instance() {
+    fn a_second_reader_makes_a_variable() {
         let mut graph = Graph::empty();
         let sphere = ball(&mut graph);
         let first = union(&mut graph, vec![sphere]);
@@ -1331,25 +1359,42 @@ mod tests {
         let a = shell(graph, loose);
         let b = shell(graph, loose);
         doc.settle_ownership();
-        assert_eq!(doc.ownership_nodes.get(&sphere), Some(&Ownership::Nested), "nested still");
-        assert_eq!(doc.ownership_nodes.get(&loose), Some(&Ownership::Nested), "adopted by both");
+        assert_eq!(doc.ownership_nodes.get(&sphere), Some(&Ownership::Variable), "declared");
+        assert_eq!(doc.ownership_nodes.get(&loose), Some(&Ownership::Variable), "and so is this");
         let sorted = |mut v: Vec<NodeId>| {
             v.sort();
             v
         };
-        // Drawn inside each reader, which is what being one block in two places is.
+        // A variable's row is its own: the list draws it at the top level, and each reader
+        // references it rather than containing it.
         let nesting = doc.nesting_in(&doc.parts[&part].graph);
-        assert_eq!(nesting.owners_of(sphere).to_vec(), sorted(vec![first, second]));
-        assert_eq!(nesting.owners_of(loose).to_vec(), sorted(vec![a, b]));
-        assert_eq!(
-            doc.pending_ownership_changes,
-            vec![OwnershipChange::Adopted {
+        assert_eq!(nesting.owners_of(sphere).to_vec(), Vec::new());
+        assert_eq!(nesting.owners_of(loose).to_vec(), Vec::new());
+        let mut said = doc.pending_ownership_changes.clone();
+        said.sort_by_key(|c| match c.block() {
+            BlockKey::Node(id) => id.raw(),
+            BlockKey::Curve(id) => id.raw(),
+        });
+        let mut wanted = vec![
+            OwnershipChange::BecameVariable {
+                block: BlockKey::Node(sphere),
+                readers: sorted(vec![first, second]),
+            },
+            OwnershipChange::BecameVariable {
                 block: BlockKey::Node(loose),
                 readers: sorted(vec![a, b]),
-            }],
-            "the one that moved is announced, and nothing is declared",
+            },
+        ];
+        wanted.sort_by_key(|c| match c.block() {
+            BlockKey::Node(id) => id.raw(),
+            BlockKey::Curve(id) => id.raw(),
+        });
+        assert_eq!(said, wanted, "both promotions are announced, with who reads each");
+        assert_eq!(
+            doc.node_meta.get(&sphere).and_then(|m| m.name.clone()),
+            None,
+            "and neither is named here: the application names what a settle declared",
         );
-        assert_eq!(doc.node_meta.get(&sphere).and_then(|m| m.name.clone()), None, "unnamed still");
     }
 
     /// **The variables a settle leaves unnamed are named in the order they were made, not by id**
@@ -1438,17 +1483,19 @@ mod tests {
         assert_eq!(nesting.owners_of(cube).to_vec(), vec![both]);
     }
 
-    /// **Putting a variable back inside nests it wherever anything reads it, however many, and
-    /// frees it when nothing does** — readers counted as I2 counts them, so a curve's in every
-    /// part (`notebook-spec.md` §6.6).
+    /// **Putting a variable back inside nests it in its one reader, frees it when nothing reads
+    /// it, and is refused by two or more** — readers counted as I2 counts them, so a curve's in
+    /// every part (`notebook-spec.md` §6.6).
     ///
-    /// **Never refused for reader count, since 112.** Two readers used to refuse, there being no
-    /// one block for the row to go inside; with no parent stored the block is simply drawn in both,
-    /// which is a shared instance (§7.3) and the thing *put back inside* is for. The one refusal
-    /// left is a value variable whose contents are an expression, which is the parameter's matter
-    /// and lives where the expression is typed — not here.
+    /// **Refused for reader count again, 2026-10-24** (R1 inverted, §17). 112 had two readers
+    /// answer `Nested`, the block being drawn in both as a shared instance; a second reader
+    /// declares the block now, so a block put back inside one of two readers would be promoted
+    /// straight back by the settle that follows — the same frame, and in silence. The refusal
+    /// carries the readers so the gesture can name them. The other refusal is a value variable
+    /// whose contents are an expression, which is the parameter's matter and lives where the
+    /// expression is typed, not here.
     #[test]
-    fn putting_back_nests_whatever_reads_it_and_frees_what_nothing_does() {
+    fn putting_back_nests_one_reader_frees_none_and_refuses_two() {
         let mut graph = Graph::empty();
         let shared = ball(&mut graph);
         let kept = ball(&mut graph);
@@ -1466,15 +1513,16 @@ mod tests {
         assert_eq!(doc.block_readers(BlockKey::Node(shared)), readers, "read by two");
         assert_eq!(
             doc.put_back_target(BlockKey::Node(shared)),
-            Ownership::Nested,
-            "and drawn in both of them, rather than refused",
+            Err(readers.clone()),
+            "so it has to stay a variable, and the refusal says who reads it",
         );
-        assert_eq!(doc.put_back_target(BlockKey::Node(kept)), Ownership::Nested);
-        assert_eq!(doc.put_back_target(BlockKey::Node(alone)), Ownership::Free, "by none");
+        assert_eq!(doc.put_back_target(BlockKey::Node(kept)), Ok(Ownership::Nested), "by one");
+        assert_eq!(doc.put_back_target(BlockKey::Node(alone)), Ok(Ownership::Free), "by none");
 
-        // What it answers is already settled: written, it stays, and the name stays with it.
-        for id in [shared, kept, alone] {
-            let to = doc.put_back_target(BlockKey::Node(id));
+        // What it answers is already settled: written, it stays, and the name stays with it. The
+        // refused one is left as it is, which is the state the gesture leaves too.
+        for id in [kept, alone] {
+            let to = doc.put_back_target(BlockKey::Node(id)).expect("one reader or none");
             doc.ownership_nodes.insert(id, to);
         }
         let before = doc.ownership_nodes.clone();
@@ -1509,8 +1557,8 @@ mod tests {
         assert_eq!(doc.block_readers(BlockKey::Curve(line_id)), readers, "a reader in each part");
         assert_eq!(
             doc.put_back_target(BlockKey::Curve(line_id)),
-            Ownership::Nested,
-            "so it goes back inside the reader in each part's list",
+            Err(readers),
+            "so it has to stay a variable, counted across the parts as I2 counts it",
         );
     }
 

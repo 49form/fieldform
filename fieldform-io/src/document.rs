@@ -41,7 +41,7 @@
 //! older build says so plainly instead of silently discarding it.
 
 use crate::format::{Archive, FormatError, Manifest};
-use fieldform_cage::Cage;
+use fieldform_cage::CageBody;
 use fieldform_scene::{
     BlockKey, CageId, Curve, CurveId, Document, Expression, NodeId, Ownership, ParamId,
     ParamValue, Parameter, Part, PartId,
@@ -146,6 +146,8 @@ fn read_by_3_2(relation: &fieldform_scene::Relation) -> bool {
 /// What each surface is called. Beside the meshes rather than inside them, so the geometry
 /// files stay exactly the geometry.
 pub(crate) const SURFACE_NAMES_PATH: &str = "surfaces/names.json";
+/// The amber checks' thresholds, written only when they differ from the defaults.
+pub(crate) const VALIDATION_PATH: &str = "validation.json";
 /// The tessellation blocks, in the order they were made — backlog item 53. Their meshes are not
 /// saved: a mesh is derived, and an active block rebuilds its own on open.
 pub(crate) const TESSELLATIONS_PATH: &str = "outputs/tessellations.json";
@@ -512,6 +514,13 @@ pub fn update_archive(archive: &mut Archive, document: &Document) -> Result<(), 
             .collect();
         archive.put_json(SURFACE_NAMES_PATH, &names)?;
     }
+    // Per document, since they are about this model's scale; absent when they are the defaults,
+    // so a document that never touched them does not carry an entry saying so.
+    if document.validation == Default::default() {
+        archive.remove(VALIDATION_PATH);
+    } else {
+        archive.put_json(VALIDATION_PATH, &document.validation)?;
+    }
     Ok(())
 }
 
@@ -532,7 +541,10 @@ pub fn from_archive(archive: &Archive) -> Result<Document, FormatError> {
             .and_then(|name| name.strip_suffix(".json"))
             .and_then(CageId::from_hex)
             .ok_or_else(|| FormatError::UnexpectedEntry(path.clone()))?;
-        let cage: Cage = archive.get_json(&path)?.expect("path came from the archive");
+        // Read as a body rather than a `Cage`: an open cage in a file is work in progress and
+        // loads red; a file breaking the structural
+        // invariants still fails here, as a JSON error, and refuses the document.
+        let cage: CageBody = archive.get_json(&path)?.expect("path came from the archive");
         cages.insert(id, cage);
     }
 
@@ -665,6 +677,7 @@ pub fn from_archive(archive: &Archive) -> Result<Document, FormatError> {
         cages,
         quad_meshes,
         surface_names,
+        validation: archive.get_json(VALIDATION_PATH)?.unwrap_or_default(),
         tessellations,
         exports,
         meshes,
@@ -748,6 +761,7 @@ pub fn save_new(document: &Document, path: &Path) -> Result<(), FormatError> {
 mod tests {
     use fieldform_scene::Fillet;
     use super::*;
+    use fieldform_cage::Cage;
     use fieldform_scene::{BooleanOp, Continuity, CurveId, Node, ParamRef, Unit};
     use nalgebra::Point3;
 
@@ -918,7 +932,7 @@ mod tests {
             op: BooleanOp::Union,
             a: cut.into(),
             b: other.into(),
-            fillet: Fillet { radius: ParamRef::Named(radius), continuity: Continuity::G1 },
+            fillet: Fillet { radius: ParamRef::Named(radius), continuity: Continuity::G1, second: None },
         });
         // A surface that must not move, with a tolerance that is not the default so that a
         // loader which rebuilt the mark rather than reading it would be caught.
@@ -1454,8 +1468,7 @@ mod tests {
         // Edit the geometry the way the app would, then save through the same archive.
         let cage_id = *reopened.cages.keys().next().unwrap();
         reopened
-            .cages
-            .get_mut(&cage_id)
+            .cage_mesh_mut(cage_id)
             .unwrap()
             .set_vertex_position(fieldform_cage::VertexId::from_index(0), Point3::new(1.0, 2.0, 3.0));
         update_archive(&mut archive, &reopened).unwrap();
@@ -1468,6 +1481,37 @@ mod tests {
             Point3::new(1.0, 2.0, 3.0),
             "the edit was saved too"
         );
+    }
+
+    /// **An open cage in a file loads red rather than refusing the document** (R16, spec §2.4).
+    /// It used to be read as a `Cage`, so a document saved with a hole in its cage could not be
+    /// opened at all. A file breaking the structural invariants is still refused.
+    #[test]
+    fn a_document_holding_an_open_cage_reopens_with_that_cage_red() {
+        let cube = fieldform_cage::Cage::cube_of(10.0);
+        let positions = cube.vertex_ids().map(|v| cube.vertex_position(v)).collect();
+        let faces: Vec<Vec<u32>> = cube
+            .face_ids()
+            .skip(1)
+            .map(|f| cube.face_vertices(f).iter().map(|v| v.index() as u32).collect())
+            .collect();
+        let open = CageBody::new(fieldform_cage::QuadMesh::from_faces(positions, &faces).unwrap());
+        assert!(open.cage().is_none());
+
+        let mut doc = Document::new();
+        let id = doc.add_cage_body(open);
+        doc.add_part(fieldform_scene::Part::from_cage("Part", id));
+        let back = round_trip(&doc);
+        let loaded = back.cage_body(id).expect("the open cage is in the file");
+        assert!(loaded.cage().is_none(), "and it is still open");
+        assert_eq!(loaded.face_count(), 5);
+        assert_eq!(loaded.describe_error().as_deref(), Some("open: 1 hole, 4 edges"));
+
+        // A bowtie -- two cubes sharing a corner -- is structural, and still refuses the file.
+        let mut archive = to_archive(&doc).unwrap();
+        let bowtie = r#"{"positions":[[0,0,0],[1,0,0],[1,1,0],[0,1,0],[2,1,0],[2,2,0],[1,2,0]],"faces":[[0,1,2,3],[2,4,5,6]]}"#;
+        archive.put(&cage_path(id), bowtie.as_bytes().to_vec());
+        assert!(from_archive(&archive).is_err(), "a bowtie is not a mesh at all");
     }
 
     #[test]
@@ -1929,12 +1973,17 @@ mod tests {
         doc.node_meta.insert(hidden, NodeMeta { hidden: true, ..NodeMeta::default() });
         name(&mut doc, left, "Left");
         // Two curve variables — one the V made while one pipe reads it, one a profile name is on
-        // — and a third curve two pipes read, which is a shared instance drawn in both of them
-        // since 112 rather than the variable a second reader used to make (spec §12, R5).
+        // — and a third curve two pipes read, which the settle declares.
+        //
+        // **And that is 3.14's own rule again** (R1 inverted 2026-10-24, `notebook-spec.md` §17):
+        // the migration reads such a curve as a variable because that is what the list it was
+        // saved from laid out, and the live rule now agrees, so this file crosses the format
+        // boundary with nothing to reconcile. Between 112 and the inversion the two disagreed,
+        // and this assertion read `Nested`.
         doc.ownership_curves.insert(rail, Ownership::Variable);
         doc.ownership_curves.insert(section, Ownership::Variable);
         doc.profile_names.insert(section, "Section".into());
-        assert_eq!(doc.ownership_curves.get(&shared), Some(&Ownership::Nested));
+        assert_eq!(doc.ownership_curves.get(&shared), Some(&Ownership::Variable));
 
         let archive = to_archive(&doc).unwrap();
         assert!(archive.get(OWNERSHIP_PATH).is_some(), "a 3.15 file says where every block sits");

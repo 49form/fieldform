@@ -50,7 +50,7 @@ fn main() {
         op: BooleanOp::Union,
         a: s.into(),
         b: c.into(),
-        fillet: Fillet { radius: lit(6.0), continuity: Continuity::G1 },
+        fillet: Fillet { radius: lit(6.0), continuity: Continuity::G1, second: None },
     });
     check("blend(sphere, cube)", &g);
 
@@ -62,7 +62,7 @@ fn main() {
         op: BooleanOp::Union,
         a: s.into(),
         b: c.into(),
-        fillet: Fillet { radius: lit(6.0), continuity: Continuity::G1 },
+        fillet: Fillet { radius: lit(6.0), continuity: Continuity::G1, second: None },
     });
     check("blend(sphere, cube) + a loose gyroid body", &g);
 
@@ -77,7 +77,7 @@ fn main() {
         op: BooleanOp::Union,
         a: isect.into(),
         b: c.into(),
-        fillet: Fillet { radius: lit(6.0), continuity: Continuity::G1 },
+        fillet: Fillet { radius: lit(6.0), continuity: Continuity::G1, second: None },
     });
     check("blend(intersect(sphere, gyroid), cube)", &g);
 

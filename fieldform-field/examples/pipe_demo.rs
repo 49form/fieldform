@@ -49,7 +49,7 @@ fn main() {
 
     // A cage to boolean against, scaled up so it actually meets a 2 m curve.
     let cage_id = CageId::new();
-    doc.cages.insert(cage_id, scaled_cube(600.0));
+    doc.cages.insert(cage_id, scaled_cube(600.0).into());
 
     for (label, op) in [
         ("pipe alone", None),

@@ -165,7 +165,7 @@ fn build(tolerance: f64, radius: f64) -> GraphField {
         op: BooleanOp::Union,
         a: solid.into(),
         b: ball.into(),
-        fillet: Fillet { radius: lit(radius), continuity: Continuity::G1 },
+        fillet: Fillet { radius: lit(radius), continuity: Continuity::G1, second: None },
     });
     GraphField::compile_graph(&doc, &graph, tolerance).expect("compiles")
 }

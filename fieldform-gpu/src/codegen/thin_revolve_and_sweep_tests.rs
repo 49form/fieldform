@@ -91,7 +91,7 @@
         );
         let body = program.field_function();
         assert!(body.contains("wall_revolve_distance(0u, 1u, 2u, "), "{body}");
-        assert!(body.contains("wall_revolve_normal(0u, 1u, 2u, "), "{body}");
+        assert!(body.contains("wall_revolve_normal_bake(0u, 1u, 2u, "), "{body}");
         // A frame's six, the wall's four, and whether its band crosses the axis: it does not.
         assert_eq!(program.params.len(), 11);
         assert_eq!(slots_read(&program), 11, "the two passes must count the same slots");
@@ -129,7 +129,7 @@
         let body = program.field_function();
         // Spine, frame, then the wall's three, which is the order the shader's signature has.
         assert!(body.contains("wall_sweep_distance(3u, 4u, 0u, 1u, 2u, "), "{body}");
-        assert!(body.contains("wall_sweep_value_normal(3u, 4u, 0u, 1u, 2u, "), "{body}");
+        assert!(body.contains("wall_sweep_value_normal_bake(3u, 4u, 0u, 1u, 2u, "), "{body}");
         // A sweep's fourteen, then the wall's four.
         assert_eq!(program.params.len(), 18);
         assert_eq!(slots_read(&program), 18, "the two passes must count the same slots");

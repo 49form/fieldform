@@ -80,7 +80,7 @@ fn ball_blended_with_a_point(at: f64, radius: f64) -> (Document, Graph) {
         op: BooleanOp::Union,
         a: ball.into(),
         b: point.into(),
-        fillet: Fillet { radius: lit(radius), continuity: Continuity::G1 },
+        fillet: Fillet { radius: lit(radius), continuity: Continuity::G1, second: None },
     });
     (doc, graph)
 }

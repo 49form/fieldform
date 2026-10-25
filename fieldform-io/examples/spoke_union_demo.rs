@@ -33,7 +33,7 @@ fn main() {
     // one.** `App::open_document` looks for a cage in the part's graph and then anywhere in the
     // document, and refuses with "That document has no cage to edit" if it finds neither. Left
     // unreferenced: it is here to satisfy that check, and draws nothing in field mode.
-    doc.cages.insert(CageId::new(), fieldform_cage::Cage::cube_of(50.0));
+    doc.cages.insert(CageId::new(), fieldform_cage::Cage::cube_of(50.0).into());
 
     // One named radius read by every pipe, so dragging it re-evaluates rather than recompiling —
     // which is also the thing to check: the loop's count is a buffer value, so changing a radius

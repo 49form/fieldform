@@ -26,6 +26,43 @@ use fieldform_field::ScalarField;
 use nalgebra::{Point3, Vector3};
 use wgpu::util::DeviceExt;
 
+/// How many section planes a frame may cut with at once: the length of the camera's array.
+pub const MAX_SECTIONS: usize = 8;
+
+/// The section planes a frame is cut by: each a unit normal and an offset along it, and the kept
+/// region is where `dot(p, n) - offset <= 0` holds for *every* one — the intersection of their
+/// half-spaces, so two planes make a corner cutaway. Empty is no section.
+///
+/// A fixed array rather than a `Vec`, because the camera is `Copy` and the shader's uniform is a
+/// fixed array anyway; `MAX_SECTIONS` is the one number both read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sections {
+    planes: [(Vector3<f64>, f64); MAX_SECTIONS],
+    count: usize,
+}
+
+impl Sections {
+    /// No section: nothing is cut.
+    pub fn none() -> Self {
+        Self { planes: [(Vector3::zeros(), 0.0); MAX_SECTIONS], count: 0 }
+    }
+
+    /// The first `MAX_SECTIONS` of these planes. Any past that are not cut with; a caller that
+    /// wants to say so checks its own count against `MAX_SECTIONS` before it gets here.
+    pub fn of(planes: &[(Vector3<f64>, f64)]) -> Self {
+        let mut out = Self::none();
+        for plane in planes.iter().take(MAX_SECTIONS) {
+            out.planes[out.count] = *plane;
+            out.count += 1;
+        }
+        out
+    }
+
+    pub fn planes(&self) -> &[(Vector3<f64>, f64)] {
+        &self.planes[..self.count]
+    }
+}
+
 /// Where the camera is and what it can see.
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
@@ -46,13 +83,13 @@ pub struct Camera {
     pub far: f64,
     /// How close counts as a hit.
     pub epsilon: f64,
-    /// The half-space to keep, as a unit normal and an offset along it, or `None` for no
-    /// section. Everything where `dot(p, n) - offset > 0` is cut away.
+    /// The half-spaces to keep, each as a unit normal and an offset along it; none for no
+    /// section. Everything where `dot(p, n) - offset > 0` for *any* of them is cut away.
     ///
     /// On the camera rather than on the field because a section is a way of looking at the
     /// part: the graph, the save and the export are all unaffected, and two views of one
     /// document can cut it differently without either being wrong.
-    pub section: Option<(Vector3<f64>, f64)>,
+    pub sections: Sections,
     /// Ambient occlusion and the key light's shadow, or `None` for neither this frame.
     ///
     /// On the camera because it is a per-frame choice about *this* trace rather than a fact
@@ -291,7 +328,7 @@ impl Camera {
             // a scene whose field is divided says so by setting this itself.
             value_scale: 1.0,
             // Sectioning is something a viewer turns on, never a default.
-            section: None,
+            sections: Sections::none(),
             // Likewise occlusion: a caller that wants a still asks for one.
             occlusion: None,
             jitter: [0.0, 0.0],
@@ -315,7 +352,7 @@ pub(crate) struct CameraUniform {
     up: [f32; 4],
     lens: [f32; 4],
     frame: [u32; 4],
-    section: [f32; 4],
+    sections: [[f32; 4]; MAX_SECTIONS],
     key_light: [f32; 4],
     occlusion: [f32; 4],
     jitter: [f32; 4],
@@ -365,10 +402,14 @@ pub(crate) fn camera_uniform(
             camera.epsilon as f32,
         ],
         frame: [width, height, max_steps, u32::from(camera.orthographic)],
-        section: match camera.section {
-            Some((n, offset)) => [n.x as f32, n.y as f32, n.z as f32, offset as f32],
-            // A zero normal is how the shader reads "no section". See `section_distance`.
-            None => [0.0; 4],
+        sections: {
+            // Packed from the front: a zero normal is how the shader reads "no section", and
+            // the first one ends its loop. See `section_distance`.
+            let mut packed = [[0.0; 4]; MAX_SECTIONS];
+            for (slot, (n, offset)) in packed.iter_mut().zip(camera.sections.planes()) {
+                *slot = [n.x as f32, n.y as f32, n.z as f32, *offset as f32];
+            }
+            packed
         },
         key_light: match camera.occlusion {
             Some(o) => [o.light.x as f32, o.light.y as f32, o.light.z as f32, 1.0],
@@ -1531,6 +1572,30 @@ impl Renderer {
     ) -> Result<Self, RenderError> {
         let began = std::time::Instant::now();
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f32() * 1e3;
+        // **The one edit the driver's text takes beyond the generator's.** The normal pass reads
+        // every section through `profile_distance_bake`, whose fallback for a section the
+        // tolerance could not bake is the walk the value pass takes -- a loop the driver inlines
+        // into every differenced normal, and the whole of what made four partial revolves' compile
+        // 9.7 s where the bake alone makes it 2.5 s. Only this renderer knows whether every
+        // section has its bake, so it cuts the walk here when none is missing. The cache below
+        // compares the edited text, so a drag that costs a section its bake is a new pipeline and
+        // never a stale one reading a grid it does not have.
+        let every_section_baked = program
+            .curves
+            .iter()
+            .zip(curves.iter())
+            .all(|(use_, (_, bake))| {
+                !matches!(use_, crate::codegen::CurveUse::Profile(_) | crate::codegen::CurveUse::Wall(..)) || bake.is_some()
+            });
+        let source: String = if every_section_baked {
+            program.source.replacen(
+                "    return profile_distance(index, q); // unbaked-section-walk",
+                "    return 1e30; // every section has its bake; see the renderer",
+                1,
+            )
+        } else {
+            program.source.clone()
+        };
         // **Kept when it would be packed from the same bands** (`atlas_holds`). Every sample of
         // every band is copied twice on this thread and then uploaded -- a 192-cell band is
         // 115 MB -- and a rebuild that changed a number, a curve or which shader is drawn
@@ -1761,7 +1826,7 @@ impl Renderer {
         let compiling = std::time::Instant::now();
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("field"),
-            source: wgpu::ShaderSource::Wgsl(program.source.as_str().into()),
+            source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
         });
 
         // Declared explicitly rather than derived from the shader with `layout: None`.
@@ -1900,7 +1965,7 @@ impl Renderer {
         };
         // Compared whole, not by a hash: a wrong pipeline is a wrong picture, and comparing a
         // hundred kilobytes is microseconds.
-        let pipelines = match previous.filter(|p| *p.source == *program.source) {
+        let pipelines = match previous.filter(|p| *p.source == *source) {
             Some(kept) => kept.pipelines(),
             None => compile()?,
         };
@@ -1932,7 +1997,7 @@ impl Renderer {
             march_layout: pipelines.march_layout,
             skip_grid,
             relax: std::sync::atomic::AtomicU32::new(RELAX.to_bits()),
-            source: std::sync::Arc::from(program.source.as_str()),
+            source: std::sync::Arc::from(source.as_str()),
             params,
             curve_points,
             curve_spans,

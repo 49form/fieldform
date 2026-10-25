@@ -539,7 +539,7 @@ fn a_cage_with_a_corner_dragged_out_s_extent_holds_every_solid_point() {
     let mut doc = Document::new();
     let id = doc.add_cage(Cage::cube_of(20.0));
     {
-        let c = doc.cage_mut(id).expect("there");
+        let c = doc.cage_mesh_mut(id).expect("there");
         let corner = c
             .vertex_ids()
             .find(|&v| (c.vertex_position(v) - Point3::new(10.0, 10.0, 10.0)).norm() < 1e-9)

@@ -34,6 +34,12 @@ struct Aabb {
 }
 
 impl Aabb {
+    /// Whether two boxes share any point, each grown by `slack` -- so two triangles that touch
+    /// within a tolerance are a pair the exact test sees.
+    fn overlaps(&self, other: &Aabb, slack: f64) -> bool {
+        (0..3).all(|i| self.lo[i] - slack <= other.hi[i] && other.lo[i] - slack <= self.hi[i])
+    }
+
     fn empty() -> Self {
         Self {
             lo: Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
@@ -104,6 +110,88 @@ impl Bvh {
             );
         }
         Self { nodes, order }
+    }
+
+    /// Every pair of triangles whose boxes overlap, each grown by `slack`, handed to `found` as
+    /// `(a, b)` with `a < b` and each pair once.
+    ///
+    /// **The hierarchy against itself**, descending the larger node of a pair of overlapping
+    /// nodes, so the work is the overlapping part of the tree squared rather than the triangle
+    /// count squared. A node against itself descends into its own children, which is where the
+    /// pairs within one leaf come from. This is the traversal the self-intersection check runs;
+    /// the exact triangle test is the caller's, since what counts as a crossing is its question.
+    pub(crate) fn overlapping_pairs(
+        &self,
+        positions: &[Point3<f64>],
+        triangles: &[[u32; 3]],
+        slack: f64,
+        mut found: impl FnMut(u32, u32),
+    ) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        // A leaf's box is the union of its triangles', so two leaves overlapping says nothing
+        // about a pair of their triangles; checked per pair, which is far cheaper than the exact
+        // test the caller runs on what gets through.
+        let tri_box = |t: u32| {
+            let mut b = Aabb::empty();
+            for &v in &triangles[t as usize] {
+                b.add(positions[v as usize]);
+            }
+            b
+        };
+        let mut found = |x: u32, y: u32| {
+            if tri_box(x).overlaps(&tri_box(y), slack) {
+                found(x, y);
+            }
+        };
+        let mut stack: Vec<(u32, u32)> = vec![(0, 0)];
+        while let Some((i, j)) = stack.pop() {
+            let (a, b) = (&self.nodes[i as usize], &self.nodes[j as usize]);
+            if i != j && !a.bounds.overlaps(&b.bounds, slack) {
+                continue;
+            }
+            match (a.count > 0, b.count > 0) {
+                (true, true) => {
+                    let ta = &self.order[a.first as usize..(a.first + a.count) as usize];
+                    let tb = &self.order[b.first as usize..(b.first + b.count) as usize];
+                    // Two leaves own disjoint runs, so with `i != j` every `(x, y)` is a distinct
+                    // pair seen once; a leaf against itself takes each pair the one way round.
+                    for &x in ta {
+                        for &y in tb {
+                            if i == j {
+                                if x < y {
+                                    found(x, y);
+                                }
+                            } else {
+                                found(x.min(y), x.max(y));
+                            }
+                        }
+                    }
+                }
+                // Descend the interior node; both when they are the same node.
+                (false, true) => {
+                    stack.push((a.first, j));
+                    stack.push((a.right, j));
+                }
+                (true, false) => {
+                    stack.push((i, b.first));
+                    stack.push((i, b.right));
+                }
+                (false, false) => {
+                    if i == j {
+                        stack.push((a.first, a.first));
+                        stack.push((a.right, a.right));
+                        stack.push((a.first, a.right));
+                    } else {
+                        stack.push((a.first, b.first));
+                        stack.push((a.first, b.right));
+                        stack.push((a.right, b.first));
+                        stack.push((a.right, b.right));
+                    }
+                }
+            }
+        }
     }
 
     /// The hierarchy as two flat arrays, for a shader that has to traverse it itself.

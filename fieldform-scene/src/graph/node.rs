@@ -1217,6 +1217,38 @@ impl Node {
     /// `remap_inputs` and §7.2's drag-out write through. A `Vec` rather than a visitor because a
     /// caller holding two slots at once is the ordinary case (a blend's pair), and a closure
     /// taking `&mut` one at a time cannot.
+    /// Every operand slot of this node, in the order its rows read, holes included.
+    ///
+    /// **Indices, because one gesture needs to tell two slots apart.** §7.3's move -- a block
+    /// dragged from one input to another -- empties the slot it left, and when both slots belong
+    /// to the *same* block the only thing that distinguishes them is where they sit:
+    /// [`Self::stop_reading`] would empty the one just filled along with the one being left.
+    /// `Graph::first_empty_operand` already answers in `(NodeId, usize)`, so an index is a word
+    /// this vocabulary has.
+    ///
+    /// The exhaustive match still lives in one place ([`Self::operand_slots_mut`]): this is a
+    /// reading of it, so a block that gains a slot appears here without being added to anything.
+    pub fn operand_slots(&self) -> Vec<Operand> {
+        let mut out = Vec::new();
+        self.for_each_operand_slot(&mut |slot| out.push(*slot));
+        out
+    }
+
+    /// Empties the slot at `index`, and answers whether there was one to empty.
+    ///
+    /// The indexed half of [`Self::stop_reading`], for the one caller that has to say *which*
+    /// slot: §7.3's move out of a sibling slot of the same block. Everything else means "this
+    /// block stops reading that one" and should say that instead.
+    pub fn empty_operand_slot(&mut self, index: usize) -> bool {
+        match self.operand_slots_mut().get_mut(index) {
+            Some(slot) => {
+                slot.clear();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Empties every slot of this node that reads `block`, and answers whether any did.
     ///
     /// **§7.2's drag-out, said as what it is**: this block stops reading that one. The gesture

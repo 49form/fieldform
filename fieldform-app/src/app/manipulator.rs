@@ -200,12 +200,12 @@ impl App {
         // the normal is read off the rotation, so the handles have to be the thing being
         // turned. That is the opposite of `Node::Plane`'s manipulator, where the placement is
         // separate from the geometry and world-aligned handles are what stop them fighting.
-        if self.section.on && self.section_selected {
-            let pivot = self.section.origin;
+        if let Some(section) = self.selected_section() {
+            let pivot = section.origin;
             return Some(gizmo::Frame {
                 extrude: None,
                 pivot,
-                basis: self.section.rotation,
+                basis: section.rotation,
                 reach: gizmo::Frame::reach_for(
                     self.camera.view_half_height(pivot.cast::<f32>()) as f64,
                 ),
@@ -573,10 +573,10 @@ impl App {
 
         // The section, matching `gizmo_frame`'s order exactly. The two must agree about what
         // the handles belong to, or a drag moves something other than what was drawn.
-        if self.section.on && self.section_selected {
+        if let Some((index, section)) = self.section_selected.zip(self.selected_section()) {
             self.gizmo_drag = Some(GizmoDrag {
                 drag,
-                target: GizmoTarget::Section { before: self.section },
+                target: GizmoTarget::Section { index, before: section },
                 pivot: frame.pivot,
                 readout: String::new(),
             });
@@ -912,8 +912,10 @@ impl App {
                     self.move_curve_points_live(m.curve, &to, &m.gesture);
                 }
             }
-            GizmoTarget::Section { before } => {
-                self.section = before.with(motion, pivot);
+            GizmoTarget::Section { index, before } => {
+                if let Some(slot) = self.sections.get_mut(*index) {
+                    *slot = before.with(motion, pivot);
+                }
                 self.traced.invalidate(traced::Quality::Draft);
             }
             GizmoTarget::Anchors { node, before, before_turn, .. } => {
@@ -1168,8 +1170,10 @@ impl App {
             | GizmoTarget::Body { before_graph, .. } => self.put_back_pressed_graph(before_graph),
             // Put back where the gesture started, like the others. Nothing was committed, so
             // there is nothing on the stack to disagree with this.
-            GizmoTarget::Section { before } => {
-                self.section = before;
+            GizmoTarget::Section { index, before } => {
+                if let Some(slot) = self.sections.get_mut(index) {
+                    *slot = before;
+                }
                 self.traced.invalidate(traced::Quality::Final);
             }
         }

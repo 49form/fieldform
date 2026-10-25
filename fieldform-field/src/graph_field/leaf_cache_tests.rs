@@ -26,7 +26,7 @@
                 .find(|&v| (c.vertex_position(v) - Point3::new(-10.0, -10.0, -10.0)).norm() < 1e-9)
                 .expect("a cube has that corner")
         };
-        doc.cage_mut(cage)
+        doc.cage_mesh_mut(cage)
             .expect("there")
             .set_vertex_position(corner, Point3::new(-4.0, -4.0, -4.0));
 

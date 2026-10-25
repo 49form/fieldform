@@ -25,6 +25,10 @@ pub enum CompileError {
     UnresolvedClearance,
     #[error("graph node {0:?} references a cage that is not in the document")]
     MissingCage(fieldform_scene::CageId),
+    /// The cage is in the document and is not a solid: a tool has it open, or it loaded that way.
+    /// The string is the state as a person reads it ("open: 1 hole, 4 edges").
+    #[error("cage {0} is not a solid ({1})")]
+    OpenCage(fieldform_scene::CageId, String),
     #[error("graph node {0:?} references a mesh that is not in the document")]
     MissingMesh(fieldform_scene::MeshId),
     #[error("a conformal lattice references a surface {0:?} that is not in the document")]
@@ -115,6 +119,13 @@ pub enum CompileError {
     /// Rims asked of a revolve all the way round, which has no ends to round.
     #[error("a revolve all the way round has no ends, so it has no rims to round — set its rims to hard, or its angle under 360")]
     RimsOnAFullRevolve,
+    /// A chamfer's second leg on a blend whose radius follows a ramp.
+    #[error("a chamfer with two legs cannot also follow a ramp — give the blend one radius, or one leg")]
+    SecondLegNeedsAFixedRadius,
+    /// A chamfer's second leg on a box's, a cylinder's or a cone's edges, whose faces have no
+    /// first and second.
+    #[error("a box's, a cylinder's or a cone's edges are cut back alike, so they take one leg, not two")]
+    SecondLegOnAnEdge,
     #[error(
         "curve {0:?} crosses the axis it is being revolved about, so the solid would pass \n         through itself. Move the profile clear of the axis, or move the axis."
     )]
@@ -340,6 +351,32 @@ fn empty_slot(graph: &Graph, met: NodeId) -> CompileError {
     CompileError::EmptySlot { node, slot }
 }
 
+/// The open cage a body is, or reads, if any — so the refusal names the cage rather than a hole
+/// the body does not have (R12).
+pub fn red_cage_behind(
+    document: &Document,
+    graph: &Graph,
+    body: NodeId,
+) -> Option<fieldform_scene::CageId> {
+    graph.nodes().find_map(|(id, n)| match n {
+        Node::Cage(cage)
+            if document.cage_is_red(*cage) && (id == body || graph.downstream_of(id).contains(&body)) =>
+        {
+            Some(*cage)
+        }
+        _ => None,
+    })
+}
+
+/// The refusal for a part whose body is an open cage, with the state as a person reads it.
+pub(crate) fn open_cage(document: &Document, cage: fieldform_scene::CageId) -> CompileError {
+    let why = document
+        .cage_body(cage)
+        .and_then(|b| b.describe_error())
+        .unwrap_or_else(|| "open".to_string());
+    CompileError::OpenCage(cage, why)
+}
+
 /// The refusal a driven parameter gets when its driver has no op.
 ///
 /// Absent from `slot` for one of two reasons, and they want different words: the ramp has a hole
@@ -382,6 +419,19 @@ impl Amount {
             Amount::Driven(index) => Some(index),
             Amount::Fixed(_) => None,
         }
+    }
+}
+
+/// A blend's two operand readings and radius as a two-legged chamfer reads them: scaled so the
+/// bevel of legs `k` along `a` and `second` along `b` is the equal-legged bevel's zero set at
+/// `min(k, second)`. Unchanged where there is no second leg.
+pub(crate) fn two_legs(a: f64, b: f64, k: f64, second: Option<f64>) -> (f64, f64, f64) {
+    match second {
+        Some(s_b) if s_b > 0.0 && k > 0.0 => {
+            let m = k.min(s_b);
+            (a * m / s_b, b * m / k, m)
+        }
+        _ => (a, b, k),
     }
 }
 
@@ -575,6 +625,11 @@ pub(crate) enum Op {
         /// `1 + s` per millimetre with `s` the ramp's rate, and dividing by that keeps it a
         /// bound -- the same arithmetic as a driven offset's. See [`driven_blend_divisor`].
         divisor: f64,
+        /// A chamfer's second leg, where its two legs differ: how far along `b` the bevel
+        /// reaches from `a`, `radius` being how far along `a` it reaches from `b`
+        /// (`round-chamfer-spec.md` §9.2). Read by scaling the operands so the bevel is the
+        /// equal-legged one's, as [`Rim::scaled`] does for a rim. `None` for every other shape.
+        second: Option<f64>,
     },
     /// Two fields averaged: `(1 − t)·A + t·B`, with `t` clamped to `[0, 1]`.
     ///
@@ -928,7 +983,11 @@ impl GraphField {
 
         // Asked once, over the expanded graph the ops are built from. It is a walk of every
         // node's edges, so inside the loop it would be that walk once per node.
-        let incomplete = graph.incomplete();
+        //
+        // Of the document rather than the graph: a cage block whose cage is open is in it too
+        // (R12), with everything reading it, since a red cage has no field exactly as an empty
+        // slot has no value.
+        let incomplete = document.incomplete_in(graph);
 
         for id in &order {
             let node = graph
@@ -949,9 +1008,10 @@ impl GraphField {
             }
             let op = match node {
                 Node::Cage(cage_id) => {
+                    // A red cage never reaches here -- `incomplete` skipped it above -- so
+                    // `None` is a cage the document does not hold at all.
                     let cage = document
-                        .cages
-                        .get(cage_id)
+                        .cage(*cage_id)
                         .ok_or(CompileError::MissingCage(*cage_id))?;
                     let levels = levels_for_tolerance(mesh_size(cage), tolerance_mm);
                     let key = (*cage_id, levels, cage.geometry_fingerprint());
@@ -1417,7 +1477,7 @@ impl GraphField {
                         let stations = built.stations();
                         let run = stations.last().copied().unwrap_or(0.0) - stations[0];
                         check_rim(rims.reach, rims.room_along(run), "loft's length", "longer")?;
-                        check_rim(rims.reach, built.end_depth(), "end sections' depth", "fuller at its ends")?;
+                        check_rim(rim_second_leg(&rims), built.end_depth(), "end sections' depth", "fuller at its ends")?;
                         Op::Leaf(std::sync::Arc::new(built.with_rims(rims)))
                     }
                 }
@@ -1521,7 +1581,7 @@ impl GraphField {
                             return Err(CompileError::RimsOnAClosedPath);
                         }
                         check_rim(rims.reach, rims.room_along(swept.run()), "sweep's run", "longer")?;
-                        check_rim(rims.reach, section_depth, "section's depth", "thicker")?;
+                        check_rim(rim_second_leg(&rims), section_depth, "section's depth", "thicker")?;
                         swept.with_rims(rims)
                     };
                     // Carried to the profile. See [`sweep_offset`]: the spine gives the shape of
@@ -1695,7 +1755,7 @@ impl GraphField {
                         }
                         .min(0.0);
                         check_rim(
-                            rims.reach,
+                            rim_second_leg(&rims),
                             built.depth() + narrowed,
                             "section's depth",
                             "thicker",
@@ -1822,7 +1882,7 @@ impl GraphField {
                             let room = |degrees: f64| r_min * degrees.min(90.0).to_radians().sin();
                             check_rim(rims.reach, room(to_itself), "revolve's angle", "turned further")?;
                             check_rim(rims.reach, room((360.0 - total) * 0.5), "gap the revolve leaves", "turned less")?;
-                            check_rim(rims.reach, built.depth(), "section's depth", "thicker")?;
+                            check_rim(rim_second_leg(&rims), built.depth(), "section's depth", "thicker")?;
                             // **The exact corner, through the lean its own radius makes**
                             // (`Rim::cut`): the section is read in the query's meridian and the
                             // cap's distance across its plane, and a point `y` out from that
@@ -1890,6 +1950,18 @@ impl GraphField {
                             (Amount::Driven(at), driven_blend_divisor(document, graph, *id))
                         }
                     };
+                    // A chamfer's second leg, resolved; a round carries none
+                    // (`Fillet::second_leg`). Not with a radius that follows a ramp: the scaling
+                    // would follow it too, and that is a second bound nothing has asked for.
+                    let second = match fillet.second_leg() {
+                        None => None,
+                        Some(s) => {
+                            if fillet.radius.driver().is_some() {
+                                return Err(CompileError::SecondLegNeedsAFixedRadius);
+                            }
+                            Some(resolve(s).ok_or(CompileError::UnresolvedBlend)?.max(0.0))
+                        }
+                    };
                     Op::Blend {
                         op: *op,
                         a: slot[a],
@@ -1898,6 +1970,7 @@ impl GraphField {
                         exponent: fillet.exponent(),
                         taper: taper_ratio(document, graph, *id),
                         divisor,
+                        second,
                     }
                 }
                 Node::Twist {
@@ -2357,6 +2430,11 @@ impl GraphField {
             // overestimating. The viewport prunes such a body and draws its siblings
             // (`notebook-spec.md` 7.2); a compile asked for the whole part says why it cannot.
             if incomplete.contains(&id) {
+                // A body that is, or reads, an open cage is refused for that, not for a hole
+                // it does not have.
+                if let Some(cage) = red_cage_behind(document, graph, id) {
+                    return Err(open_cage(document, cage));
+                }
                 return Err(empty_slot(graph, id));
             }
             bodies.push((id, slot[&id]));
@@ -2517,12 +2595,18 @@ impl GraphField {
                 exponent,
                 taper,
                 divisor,
+                second,
             } => {
                 let da = self.eval_in(*a, p, gap);
                 let db = self.eval_in(*b, p, gap);
                 // The radius this point gets, and the division that keeps a varying one a
                 // bound: one for a fixed radius, so a fixed blend reads what it always did.
                 let k = self.amount_in(radius, p, gap);
+                // A chamfer of two legs is the equal-legged one over scaled operands: the
+                // bevel leaves `a` at `s_a` from `b` and `b` at `s_b` from `a`, so `a·m/s_b`
+                // and `b·m/s_a` with `m = min(s_a, s_b)` put its plane where `a' + b' = m` is.
+                // Each scale is at most one, so the bound holds as it did.
+                let (da, db, k) = two_legs(da, db, k, *second);
                 blend(*op, da, db, k, *exponent, tapered(k, gap), *taper) / divisor
             }
             // The whole operation. Subtracting a constant slides every level set outward by
@@ -3106,6 +3190,7 @@ impl GraphField {
                 exponent,
                 taper,
                 divisor,
+                second,
             } => {
                 // **Bounded at the full radius, tapered or not.** The slack below grows with
                 // `k` and the upper end does not depend on it, so the interval at `k` encloses
@@ -3115,6 +3200,12 @@ impl GraphField {
                 let radius = &self.amount_interval(radius).1.max(0.0);
                 let a_range = self.interval_at(*a, lo, hi);
                 let b_range = self.interval_at(*b, lo, hi);
+                // A two-legged chamfer's operands are scaled before the join, as `eval` scales
+                // them: an interval scaled by a positive number is its ends scaled.
+                let (sa, sb, m) = two_legs(1.0, 1.0, *radius, *second);
+                let a_range = (a_range.0 * sa, a_range.1 * sa);
+                let b_range = (b_range.0 * sb, b_range.1 * sb);
+                let radius = &m;
                 // Each blended boolean is the smooth minimum of possibly-negated operands,
                 // exactly as `blend` evaluates it, so the bound is derived once and the signs
                 // are applied around it. Negating an interval swaps its endpoints.
@@ -3465,7 +3556,25 @@ pub(crate) fn resolved_rim(
     resolve: &dyn Fn(&fieldform_scene::ParamRef) -> Option<f64>,
 ) -> Result<super::Rim, CompileError> {
     let reach = resolve(&rims.radius).ok_or(CompileError::UnresolvedRadius)?;
-    Ok(super::Rim { reach: reach.max(0.0), exponent: rims.exponent(), ends: rims.at, square: None })
+    // A second leg is a chamfer's alone (`Fillet::second_leg`): one left on rims switched back to
+    // a round is not read, so switching the shape never moves the seam.
+    let second = match rims.fillet().second_leg() {
+        Some(s) => Some(resolve(s).ok_or(CompileError::UnresolvedRadius)?.max(0.0)),
+        None => None,
+    };
+    Ok(super::Rim {
+        reach: reach.max(0.0),
+        exponent: rims.exponent(),
+        ends: rims.at,
+        square: None,
+        second,
+    })
+}
+
+/// The further of a rim's two legs, which is how far the rounding reaches into either face and
+/// what a room check against a solid's depth compares with.
+pub(crate) fn rim_second_leg(rim: &super::Rim) -> f64 {
+    rim.legs().1
 }
 
 /// A box's or a cylinder's edge, resolved: `None` for a hard one, which keeps the plain leaf.
@@ -3473,6 +3582,11 @@ pub(crate) fn resolved_edge(
     edge: &fieldform_scene::Fillet,
     resolve: &dyn Fn(&fieldform_scene::ParamRef) -> Option<f64>,
 ) -> Result<Option<crate::Edge>, CompileError> {
+    // A box's, a cylinder's or a cone's faces have no first and second, so its edges take one
+    // number only (`round-chamfer-spec.md` §9.2).
+    if edge.second_leg().is_some() {
+        return Err(CompileError::SecondLegOnAnEdge);
+    }
     let reach = resolve(&edge.radius).ok_or(CompileError::UnresolvedRadius)?;
     Ok((reach > 0.0).then(|| crate::Edge { reach, exponent: edge.exponent() }))
 }

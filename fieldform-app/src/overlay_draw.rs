@@ -217,6 +217,59 @@ pub(crate) fn draw_surface_wire(
     }
 }
 
+/// Draws the cage's edges, one pixel wide, so a face's extent is visible against its neighbours'
+/// -- two coplanar faces shade exactly alike, and without their shared edge drawn a cage reads as
+/// far sparser than it is. Asked for by the owner, 2026-10-24.
+///
+/// **Only the edges of faces turned toward the camera**, on a closed cage: the cage draws with no
+/// depth buffer, so every edge drawn would be a wireframe with the far side showing through, and
+/// facing is the same test picking uses to keep the far side off offer. An open mesh has two sides
+/// and gets every edge, as its picking does. A fold that hides a facing face behind another still
+/// shows that face's edges, which is the approximation accepted here.
+pub(crate) fn draw_cage_edges(
+    painter: &egui::Painter,
+    camera: &OrbitCamera,
+    aspect: f32,
+    rect: egui::Rect,
+    mesh: &QuadMesh,
+    placement: &Similarity3<f64>,
+) {
+    let eye = camera.eye;
+    let open = mesh.is_open();
+    let mut drawn: std::collections::HashSet<(VertexId, VertexId)> = std::collections::HashSet::new();
+    let stroke = egui::Stroke::new(1.0_f32, CAGE_EDGE_COLOR);
+    for face in mesh.face_ids() {
+        let v = mesh.face_vertices(face);
+        let p: [Point3<f32>; 4] = [
+            vertex_pos(mesh, placement, v[0]),
+            vertex_pos(mesh, placement, v[1]),
+            vertex_pos(mesh, placement, v[2]),
+            vertex_pos(mesh, placement, v[3]),
+        ];
+        if !open {
+            let normal = (p[2] - p[0]).cross(&(p[3] - p[1]));
+            if normal.norm_squared() >= 1e-20 && normal.dot(&(eye - p[0])) <= 0.0 {
+                continue;
+            }
+        }
+        for i in 0..4 {
+            let (a, b) = (v[i], v[(i + 1) % 4]);
+            if !drawn.insert((a.min(b), a.max(b))) {
+                continue;
+            }
+            if let (Some(pa), Some(pb)) = (
+                camera.project_to_screen(aspect, rect, p[i]),
+                camera.project_to_screen(aspect, rect, p[(i + 1) % 4]),
+            ) {
+                painter.line_segment([pa, pb], stroke);
+            }
+        }
+    }
+}
+
+/// The cage's edges: darker than its faces and faint enough to read as structure, not as marks.
+const CAGE_EDGE_COLOR: egui::Color32 = egui::Color32::from_rgba_premultiplied(40, 48, 64, 160);
+
 /// **Dimmer than a curve.** A surface is a grid of dozens of quads where a curve is one line,
 /// so the same weight would make it the loudest thing on screen while being the thing least
 /// often worked on — it is scaffolding for the lattice laid over it.
@@ -256,6 +309,12 @@ pub(crate) const GUIDE_FILL: egui::Color32 = egui::Color32::from_rgba_premultipl
 pub(crate) const PLANE_PREVIEW_FILL: egui::Color32 =
     egui::Color32::from_rgba_premultiplied(70, 58, 12, 40);
 pub(crate) const SELECTION_FILL: egui::Color32 = egui::Color32::from_rgba_premultiplied(90, 75, 15, 70);
+/// A cage tool's preview of what a click would make: the drawn part green, and the part the
+/// cage adds for itself -- a ring propagated from a cut, the ring an edge would get -- cyan and
+/// dashed, so what the person did not draw reads as such.
+#[allow(dead_code)]
+pub(crate) const PREVIEW_COLOR: egui::Color32 = egui::Color32::from_rgb(90, 220, 110);
+pub(crate) const PROPAGATED_COLOR: egui::Color32 = egui::Color32::from_rgb(80, 210, 230);
 pub(crate) const HOVER_COLOR: egui::Color32 = egui::Color32::from_rgb(220, 225, 230);
 pub(crate) const HOVER_FILL: egui::Color32 = egui::Color32::from_rgba_premultiplied(60, 62, 65, 45);
 

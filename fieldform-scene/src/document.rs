@@ -45,7 +45,7 @@ use crate::{
     ownership::{BlockKey, Ownership, OwnershipChange},
     unit::Unit,
 };
-use fieldform_cage::Cage;
+use fieldform_cage::{Cage, CageBody, QuadMesh};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -355,7 +355,10 @@ impl Part {
 pub struct Document {
     /// Authoring/display unit. Geometry is always millimetres regardless — see [`Unit`].
     pub unit: Unit,
-    pub cages: HashMap<CageId, Cage>,
+    /// The cages, each as the mesh being edited: a [`Cage`] while it is closed, and a red body
+    /// with no field while a tool has it open. Ask
+    /// [`Self::cage`] for the promoted cage and [`Self::cage_body`] for the mesh either way.
+    pub cages: HashMap<CageId, CageBody>,
     /// Imported triangle meshes. Beside the cages rather than among them: both are geometry
     /// the graph references by id, and neither is the other — a cage is scaffolding that gets
     /// edited, a mesh is finished geometry that gets referenced.
@@ -376,6 +379,9 @@ pub struct Document {
     /// the same reason: the collection holds what the thing *is*, and the document holds what
     /// this document calls it.
     pub surface_names: HashMap<QuadMeshId, String>,
+    /// The amber checks' thresholds, this document's own: they are about this model's scale and
+    /// intent, not a preference of the application.
+    pub validation: fieldform_cage::validate::Thresholds,
     pub curves: HashMap<CurveId, Curve>,
     pub parameters: HashMap<ParamId, Parameter>,
     pub parts: HashMap<PartId, Part>,
@@ -731,6 +737,7 @@ impl Document {
             meshes: HashMap::new(),
             quad_meshes: HashMap::new(),
             surface_names: HashMap::new(),
+            validation: Default::default(),
             curves: HashMap::new(),
             parameters: HashMap::new(),
             parts: HashMap::new(),
@@ -1184,8 +1191,14 @@ impl Document {
     }
 
     pub fn add_cage(&mut self, cage: Cage) -> CageId {
+        self.add_cage_body(cage.into())
+    }
+
+    /// Adds a cage that may be open — an imported mesh with a hole, which is a red body until the
+    /// hole is filled (R16).
+    pub fn add_cage_body(&mut self, body: CageBody) -> CageId {
         let id = CageId::new();
-        self.cages.insert(id, cage);
+        self.cages.insert(id, body);
         id
     }
 
@@ -1550,12 +1563,60 @@ impl Document {
         self.parameters.get(&id).map(|p| p.name.clone()).unwrap_or_else(|| id.to_string())
     }
 
+    /// The promoted cage: `None` for an id the document does not hold **and** for a cage that is
+    /// open. A caller that needs a solid asks this; one that needs the mesh whatever its state
+    /// asks [`Self::cage_body`]. The two are told apart by [`Self::cage_body`] being `Some`.
     pub fn cage(&self, id: CageId) -> Option<&Cage> {
+        self.cages.get(&id).and_then(CageBody::cage)
+    }
+
+    pub fn cage_body(&self, id: CageId) -> Option<&CageBody> {
         self.cages.get(&id)
     }
 
-    pub fn cage_mut(&mut self, id: CageId) -> Option<&mut Cage> {
+    pub fn cage_body_mut(&mut self, id: CageId) -> Option<&mut CageBody> {
         self.cages.get_mut(&id)
+    }
+
+    /// The cage's mesh for a geometry edit — a vertex move, which cannot open or close it.
+    pub fn cage_mesh_mut(&mut self, id: CageId) -> Option<&mut QuadMesh> {
+        self.cages.get_mut(&id).map(CageBody::mesh_mut)
+    }
+
+    /// Re-reads every cage's geometry faults and shell orientation, after a gesture that moved
+    /// points: a move cannot open a cage, but it can collapse an edge, mend one, or turn a shell
+    /// inside out, and the body reads those when asked rather than on every keystroke.
+    pub fn refresh_cages(&mut self) {
+        for body in self.cages.values_mut() {
+            body.refresh();
+        }
+    }
+
+    /// Whether `id` names a cage the document holds that is not a solid: open, or with a red
+    /// fault standing against it.
+    pub fn cage_is_red(&self, id: CageId) -> bool {
+        self.cages.get(&id).is_some_and(|b| b.cage().is_none())
+    }
+
+    /// Every block of `graph` that cannot be evaluated: the holed blocks `Graph::incomplete`
+    /// names, **and every cage block whose cage is red**, each closed downstream (R12 of the
+    /// cage-editing notes). A red cage has no field, exactly as an empty slot has
+    /// no value, so it is left out the same way and the part's other bodies draw. Asked of the
+    /// document rather than the graph because only the document knows which cages are closed.
+    pub fn incomplete_in(&self, graph: &Graph) -> std::collections::HashSet<NodeId> {
+        let mut found = graph.incomplete();
+        let red: Vec<NodeId> = graph
+            .nodes()
+            .filter_map(|(id, n)| match n {
+                crate::Node::Cage(cage) if self.cage_is_red(*cage) => Some(id),
+                _ => None,
+            })
+            .collect();
+        for id in red {
+            found.extend(graph.downstream_of(id));
+            found.insert(id);
+        }
+        found
     }
 
     pub fn curve(&self, id: CurveId) -> Option<&Curve> {
@@ -1756,19 +1817,19 @@ mod tests {
         assert_eq!(graph.roots(), vec![union], "the sphere is still nobody's body");
     }
 
-    /// **A block two others read is drawn inside both of them — one block, two places.**
+    /// **A block two others read has a row of its own, and each reader references it.**
     ///
-    /// A shared instance (`notebook-spec.md` R1, §7.3): nesting no longer says ownership, so two
-    /// readers are not a contradiction to be resolved but two places the same block is drawn in,
-    /// and an edit in either is an edit everywhere. This asserted the opposite until 112, on the
-    /// reasoning that two owners is not ownership and the block had to stay above both consumers —
-    /// which was `interface-modality.md`'s objection to indenting a boolean's operands, and held
-    /// only while a nested block named one parent. None is stored now (spec §12), so there is no
-    /// hierarchy to invent: who reads the block is the graph's to answer, and it answers both.
-    /// A second reader declares nothing either (R5) — the settle that promoted such a block to a
-    /// variable is what 112 reversed.
+    /// `notebook-spec.md` R1 and §7.3 as amended 2026-10-24 (§17): a slot holds the block it
+    /// reads, so a block is in one slot or none, and two readers cannot each hold it. The block is
+    /// declared instead and the two readers chip it.
+    ///
+    /// **Asserted both ways over three rulings, which is why the history is here.** It was
+    /// "stays above both consumers" before 112 — `interface-modality.md`'s objection to indenting
+    /// a boolean's operands — then "drawn inside both" under 112, now a variable again, this time
+    /// argued from containment rather than from what is stored. The readers are still the graph's
+    /// to answer and it still answers both; what changed is that two of them declare the block.
     #[test]
-    fn a_block_two_others_read_is_drawn_inside_both_of_them() {
+    fn a_block_two_others_read_has_a_row_of_its_own() {
         use crate::{BooleanOp, Node, ParamRef, Place};
         let lit = ParamRef::Literal;
         let mut doc = Document::new();
@@ -1795,14 +1856,15 @@ mod tests {
         both_cuts.sort();
         assert_eq!(
             nesting.owners_of(shared).to_vec(),
-            both_cuts,
-            "drawn inside each reader, ascending, and the same block in both",
+            Vec::new(),
+            "no slot holds it: its row is its own, and the two cuts reference it",
         );
         assert_eq!(nesting.readers_of(shared), 2, "two readers, each counted once");
+        let _ = both_cuts;
         assert_eq!(
             doc.ownership(BlockKey::Node(shared)),
-            Ownership::Nested,
-            "and nested is all that is stored: no parent, so nothing says which of the two",
+            Ownership::Variable,
+            "declared by the second reader, which is what gives it the row",
         );
         assert_eq!(
             nesting.owners_of(block).to_vec(),
@@ -1975,9 +2037,10 @@ mod tests {
             "named, and still the extrude's",
         );
 
-        // A second reader draws the same loop in both places and declares nothing (R5, §7.3):
-        // one curve, a row inside the extrude and a row inside the revolve, with the count
-        // saying how many places that is. Promoting it to a variable here is what 112 reversed.
+        // A second reader declares the loop (§7.3 and §17, 2026-10-24): one curve, one row of its
+        // own, referenced by the extrude and the revolve, with the count saying how many read it.
+        // 112 had it drawn inside both; containment is what took that back, since a slot holds the
+        // one thing it reads.
         let revolve = graph.add(crate::Node::Revolve { rims: Default::default(),
             outline: crate::Outline::closed(profile),
             frame: crate::Frame::at_along(crate::Axis::Z, [ParamRef::Literal(0.0); 3]),
@@ -1987,8 +2050,13 @@ mod tests {
         edited(&mut doc, &graph);
         let mut both_readers = vec![extrude, revolve];
         both_readers.sort();
-        assert_eq!(doc.nesting_in(&graph).curve_owners_of(profile).to_vec(), both_readers);
+        assert_eq!(
+            doc.nesting_in(&graph).curve_owners_of(profile).to_vec(),
+            Vec::new(),
+            "declared, so neither of the two holds it",
+        );
         assert_eq!(doc.nesting_in(&graph).readers_of_curve(profile), 2);
+        let _ = both_readers;
         assert_eq!(
             doc.nesting_in(&graph).readers_of_curve(CurveId::new()),
             0,
@@ -2003,8 +2071,9 @@ mod tests {
     /// a row shows is how many places the curve is drawn in altogether. Where it is drawn is the
     /// other half of the answer and is read per part: only the readers in *this* list draw a row
     /// here, so each part's list nests the curve inside its own pipe — a shared instance across
-    /// parts, where two readers used to make it a variable in both. Asked of a copy of a part's
-    /// graph — what a test or a preview holds — each reader still counts once.
+    /// parts, which is what declares it (§17, R1 inverted 2026-10-24) — so the count is the thing
+    /// that has to be right in every part, not only in the one on screen. Asked of a copy of a
+    /// part's graph — what a test or a preview holds — each reader still counts once.
     #[test]
     fn a_curve_s_readers_are_counted_in_every_part() {
         let mut doc = Document::new();
@@ -2024,9 +2093,10 @@ mod tests {
         assert_eq!(doc.nesting_in(&here).readers_of_curve(spine), 2, "a copy counts each once");
         assert_eq!(
             doc.nesting_in(&here).curve_owners_of(spine).to_vec(),
-            vec![pipe_here],
-            "and two readers nest it in each, so this list draws it inside its own pipe",
+            Vec::new(),
+            "and two readers declare it (§17), so no list draws it inside a pipe",
         );
+        let _ = pipe_here;
     }
 
     /// **A dismissed loop still closes, because dismissing it is about the list and not the shape.**
@@ -2478,6 +2548,34 @@ mod tests {
         let used = doc.cages_used_by(part.id);
         assert_eq!(used.len(), 1);
         assert!(doc.cage(used[0]).is_some(), "graph must name a real cage");
+    }
+
+    /// **A red cage's block is incomplete, and so is everything reading it** (R12), the way a
+    /// holed block's readers are; a closed cage's is not.
+    #[test]
+    fn a_red_cage_is_incomplete_with_everything_downstream_of_it() {
+        let cube = Cage::cube();
+        let positions = cube.vertex_ids().map(|v| cube.vertex_position(v)).collect();
+        let faces: Vec<Vec<u32>> = cube
+            .face_ids()
+            .skip(1)
+            .map(|f| cube.face_vertices(f).iter().map(|v| v.index() as u32).collect())
+            .collect();
+        let mut doc = Document::new();
+        let red = doc.add_cage_body(CageBody::new(QuadMesh::from_faces(positions, &faces).unwrap()));
+        let green = doc.add_cage(Cage::cube());
+        assert!(doc.cage_is_red(red));
+        assert!(!doc.cage_is_red(green));
+        assert!(doc.cage(red).is_none() && doc.cage_body(red).is_some());
+
+        let mut graph = Graph::from_cage(red);
+        let red_node = graph.roots()[0];
+        let green_node = graph.add(crate::Node::Cage(green));
+        let reader = graph.add(crate::Node::Offset { input: red_node.into(), distance: ParamRef::Literal(1.0) });
+        let incomplete = doc.incomplete_in(&graph);
+        assert!(incomplete.contains(&red_node) && incomplete.contains(&reader));
+        assert!(!incomplete.contains(&green_node));
+        assert!(graph.incomplete().is_empty(), "the graph alone sees no hole: this is the document's to know");
     }
 
     #[test]

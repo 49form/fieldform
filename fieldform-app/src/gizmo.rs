@@ -59,6 +59,9 @@ const ARC_SEGMENTS: usize = 48;
 
 /// How near the cursor must come, in pixels, to grab a handle.
 const GRAB_PIXELS: f32 = 7.0;
+/// An arrow's reach, a little wider than a ring's: it is the handle most often aimed at, and in
+/// a true view it shares its pixels with a ring.
+const ARROW_PIXELS: f32 = 9.0;
 /// The same for the centre cube, which is small and sits under everything else.
 const CENTRE_PIXELS: f32 = 9.0;
 
@@ -150,9 +153,12 @@ impl Handles {
             out.extend((0..3).map(Handle::Arc));
             if self.per_axis_scale {
                 out.extend((0..3).map(Handle::ScaleAxis));
-            } else {
-                out.push(Handle::ScaleUniform);
             }
+            // The uniform cube sits at the centre whenever there is extent to scale: a loop or
+            // a ring of the cage is scaled as a whole far more often than along one axis (the
+            // owner, 2026-10-24, scaling a selected loop), and a body never had the per-axis
+            // cubes to reach for instead.
+            out.push(Handle::ScaleUniform);
         }
         out.extend((0..3).map(Handle::Axis));
         out.extend((0..3).map(Handle::Plane));
@@ -494,23 +500,50 @@ pub fn hit_test(
     project: &dyn Fn(Point3<f64>) -> Option<egui::Pos2>,
     eye: Point3<f64>,
 ) -> Option<Handle> {
-    let mut best: Option<(Handle, f32, f64)> = None;
+    let mut best: Option<(Handle, u8, f64)> = None;
 
+    // **The centre is the uniform cube's, outright.** Every arrow and every plane leaves the
+    // pivot, so a click there is within reach of all of them and the arrows would rank first;
+    // the cube at the centre is what a click on the centre means.
+    if frame.handles.rotate_and_scale
+        && let Some(centre) = project(frame.pivot)
+        && centre.distance(cursor) <= CENTRE_PIXELS
+    {
+        return Some(Handle::ScaleUniform);
+    }
+
+    // **An arrow beats a ring where they overlap.** Seen straight down an axis -- a true view --
+    // that axis's rotation ring lies flat in the view and crosses the two arrows in it, and the
+    // ring's anchor is often the nearer, so the depth rule handed the ring every click aimed at
+    // an arrow. Asked for by the owner, 2026-10-24: the arrows rank first, the rings last, and
+    // depth decides only within a rank.
+    let rank = |handle: Handle| -> u8 {
+        match handle {
+            Handle::Axis(_) | Handle::Extrude(_) => 0,
+            Handle::Plane(_) | Handle::ScaleAxis(_) | Handle::ScaleUniform => 1,
+            Handle::Arc(_) => 2,
+        }
+    };
     for handle in frame.handles.all().into_iter().chain(frame.extrude_handles()) {
         let Some(distance) = handle_screen_distance(frame, handle, cursor, project) else {
             continue;
         };
-        let threshold = if handle == Handle::ScaleUniform { CENTRE_PIXELS } else { GRAB_PIXELS };
+        let threshold = match handle {
+            Handle::ScaleUniform => CENTRE_PIXELS,
+            Handle::Axis(_) | Handle::Extrude(_) => ARROW_PIXELS,
+            _ => GRAB_PIXELS,
+        };
         if distance > threshold {
             continue;
         }
         let depth = (frame.handle_anchor(handle) - eye).norm();
+        let candidate = (rank(handle), depth);
         let better = match best {
             None => true,
-            Some((_, _, best_depth)) => depth < best_depth,
+            Some((_, best_rank, best_depth)) => candidate < (best_rank, best_depth),
         };
         if better {
-            best = Some((handle, distance, depth));
+            best = Some((handle, candidate.0, candidate.1));
         }
     }
     best.map(|(handle, _, _)| handle)
@@ -1036,6 +1069,21 @@ mod tests {
         let handles = Handles::body().all();
         assert!(handles.contains(&Handle::ScaleUniform));
         assert!(!handles.iter().any(|h| matches!(h, Handle::ScaleAxis(_))));
+    }
+
+    /// A cage selection with extent gets both: the per-axis cubes and, at the centre, the
+    /// uniform one -- all thirteen -- and a click on the centre is the uniform cube's whatever
+    /// else passes through the pivot.
+    #[test]
+    fn a_cage_selection_is_offered_uniform_scale_at_the_centre_as_well_as_per_axis() {
+        let handles = Handles::extended().all();
+        assert_eq!(handles.len(), 13);
+        assert!(handles.contains(&Handle::ScaleUniform));
+        assert!(handles.iter().any(|h| matches!(h, Handle::ScaleAxis(_))));
+        let frame = frame_at(Point3::origin());
+        let project = |p: Point3<f64>| Some(egui::pos2(400.0 + p.x as f32 * 10.0, 300.0 - p.y as f32 * 10.0));
+        let eye = Point3::new(0.0, 0.0, 100.0);
+        assert_eq!(hit_test(&frame, egui::pos2(403.0, 298.0), &project, eye), Some(Handle::ScaleUniform));
     }
 
     /// Looking straight down an axis leaves its drag plane undefined, and a normalised

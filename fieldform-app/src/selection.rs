@@ -22,7 +22,7 @@ pub(crate) enum ControlMesh {
     Surface(fieldform_scene::QuadMeshId),
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Default)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub(crate) enum Selection {
     #[default]
     None,
@@ -111,6 +111,12 @@ impl Picked {
     pub(crate) fn normal(&self, mesh: &QuadMesh, placement: &Similarity3<f64>) -> Option<Vector3<f32>> {
         match self.0.as_slice() {
             [only] => only.normal(mesh, placement),
+            // Several faces -- an extruded cap -- turn the gizmo to their average, so the arrow
+            // that leaves the surface is the one an extrude drags along.
+            many if !many.is_empty() && many.iter().all(|p| matches!(p, Selection::Face(_))) => {
+                let sum: Vector3<f32> = many.iter().filter_map(|p| p.normal(mesh, placement)).sum();
+                sum.try_normalize(1e-9)
+            }
             _ => None,
         }
     }

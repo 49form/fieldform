@@ -30,7 +30,7 @@ fn lit(v: f64) -> ParamRef {
 }
 
 fn rims(k: f64, c: Continuity) -> Rims {
-    Rims { radius: lit(k), continuity: c, at: RimEnds::Both }
+    Rims { radius: lit(k), continuity: c, at: RimEnds::Both, second: None }
 }
 
 /// A square forty across on the ground, extruded thirty up.
@@ -119,7 +119,7 @@ fn seamed(k: f64, c: Continuity, turn: f64) -> (GraphField, Vector3<f64>) {
         op: fieldform_scene::BooleanOp::Union,
         a: a.into(),
         b: b.into(),
-        fillet: fieldform_scene::Fillet { radius: lit(k), continuity: c },
+        fillet: fieldform_scene::Fillet { radius: lit(k), continuity: c, second: None },
     });
     let (s, co) = turn.to_radians().sin_cos();
     let bisector = (Vector3::new(1.0, 0.0, 0.0) + Vector3::new(-s, co, 0.0)).normalize();

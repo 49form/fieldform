@@ -79,7 +79,7 @@
         );
         let body = program.field_function();
         assert!(body.contains("wall_extrude_distance(0u, 1u, 2u, "), "{body}");
-        assert!(body.contains("wall_extrude_normal(0u, 1u, 2u, "), "{body}");
+        assert!(body.contains("wall_extrude_normal_bake(0u, 1u, 2u, "), "{body}");
         assert!(!body.contains("extrude_distance(0u, to_local"), "it is not also a thick one");
 
         // A thick extrude's fifteen, then the wall's four: the thickness as the document holds

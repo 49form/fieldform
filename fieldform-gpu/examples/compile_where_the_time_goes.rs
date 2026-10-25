@@ -642,6 +642,7 @@ fn patterned(n: usize) -> (Document, Graph) {
             fillet: fieldform_scene::Fillet {
                 radius: lit(0.0),
                 continuity: fieldform_scene::Continuity::G1,
+                second: None,
             },
         });
     }

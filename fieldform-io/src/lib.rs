@@ -31,7 +31,7 @@ pub use fieldform_scene::StepOptions;
 #[cfg(feature = "step")]
 pub use step::{import_step_with, StepError, StepReport};
 
-use fieldform_cage::{Cage, CageError};
+use fieldform_cage::{CageBody, CageError};
 use fieldform_scene::{MeshData, Unit};
 use nalgebra::Point3;
 use std::path::Path;
@@ -49,14 +49,21 @@ pub enum ImportError {
         #[source]
         source: CageError,
     },
+    /// A mesh breaking the structural invariants, with every offender rather than the first.
+    #[error("object {index} (\"{name}\") is not a valid mesh: {}", errors.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))]
+    InvalidMesh {
+        index: usize,
+        name: String,
+        errors: Vec<CageError>,
+    },
 }
 
-/// Imports every object/group in an OBJ file as a separate [`Cage`], preserving each face's
-/// original vertex count (quads stay quads) rather than triangulating — `Cage::from_faces`
-/// is what actually enforces the closed/manifold/all-quad invariants, so a file containing
-/// triangles, n-gons, or an open mesh fails here with a specific error rather than silently
-/// becoming an unusable cage.
-pub fn import_cages(path: &Path) -> Result<Vec<Cage>, ImportError> {
+/// Imports every object/group in an OBJ file as a separate cage body, preserving each face's
+/// original vertex count (quads stay quads) rather than triangulating — the mesh constructor
+/// is what actually enforces the manifold/all-quad invariants, so a file containing triangles
+/// or n-gons fails here with a specific error rather than silently becoming an unusable cage.
+/// An open mesh is a red body, not a failure (R16).
+pub fn import_cages(path: &Path) -> Result<Vec<CageBody>, ImportError> {
     import_cages_in(path, Unit::Millimetre)
 }
 
@@ -72,22 +79,29 @@ pub fn import_cages(path: &Path) -> Result<Vec<Cage>, ImportError> {
 /// arrived correctly. The unit is therefore an explicit argument, chosen at the point of
 /// import, and converted here into the document's canonical millimetres — the same boundary
 /// where IGES's declared unit flag is applied.
-pub fn import_cages_in(path: &Path, unit: Unit) -> Result<Vec<Cage>, ImportError> {
+pub fn import_cages_in(path: &Path, unit: Unit) -> Result<Vec<CageBody>, ImportError> {
     let (models, _materials) = tobj::load_obj(path, &quad_options())?;
     if models.is_empty() {
         return Err(ImportError::Empty);
     }
 
+    // **An open mesh imports as a red cage** (R16, ruled 2026-10-18), to be closed with Fill Hole
+    // or Bridge, so the mesh is built and the closure is not asked of it here. What is still
+    // refused is a file breaking the structural invariants -- a triangle, a bowtie, a flipped
+    // face -- and it is refused with *every* offender, since one fix at a time against a file
+    // that lists one fault at a time is the slow way round.
     models
         .into_iter()
         .enumerate()
         .map(|(index, model)| {
             let (positions, faces) = model_faces(&model.mesh, unit);
-            Cage::from_faces(positions, &faces).map_err(|source| ImportError::InvalidCage {
-                index,
-                name: model.name,
-                source,
-            })
+            let errors = fieldform_cage::QuadMesh::check_faces(&positions, &faces);
+            if !errors.is_empty() {
+                return Err(ImportError::InvalidMesh { index, name: model.name, errors });
+            }
+            let mesh = fieldform_cage::QuadMesh::from_faces(positions, &faces)
+                .map_err(|source| ImportError::InvalidCage { index, name: model.name, source })?;
+            Ok(CageBody::new(mesh))
         })
         .collect()
 }
@@ -181,7 +195,43 @@ fn model_faces(mesh: &tobj::Mesh, unit: Unit) -> (Vec<Point3<f64>>, Vec<Vec<u32>
         faces.push(mesh.indices[offset..offset + arity].to_vec());
         offset += arity;
     }
-    (positions, faces)
+    without_unused_vertices(positions, faces)
+}
+
+/// Drops the vertices no face uses, renumbering the faces to match.
+///
+/// **A stray vertex carries no topology, so dropping it loses nothing** — and an OBJ is free to
+/// list positions no face names. `from_faces` refuses an unused vertex (it has no fan, and the
+/// limit position panics on one), which is right for a mesh built in the app and wrong for a file
+/// whose only fault is a leftover point. A face naming an out-of-range index is left exactly as it
+/// was, so the constructor still names it.
+fn without_unused_vertices(
+    positions: Vec<Point3<f64>>,
+    faces: Vec<Vec<u32>>,
+) -> (Vec<Point3<f64>>, Vec<Vec<u32>>) {
+    if faces.iter().flatten().any(|&i| i as usize >= positions.len()) {
+        return (positions, faces);
+    }
+    let mut used = vec![false; positions.len()];
+    for &i in faces.iter().flatten() {
+        used[i as usize] = true;
+    }
+    if used.iter().all(|&u| u) {
+        return (positions, faces);
+    }
+    let mut renumbered = vec![u32::MAX; positions.len()];
+    let mut kept = Vec::with_capacity(positions.len());
+    for (i, p) in positions.into_iter().enumerate() {
+        if used[i] {
+            renumbered[i] = kept.len() as u32;
+            kept.push(p);
+        }
+    }
+    let faces = faces
+        .into_iter()
+        .map(|f| f.into_iter().map(|i| renumbered[i as usize]).collect())
+        .collect();
+    (kept, faces)
 }
 
 /// Imports every object in an OBJ as a triangle mesh body.
@@ -297,6 +347,64 @@ f 2 3 7 6
         assert_eq!(cages[0].edge_count(), 12);
     }
 
+    /// **A position no face names is dropped, not refused.** The mesh constructor now refuses an
+    /// unused vertex, which an OBJ is free to carry; the cube must still import, with eight
+    /// vertices and its faces renumbered past the stray one.
+    #[test]
+    fn a_stray_position_in_an_obj_is_dropped_rather_than_refusing_the_cage() {
+        // A stray first position shifts every face index by one.
+        let shifted: String = CUBE_OBJ
+            .lines()
+            .map(|l| match l.strip_prefix("f ") {
+                Some(rest) => {
+                    let ix: Vec<String> = rest
+                        .split_whitespace()
+                        .map(|i| (i.parse::<u32>().unwrap() + 1).to_string())
+                        .collect();
+                    format!("f {}\n", ix.join(" "))
+                }
+                None => format!("{l}\n"),
+            })
+            .collect();
+        let path = write_temp_obj("fieldform_test_stray.obj", &format!("v 9 9 9\n{shifted}"));
+        let cages = import_cages(&path).expect("the stray position is no fault of the cage");
+        assert_eq!(cages[0].vertex_count(), 8);
+        assert_eq!(cages[0].face_count(), 6);
+        assert!(
+            cages[0].vertex_ids().all(|v| cages[0].vertex_position(v).x.abs() <= 0.5),
+            "the stray point at x = 9 is gone"
+        );
+    }
+
+    /// **An open OBJ read as a cage is a red cage, with its holes counted** (R16). It used to be
+    /// refused with `UnmatchedEdge` and import nothing.
+    #[test]
+    fn an_open_obj_imports_as_a_red_cage_with_its_hole_count() {
+        let without_top: String =
+            CUBE_OBJ.lines().filter(|l| *l != "f 5 6 7 8").map(|l| format!("{l}\n")).collect();
+        let path = write_temp_obj("fieldform_test_open_cube.obj", &without_top);
+        let cages = import_cages(&path).expect("an open mesh is a body, red");
+        assert_eq!(cages.len(), 1);
+        assert!(cages[0].cage().is_none(), "not a solid yet");
+        assert_eq!(cages[0].face_count(), 5);
+        assert_eq!(cages[0].holes(), vec![4]);
+    }
+
+    /// A file breaking the structural invariants is still refused -- with **every** offender.
+    #[test]
+    fn a_bowtie_obj_is_refused_naming_the_vertex() {
+        let bowtie = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 2 1 0\nv 2 2 0\nv 1 2 0\nv 9 9 9\nf 1 2 3 4\nf 3 5 6 7\n";
+        let path = write_temp_obj("fieldform_test_bowtie.obj", bowtie);
+        match import_cages(&path) {
+            Err(ImportError::InvalidMesh { errors, .. }) => assert_eq!(
+                errors,
+                vec![CageError::NonManifoldVertex { vertex: fieldform_cage::VertexId::from_index(2) }],
+                "the shared corner, and the stray point dropped rather than listed"
+            ),
+            other => panic!("expected the structural refusal, got {other:?}"),
+        }
+    }
+
     /// The bug this argument exists to prevent: a 1-unit DCC-tool cube is one *metre*, and
     /// importing it as one millimetre is wrong by a factor of a thousand while looking
     /// perfectly plausible on screen.
@@ -307,7 +415,7 @@ f 2 3 7 6
         let mm = import_cages_in(&path, Unit::Millimetre).unwrap();
         let metres = import_cages_in(&path, Unit::Metre).unwrap();
 
-        let span = |c: &Cage| {
+        let span = |c: &CageBody| {
             let xs: Vec<f64> = c.vertex_ids().map(|v| c.vertex_position(v).x).collect();
             xs.iter().cloned().fold(f64::MIN, f64::max)
                 - xs.iter().cloned().fold(f64::MAX, f64::min)
@@ -337,11 +445,15 @@ f 5 7 8
 ";
         let path = write_temp_obj("fieldform_test_triangulated.obj", triangulated);
         let result = import_cages(&path);
-        assert!(matches!(result, Err(ImportError::InvalidCage { .. })));
+        // Structural, so refused with the whole list -- here every face, each a triangle.
+        assert!(matches!(result, Err(ImportError::InvalidMesh { .. })), "{result:?}");
     }
 
+    /// **An open mesh is no longer refused: it is a red cage** (R16). The surface reading is
+    /// still the one for a shape that is meant to stay open; this is for a solid with a hole
+    /// to be filled.
     #[test]
-    fn rejects_an_open_mesh() {
+    fn an_open_mesh_is_a_red_cage_rather_than_a_refusal() {
         let open = "\
 v 0 0 0
 v 1 0 0
@@ -349,8 +461,10 @@ v 1 1 0
 v 0 1 0
 f 1 2 3 4
 ";
-        let path = write_temp_obj("fieldform_test_open.obj", open);
-        let result = import_cages(&path);
-        assert!(matches!(result, Err(ImportError::InvalidCage { .. })));
+        let path = write_temp_obj("fieldform_test_open_quad.obj", open);
+        let cages = import_cages(&path).expect("one quad is an open body");
+        assert_eq!(cages.len(), 1);
+        assert!(cages[0].cage().is_none());
+        assert_eq!(cages[0].holes(), vec![4]);
     }
 }

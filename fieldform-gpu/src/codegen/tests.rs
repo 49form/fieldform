@@ -208,6 +208,211 @@
         generate(&doc, &graph).expect("a shared operand lowers to a shader");
     }
 
+    /// **A chamfer's second leg is one slot after the first in both passes, and scales the
+    /// operands the way the field does** (`round-chamfer-spec.md` §9.2): on a blend the join
+    /// reads `min` of the two legs over operands scaled by it, and on a rim the leg rides in the
+    /// vector's exponent slot, negated, which `rim_shape` in the prelude reads back.
+    #[test]
+    fn a_chamfers_second_leg_is_a_slot_after_the_first_in_both_passes() {
+        let lit = ParamRef::Literal;
+        let doc = fieldform_scene::Document::new();
+        let mut graph = Graph::empty();
+        let ball = graph.add(Node::Sphere {
+            centre: fieldform_scene::Place::At([lit(10.0), lit(0.0), lit(0.0)]),
+            radius: lit(12.0),
+        });
+        let block = graph.add(Node::Cuboid {
+            edge: Default::default(),
+            centre: fieldform_scene::Place::At([lit(-8.0), lit(0.0), lit(0.0)]),
+            size: [lit(20.0); 3],
+            turn: fieldform_scene::no_turn(),
+        });
+        graph.add(Node::Blend {
+            op: fieldform_scene::BooleanOp::Union,
+            a: ball.into(),
+            b: block.into(),
+            fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::Chamfer, second: Some(lit(5.0)) },
+        });
+        let program = generate(&doc, &graph).expect("generates");
+        let r = program.params.iter().position(|p| *p == lit(2.0)).expect("the first leg's slot");
+        assert_eq!(program.params.get(r + 1), Some(&lit(5.0)), "the second leg's slot follows it");
+        let body = program.field_function();
+        let m = format!("min(params[{r}], params[{}])", r + 1);
+        let scaled = format!("blend_bound(((n1) * {m} / params[{}])", r + 1);
+        assert!(body.contains(&scaled), "the value pass scales the operands by the lesser leg: {body}");
+        assert!(
+            body.contains(&format!("blend_bound_normal(((v1) * {m} / params[{}])", r + 1)),
+            "and the normal pass the same: {body}"
+        );
+        let (plain, _) = {
+            let mut g2 = Graph::empty();
+            let a = g2.add(Node::Sphere { centre: fieldform_scene::Place::At([lit(10.0), lit(0.0), lit(0.0)]), radius: lit(12.0) });
+            let b = g2.add(Node::Cuboid { edge: Default::default(), centre: fieldform_scene::Place::At([lit(-8.0), lit(0.0), lit(0.0)]), size: [lit(20.0); 3], turn: fieldform_scene::no_turn() });
+            g2.add(Node::Blend { op: fieldform_scene::BooleanOp::Union, a: a.into(), b: b.into(), fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::Chamfer, second: None } });
+            (generate(&doc, &g2).expect("generates"), ())
+        };
+        assert_eq!(program.params.len(), plain.params.len() + 1, "one slot more than one leg");
+
+        // A rim's second leg: negated in the exponent's place, the slot after the reach's.
+        let mut doc = fieldform_scene::Document::new();
+        let curve = fieldform_scene::CurveId::new();
+        doc.curves.insert(
+            curve,
+            fieldform_scene::Curve::polyline(
+                curve,
+                "square",
+                vec![
+                    nalgebra::Point3::new(0.0, 0.0, 0.0),
+                    nalgebra::Point3::new(10.0, 0.0, 0.0),
+                    nalgebra::Point3::new(10.0, 10.0, 0.0),
+                    nalgebra::Point3::new(0.0, 10.0, 0.0),
+                ],
+                true,
+            )
+            .expect("closed"),
+        );
+        let mut graph = Graph::empty();
+        graph.add(Node::Extrude {
+            outline: fieldform_scene::Outline::closed(curve),
+            sweep: fieldform_scene::Sweep::Normal,
+            start: lit(0.0),
+            height: lit(5.0),
+            draft: lit(0.0),
+            sides: fieldform_scene::Sides::One,
+            corners: Default::default(),
+            rims: fieldform_scene::Rims {
+                radius: lit(1.25),
+                continuity: fieldform_scene::Continuity::Chamfer,
+                at: fieldform_scene::RimEnds::Both,
+                second: Some(lit(0.75)),
+            },
+        });
+        let program = generate(&doc, &graph).expect("generates");
+        let r = program.params.iter().position(|p| *p == lit(1.25)).expect("the reach's slot");
+        assert_eq!(program.params.get(r + 1), Some(&lit(0.75)), "the second leg's slot follows the reach's");
+        let rim = format!("vec4<f32>(params[{r}], -params[{}], 0.0, 1.0)", r + 1);
+        // Once in the value pass, and twice in the normal pass, whose body hands its value up
+        // beside its normal.
+        assert_eq!(program.field_function().matches(&rim).count(), 3, "both passes write the rim with its leg negated in the exponent's place: {}", program.field_function());
+    }
+
+    /// **The normal pass reads every profile solid through its `_bake` copy, and the value pass
+    /// through the original.** The copies are the prelude's profile-solid region instantiated
+    /// again by name (`instantiate_bake_copies`); what this holds is that the region covers the
+    /// solids the normal pass reads, that a copy reads its section through
+    /// `profile_distance_bake`, and that the generated bodies call the right one in each pass.
+    #[test]
+    fn the_normal_pass_reads_every_profile_solid_through_its_bake_copy() {
+        for name in [
+            "extrude_distance",
+            "extrude_rim_distance",
+            "extrude_rim_normal",
+            "revolve_distance",
+            "revolve_normal",
+            "revolve_wedge_rim_distance",
+            "revolve_wedge_rim_normal",
+            "wall_distance",
+            "wall_extrude_rim_distance",
+            "wall_revolve_wedge_rim_distance",
+            "sweep_distance",
+            "sweep_value_normal",
+            "sweep_law_rim_value_normal",
+            "wall_sweep_rim_value_normal",
+            "loft_distance",
+            "loft_value_normal",
+        ] {
+            assert!(bake_copy_names().iter().any(|n| n == name), "{name} is in the region");
+            assert!(prelude().contains(&format!("fn {name}_bake(")), "{name} has its copy");
+        }
+        let copy_start = prelude().find("fn extrude_rim_distance_bake(").expect("the copy");
+        let copy = &prelude()[copy_start..copy_start + 700];
+        assert!(copy.contains("profile_distance_bake("), "a copy reads the section's bake: {copy}");
+        assert!(!copy.contains(" profile_distance("), "and never the walk: {copy}");
+        assert_eq!(
+            PRELUDE.matches("// unbaked-section-walk").count(),
+            1,
+            "the one walk the renderer cuts when every section is baked"
+        );
+
+        let lit = ParamRef::Literal;
+        let mut doc = fieldform_scene::Document::new();
+        let curve = fieldform_scene::CurveId::new();
+        doc.curves.insert(
+            curve,
+            fieldform_scene::Curve::polyline(
+                curve,
+                "square",
+                vec![
+                    nalgebra::Point3::new(0.0, 0.0, 0.0),
+                    nalgebra::Point3::new(10.0, 0.0, 0.0),
+                    nalgebra::Point3::new(10.0, 10.0, 0.0),
+                    nalgebra::Point3::new(0.0, 10.0, 0.0),
+                ],
+                true,
+            )
+            .expect("closed"),
+        );
+        let mut graph = Graph::empty();
+        graph.add(Node::Extrude {
+            outline: fieldform_scene::Outline::closed(curve),
+            sweep: fieldform_scene::Sweep::Normal,
+            start: lit(0.0),
+            height: lit(5.0),
+            draft: lit(0.0),
+            sides: fieldform_scene::Sides::One,
+            corners: Default::default(),
+            rims: Default::default(),
+        });
+        let body = generate(&doc, &graph).expect("generates").field_function().to_string();
+        assert_eq!(body.matches("extrude_distance(").count(), 1, "the value pass reads the original: {body}");
+        assert_eq!(body.matches("extrude_distance_bake(").count(), 1, "the normal pass's value, its copy");
+        assert_eq!(body.matches("extrude_normal_bake(").count(), 1, "and its normal, its copy");
+        assert_eq!(body.matches("extrude_normal(").count(), 0, "never the walking normal");
+    }
+
+    /// **The normal fold keeps the hit body's seam scale and no other's.** Each body's normal
+    /// starts from one, and only the body the fold takes hands its scale on, so a fillet in a
+    /// body the ray passed over cannot brighten a pixel on a plain face of the body it hit
+    /// (`seam_scale` in the prelude, `round-chamfer-spec.md` §4.4).
+    #[test]
+    fn the_normal_fold_keeps_the_hit_bodys_seam_scale() {
+        let lit = ParamRef::Literal;
+        let doc = fieldform_scene::Document::new();
+        let mut graph = Graph::empty();
+        let ball = graph.add(Node::Sphere {
+            centre: fieldform_scene::Place::At([lit(10.0), lit(0.0), lit(0.0)]),
+            radius: lit(12.0),
+        });
+        let block = graph.add(Node::Cuboid {
+            edge: Default::default(),
+            centre: fieldform_scene::Place::At([lit(-8.0), lit(0.0), lit(0.0)]),
+            size: [lit(20.0); 3],
+            turn: fieldform_scene::no_turn(),
+        });
+        graph.add(Node::Blend {
+            op: fieldform_scene::BooleanOp::Union,
+            a: ball.into(),
+            b: block.into(),
+            fillet: Fillet { radius: lit(3.0), continuity: fieldform_scene::Continuity::G1, second: None },
+        });
+        graph.add(Node::Sphere {
+            centre: fieldform_scene::Place::At([lit(60.0), lit(0.0), lit(0.0)]),
+            radius: lit(5.0),
+        });
+        let program = generate(&doc, &graph).expect("the shader compiles");
+        let normal = program
+            .source
+            .split("fn field_normal(")
+            .nth(1)
+            .expect("a normal fold");
+        assert_eq!(normal.matches("seam_scale = 1.0; let r").count(), 2, "each body starts from one");
+        assert_eq!(normal.matches("hit_scale = seam_scale;").count(), 2, "and the taken body hands its on");
+        assert!(
+            normal.contains("seam_scale = hit_scale;\n    return normalize(nearest.xyz);"),
+            "the fold leaves the hit body's scale for the march"
+        );
+    }
+
     /// **A varying fillet radius divides by the number the field divides by**, and reaches the
     /// buffer as a divisor and not as a slot (`round-chamfer-spec.md` §9.1). The pipe's test
     /// below, for the pipe's reason: the two paths lower the radius separately and the divisor
@@ -244,7 +449,7 @@
             op: fieldform_scene::BooleanOp::Union,
             a: ball.into(),
             b: block.into(),
-            fillet: Fillet { radius: ParamRef::Field(ramp), continuity: fieldform_scene::Continuity::G1 },
+            fillet: Fillet { radius: ParamRef::Field(ramp), continuity: fieldform_scene::Continuity::G1, second: None },
         });
 
         let program = generate(&doc, &graph).expect("the shader compiles");
@@ -1000,7 +1205,7 @@
             op: BooleanOp::Union,
             a: cage.into(),
             b: placed.into(),
-            fillet: Fillet { radius: lit(1.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: lit(1.0), continuity: Continuity::G1, second: None },
         });
         // And now the same sphere again, from outside the placement.
         graph.add(Node::Boolean {
@@ -1252,7 +1457,7 @@
             field_body(&g0.source)
         );
         assert_eq!(g0.source.matches(tail).count(), 2, "once per pass");
-        assert!(g0.source.contains("loft_value_normal(0u, 1u, "), "the normal pass walks once");
+        assert!(g0.source.contains("loft_value_normal_bake(0u, 1u, "), "the normal pass walks once");
         validate(&g0.source).expect("the loft's shader parses and validates");
 
         // **And with the table somewhere other than slot nought.** Alone, a miscount between
@@ -1282,7 +1487,7 @@
         // The union's operands are emitted back to front, so the loft comes first and its
         // table still starts at nought here -- what this holds is that the two passes agree
         // wherever the table lands, which is the claim; the sphere's slots follow the loft's.
-        assert_eq!(from_the_table("loft_distance("), from_the_table("loft_value_normal("));
+        assert_eq!(from_the_table("loft_distance("), from_the_table("loft_value_normal_bake("));
         assert_eq!(joined.params.len(), 15, "the loft's eleven and the sphere's four");
         validate(&joined.source).expect("the joined shader parses and validates");
     }
@@ -1416,7 +1621,7 @@
             let under = built(law);
             assert!(
                 field_body(&under.source).contains("sweep_law_distance(")
-                    && under.source.contains("= sweep_law_value_normal("),
+                    && under.source.contains("= sweep_law_value_normal_bake("),
                 "{what}: a law'd sweep calls the law'd functions"
             );
             assert_eq!(under.params.len(), 21, "{what}: seven more slots than the plain fourteen");
@@ -1607,7 +1812,7 @@
             op: BooleanOp::Union,
             a: cut.into(),
             b: second.into(),
-            fillet: Fillet { radius: ParamRef::Literal(3.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: ParamRef::Literal(3.0), continuity: Continuity::G1, second: None },
         });
 
         let program = generate(&fieldform_scene::Document::new(), &graph).unwrap();
@@ -1650,7 +1855,7 @@
         // of the same assertion. The prelude is excluded because it is a fixed body of code
         // that legitimately contains numbers of its own — a smootherstep's coefficients, for
         // one — and searching the whole source for a bare "5.0)" matched "- 15.0)" there.
-        let generated = a.source.strip_prefix(PRELUDE).expect("the prelude comes first");
+        let generated = a.source.strip_prefix(prelude()).expect("the prelude comes first");
         assert!(!generated.contains("5.0)"), "the radius was inlined into the shader");
     }
 
@@ -1673,7 +1878,7 @@
                 turn: fieldform_scene::no_turn(),
             })
         };
-        let fillet = |k: f64| Fillet { radius: lit(k), continuity: Continuity::G1 };
+        let fillet = |k: f64| Fillet { radius: lit(k), continuity: Continuity::G1, second: None };
         let single = |k: f64| {
             let mut graph = Graph::empty();
             let (a, b) = (slab(&mut graph, -15.0), slab(&mut graph, 15.0));
@@ -1738,7 +1943,7 @@
     /// A part with a critical bore, its fillets nested every way a fillet can be: at the world
     /// point, under a placement, under a joined mirror, and as a rounded pattern.
     fn protected_part(k: f64, clearance: f64, marked: bool) -> Graph {
-        let fillet = |k: f64| Fillet { radius: lit(k), continuity: Continuity::G1 };
+        let fillet = |k: f64| Fillet { radius: lit(k), continuity: Continuity::G1, second: None };
         let mut graph = Graph::empty();
         let block = |graph: &mut Graph, x: f64| {
             graph.add(Node::Cuboid { edge: Default::default(),
@@ -2448,7 +2653,7 @@
             op: BooleanOp::Union,
             a: ids[2].into(),
             b: ball.into(),
-            fillet: fieldform_scene::Fillet { radius: lit(3.0), continuity: Continuity::G1 },
+            fillet: fieldform_scene::Fillet { radius: lit(3.0), continuity: Continuity::G1, second: None },
         });
         let mut inputs = ids.clone();
         inputs.push(rounded);
@@ -2533,7 +2738,7 @@
             op: BooleanOp::Union,
             a: ids[1].into(),
             b: ball.into(),
-            fillet: fieldform_scene::Fillet { radius: lit(3.0), continuity: Continuity::G1 },
+            fillet: fieldform_scene::Fillet { radius: lit(3.0), continuity: Continuity::G1, second: None },
         });
         graph.add(Node::Boolean { op: BooleanOp::Union, inputs: ids.clone().into_iter().map(Into::into).collect() });
         let shared_pipe = generate(&doc, &graph).expect("generates");
@@ -3369,7 +3574,7 @@
             op: BooleanOp::Union,
             a: a.into(),
             b: b.into(),
-            fillet: Fillet { radius: lit(3.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: lit(3.0), continuity: Continuity::G1, second: None },
         });
         // A second body, so the part culls at all -- one body is below the gate.
         graph.add(Node::Sphere { centre: Place::At([lit(60.0), lit(0.0), lit(0.0)]), radius: lit(10.0) });
@@ -4045,7 +4250,7 @@
             "the value pass asks once and nothing else asks at all"
         );
         assert_eq!(
-            generated.matches("sweep_value_normal(").count(),
+            generated.matches("sweep_value_normal_bake(").count(),
             1,
             "the normal pass asks once, for the value and the normal together"
         );
@@ -4125,7 +4330,7 @@
         assert!(source.contains("if (copy_masked("), "the skip is in the loop");
         assert!(source.contains("if (mask_mode == 1u)"), "and the record after it");
 
-        let rounded = ring(Fillet { radius: lit(2.0), continuity: Continuity::G1 }, false);
+        let rounded = ring(Fillet { radius: lit(2.0), continuity: Continuity::G1, second: None }, false);
         assert!(!generated(&rounded).contains("copy_masked("));
         assert!(!generated(&rounded).contains("if (mask_mode == 1u)"));
 
@@ -4285,7 +4490,7 @@
             op: BooleanOp::Union,
             a: a.into(),
             b: b.into(),
-            fillet: Fillet { radius: lit(3.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: lit(3.0), continuity: Continuity::G1, second: None },
         });
         let source = generated(&blended);
         assert!(source.contains("fn masked_operand_1("));
@@ -4403,10 +4608,12 @@
             });
         }
         let program = generate(&fieldform_scene::Document::new(), &graph).expect("a thousand bodies generate");
+        // The generated part alone: the prelude in front of it is fixed text, and grew past the
+        // margin this bound left when the profile solids were instantiated a second time.
         assert!(
-            program.source.len() < 1_000_000,
+            program.field_function().len() < 1_000_000,
             "{} characters for 1000 bodies — the fold is nesting again",
-            program.source.len(),
+            program.field_function().len(),
         );
     }
 
@@ -4455,18 +4662,25 @@
         });
         document.settle_ownership();
 
-        // It really is one block in two places, or the rest of the test is about nothing.
+        // It really is one block two bodies read, or the rest of the test is about nothing. Which
+        // declares it (R1 inverted 2026-10-24, `notebook-spec.md` §17) — and that changes nothing
+        // here: what §15 is about is the *generated source*, where one node feeding two bodies is
+        // written into both either way. The ownership is asserted only to pin the setup.
         assert_eq!(
             document.ownership_nodes.get(&sphere),
-            Some(&Ownership::Nested),
-            "a second reader shares rather than promoting (R1, §7.3)",
+            Some(&Ownership::Variable),
+            "two readers declare it",
         );
         let nesting = document.nesting_in(&graph);
-        let mut owners = nesting.owners_of(sphere).to_vec();
-        owners.sort();
+        assert_eq!(
+            nesting.owners_of(sphere).to_vec(),
+            Vec::new(),
+            "so no slot holds it: both shells reference it",
+        );
         let mut readers = vec![thin, thick];
         readers.sort();
-        assert_eq!(owners, readers, "drawn inside both shells");
+        assert_eq!(nesting.readers_of(sphere), 2, "and both of them read it");
+        let _ = readers;
         assert_eq!(document.folded_bodies(&graph), vec![thin, thick], "the shells are the bodies");
 
         let source = generate(&document, &graph).unwrap().source;

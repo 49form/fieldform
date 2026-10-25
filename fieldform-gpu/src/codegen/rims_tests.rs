@@ -84,16 +84,16 @@
             };
             let hard = build(Rims::hard()).expect(what);
             // A rim of nought names a shape and is still hard.
-            let nought = build(Rims { radius: lit(0.0), continuity: Continuity::Chamfer, at: fieldform_scene::RimEnds::Both }).expect(what);
+            let nought = build(Rims { radius: lit(0.0), continuity: Continuity::Chamfer, at: fieldform_scene::RimEnds::Both, second: None }).expect(what);
             assert_eq!(hard.source, nought.source, "{what}: a rim of nought is hard");
             assert!(!hard.field_function().contains("_rim_"), "{what}: a hard rim calls no rim function");
             assert!(hard.field_function().contains(&format!("{name}_distance(")), "{what}");
 
             for shape in Continuity::ALL {
-                let rounded = build(Rims { radius: lit(1.5), continuity: shape, at: fieldform_scene::RimEnds::Both }).expect(what);
+                let rounded = build(Rims { radius: lit(1.5), continuity: shape, at: fieldform_scene::RimEnds::Both, second: None }).expect(what);
                 let body = rounded.field_function();
                 assert!(body.contains(&format!("{name}_rim_distance(")), "{what}: {body}");
-                assert!(body.contains(&format!("{name}_rim_normal(")), "{what}: the normal too");
+                assert!(body.contains(&format!("{name}_rim_normal_bake(")), "{what}: the normal too, through its bake copy");
                 assert!(!body.contains(&format!("{name}_distance(")), "{what}: not also the plain call");
                 assert_eq!(rounded.params.len(), hard.params.len() + 1, "{what}: one slot more");
                 assert_eq!(rounded.params.last(), Some(&lit(1.5)), "{what}: the reach, last");
@@ -130,10 +130,10 @@
         };
         let hard = build(Rims::hard());
         assert!(!hard.field_function().contains("_rim_"), "a hard loft calls no rim function");
-        let rounded = build(Rims { radius: lit(2.0), continuity: Continuity::G2, at: fieldform_scene::RimEnds::Both });
+        let rounded = build(Rims { radius: lit(2.0), continuity: Continuity::G2, at: fieldform_scene::RimEnds::Both, second: None });
         let body = rounded.field_function();
         assert!(body.contains("loft_rim_distance("), "{body}");
-        assert!(body.contains("loft_rim_value_normal("), "{body}");
+        assert!(body.contains("loft_rim_value_normal_bake("), "{body}");
         assert_eq!(rounded.params.len(), hard.params.len() + 1);
         assert_eq!(rounded.params.last(), Some(&lit(2.0)));
         assert_eq!(slots_read(&rounded), rounded.params.len(), "both passes count it");
@@ -176,10 +176,10 @@
             };
             let hard = build(Rims::hard());
             assert!(!hard.field_function().contains("_rim_"), "{what}: a hard sweep calls no rim function");
-            let rounded = build(Rims { radius: lit(1.0), continuity: Continuity::Chamfer, at: fieldform_scene::RimEnds::Both });
+            let rounded = build(Rims { radius: lit(1.0), continuity: Continuity::Chamfer, at: fieldform_scene::RimEnds::Both, second: None });
             let body = rounded.field_function();
             assert!(body.contains(&format!("{name}_rim_distance(")), "{what}: {body}");
-            assert!(body.contains(&format!("{name}_rim_value_normal(")), "{what}: {body}");
+            assert!(body.contains(&format!("{name}_rim_value_normal_bake(")), "{what}: {body}");
             assert_eq!(rounded.params.len(), hard.params.len() + 1, "{what}");
             assert_eq!(rounded.params.last(), Some(&lit(1.0)), "{what}");
             assert_eq!(slots_read(&rounded), rounded.params.len(), "{what}: both passes count it");
@@ -197,15 +197,17 @@
         for i in 0..(RUN_FLOOR + 2) {
             let at = i as f64 * 60.0;
             let id = drawn(&mut doc, &[(at, 0.0), (at + 40.0, 0.0), (at + 40.0, 40.0), (at, 40.0)], true);
-            let rims = if i == RUN_FLOOR + 1 { Rims { radius: lit(2.0), continuity: Continuity::G1, at: fieldform_scene::RimEnds::Both } } else { Rims::hard() };
+            let rims = if i == RUN_FLOOR + 1 { Rims { radius: lit(2.0), continuity: Continuity::G1, at: fieldform_scene::RimEnds::Both, second: None } } else { Rims::hard() };
             inputs.push(graph.add(extrude(Outline::closed(id), 0.0, rims)).into());
         }
         graph.add(Node::Boolean { op: fieldform_scene::BooleanOp::Union, inputs });
         let program = generate(&doc, &graph).expect("generates");
         let body = program.field_function();
         assert_eq!(body.matches("extrude_run_distance(").count(), 1, "the plain ones still loop: {body}");
-        // Once in each pass: the normal pass writes a body's value beside its normal.
-        assert_eq!(body.matches("extrude_rim_distance(").count(), 2, "the rimmed one is its own call");
+        // Once in each pass: the normal pass writes a body's value beside its normal, through
+        // the reading's `_bake` copy.
+        assert_eq!(body.matches("extrude_rim_distance(").count(), 1, "the rimmed one is its own call");
+        assert_eq!(body.matches("extrude_rim_distance_bake(").count(), 1, "and the normal pass reads its bake copy");
     }
 
     /// **Which ends is a third literal in the rim's vector**, after the exponent -- 0 both, 1 the
@@ -222,7 +224,7 @@
             graph.add(extrude(
                 Outline::closed(square),
                 0.0,
-                Rims { radius: lit(2.0), continuity: Continuity::G2, at },
+                Rims { radius: lit(2.0), continuity: Continuity::G2, at, second: None },
             ));
             let program = generate(&doc, &graph).expect("a rimmed extrude");
             let body = program.field_function();
@@ -271,11 +273,11 @@
                 generate(&doc, &graph).expect(name)
             };
             let hard = build(Fillet::hard());
-            let nought = build(Fillet { radius: lit(0.0), continuity: Continuity::Chamfer });
+            let nought = build(Fillet { radius: lit(0.0), continuity: Continuity::Chamfer, second: None });
             assert_eq!(hard.field_function(), nought.field_function(), "{name}: nought is hard");
             assert!(!hard.field_function().contains("_edge_"), "{name}: a hard edge calls no edge function");
             for (shape, n) in [(Continuity::G1, "2.0"), (Continuity::G2, "3.0"), (Continuity::Chamfer, "1.0")] {
-                let cut = build(Fillet { radius: lit(2.0), continuity: shape });
+                let cut = build(Fillet { radius: lit(2.0), continuity: shape, second: None });
                 let body = cut.field_function();
                 let r = hard.params.len();
                 assert!(body.contains(&format!("{name}_edge_distance(")), "{name} {shape:?}: {body}");
@@ -317,10 +319,10 @@
             };
             let hard = build(120.0, Rims::hard());
             assert!(!hard.field_function().contains("_rim_"), "{what}: a hard wedge calls no rim function");
-            let rounded = build(120.0, Rims { radius: lit(1.0), continuity: Continuity::G2, at: fieldform_scene::RimEnds::Start });
+            let rounded = build(120.0, Rims { radius: lit(1.0), continuity: Continuity::G2, at: fieldform_scene::RimEnds::Start, second: None });
             let body = rounded.field_function();
             assert!(body.contains(&format!("{name}_rim_distance(")), "{what}: {body}");
-            assert!(body.contains(&format!("{name}_rim_normal(")), "{what}: the normal too");
+            assert!(body.contains(&format!("{name}_rim_normal_bake(")), "{what}: the normal too, through its bake copy");
             // The reach's slot and the square-corner scale's, which the generator's own tests
             // leave at nought, the bound, having no compile to hand one over.
             assert_eq!(rounded.params.len(), hard.params.len() + 2, "{what}: two slots more");
@@ -328,7 +330,7 @@
             let r = hard.params.len();
             assert!(body.contains(&format!("params[{r}], 3.0, 1.0, params[{}])", r + 1)), "{what}: exponent and end as literals, the scale a slot");
             assert_eq!(slots_read(&rounded), rounded.params.len(), "{what}: both passes count it");
-            let full = build(360.0, Rims { radius: lit(1.0), continuity: Continuity::G1, at: fieldform_scene::RimEnds::Both });
+            let full = build(360.0, Rims { radius: lit(1.0), continuity: Continuity::G1, at: fieldform_scene::RimEnds::Both, second: None });
             assert!(!full.field_function().contains("_rim_"), "{what}: a full revolve keeps its call");
         }
     }

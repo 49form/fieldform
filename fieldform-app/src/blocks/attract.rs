@@ -108,6 +108,13 @@ impl App {
                 chosen = picked;
             }
         });
+        // **Whichever kind it is, under the row that names it** (`notebook-spec.md` §7.1, §17).
+        // The one field in the panel that takes either, so it is the one host call that has to
+        // ask which: a point is a block and a curve is a curve, and the two have their own rows.
+        match chosen {
+            fieldform_scene::Attractor::Point(point) => self.host_nested_block(ui, point),
+            fieldform_scene::Attractor::Curve(curve) => self.host_nested_curve(ui, curve),
+        }
 
         let (new_strength, changed_strength) = self.parametric_field_in(
             ui,

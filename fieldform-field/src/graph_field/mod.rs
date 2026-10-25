@@ -40,7 +40,7 @@ mod resolve;
 mod sections;
 
 pub use blend::taper_ratio;
-pub use compile::{CompileError, GraphField, Region};
+pub use compile::{red_cage_behind, CompileError, GraphField, Region};
 pub use extent::{graph_extent, operand_extent, part_extent};
 pub use lipschitz::{
     approximate_blends, carries_true_distance, driven_blend_divisor, driven_lattice_divisor,
@@ -631,6 +631,11 @@ mod extrude_sides_tests;
 /// `round-chamfer-spec.md` section 4 says they are, and that none overstates.
 #[cfg(test)]
 mod rims_tests;
+
+/// A cage the document holds open is left out like an unfinished block, and the part's other
+/// bodies compile.
+#[cfg(test)]
+mod red_cage_tests;
 
 /// A revolve through part of a turn, through the whole graph: the solids
 /// `extrude-revolve-options-spec.md` section 3.3 says it makes, against references written

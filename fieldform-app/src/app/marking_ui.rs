@@ -26,6 +26,14 @@ const RADIUS: f32 = 84.0;
 impl App {
     /// What the selection is, for the marking menu's table (§7.2).
     pub(crate) fn marking_subject(&self) -> Subject {
+        // Elements of the cage picked are the cage tools' table, ahead of the body they belong to
+        // -- and so is being in the middle of cage work at all: a cage tool armed, an extrude or
+        // inset pending, or the view in Cage mode, where the cage is the thing being edited (the
+        // owner, 2026-10-24: a right-click while inserting an edge opened the field's menu).
+        let cage_work = self.cage_tool.is_some() || self.cage_session.is_some() || self.view_mode == ViewMode::Polygon;
+        if self.control == ControlMesh::Cage && (!self.selection.is_empty() || cage_work) {
+            return Subject::CageElements;
+        }
         if let Some(id) = self.selected_body {
             return match self.part_graph().node(id) {
                 Some(Node::Plane { .. }) => Subject::Plane,
@@ -41,7 +49,22 @@ impl App {
     }
 
     pub(crate) fn open_marking_menu(&mut self, at: egui::Pos2) {
-        self.marking = Some(MarkingMenu { at, subject: self.marking_subject(), dragging: false });
+        let mut subject = self.marking_subject();
+        // In Field + Cage, a right-click *on the cage* is the cage's menu too, whatever is
+        // selected: the cage is drawn there to be worked on (the owner, 2026-10-24).
+        if subject != Subject::CageElements
+            && self.control == ControlMesh::Cage
+            && self.view_mode.cage_is_editable()
+            && let Some(rect) = self.viewport_rect
+            && rect.contains(at)
+        {
+            let aspect = rect.width() / rect.height().max(1.0);
+            let under = pick(self.control(), &self.control_placement(), &self.cage_mesh, &self.camera, aspect, rect, at);
+            if !matches!(under, Selection::None) {
+                subject = Subject::CageElements;
+            }
+        }
+        self.marking = Some(MarkingMenu { at, subject, dragging: false });
     }
 
     /// Draws the marking menu, if it is open, and runs what is picked.

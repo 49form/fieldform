@@ -9,7 +9,7 @@ use super::*;
 /// The same measurement the app makes for the cage it is editing — shared rather than repeated,
 /// because a bake box that disagreed with the one the camera is framed on would clip the body
 /// at whichever edge the two differ by.
-fn cage_box(cage: &Cage) -> (Point3<f64>, Point3<f64>) {
+fn cage_box(cage: &fieldform_cage::QuadMesh) -> (Point3<f64>, Point3<f64>) {
     let mut lo = Point3::new(f64::MAX, f64::MAX, f64::MAX);
     let mut hi = Point3::new(f64::MIN, f64::MIN, f64::MIN);
     for v in cage.vertex_ids() {
@@ -34,7 +34,7 @@ fn cage_box(cage: &Cage) -> (Point3<f64>, Point3<f64>) {
 /// Its own subdivision depth, from its own size: a 10 mm cage and a metre one need different
 /// numbers of levels to land within the same tolerance, and using one cage's depth for another
 /// is how a small body comes out faceted beside a large one that looks fine.
-pub(super) fn cage_levels(cage: &Cage, tolerance_mm: f64) -> usize {
+pub(super) fn cage_levels(cage: &fieldform_cage::QuadMesh, tolerance_mm: f64) -> usize {
     let (lo, hi) = cage_box(cage);
     fieldform_field::levels_for_tolerance((hi - lo).norm(), tolerance_mm)
 }
@@ -339,6 +339,13 @@ impl TracedView {
                         bounds.1.y - bounds.0.y,
                         bounds.1.z - bounds.0.z,
                     );
+                    // A red cage never gets here: codegen leaves its block out of the program,
+                    // so no `BakedLeaf` names it. If one did, that is a bug and this says so.
+                    let Some(cage) = cage.cage() else {
+                        self.error = Some(format!("cage {id} is not a solid and cannot be baked"));
+                        self.nothing_to_draw();
+                        return;
+                    };
                     match CageField::from_cage(cage, levels) {
                         Ok(f) => std::sync::Arc::new(f),
                         Err(e) => {

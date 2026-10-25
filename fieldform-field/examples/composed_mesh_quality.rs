@@ -127,7 +127,7 @@ fn report(cells: usize, tolerance: f64) {
 fn scene() -> (Document, Graph) {
     let mut doc = Document::new();
     let cage_id = CageId::new();
-    doc.cages.insert(cage_id, Cage::cube_of(CAGE_MM));
+    doc.cages.insert(cage_id, Cage::cube_of(CAGE_MM).into());
 
     let curve_id = CurveId::new();
     let s = CAGE_MM;

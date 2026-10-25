@@ -1026,7 +1026,7 @@ mod tests {
         )
         .expect("two squares loft");
         for exponent in [2.0, 3.0, 1.0] {
-            let rims = Rim { reach: 3.0, exponent, ends: Default::default(), square: None };
+            let rims = Rim { reach: 3.0, exponent, ends: Default::default(), square: None, second: None };
             let lofted = plain.with_rims(rims);
             let extrude = Extrusion {
                 rims,

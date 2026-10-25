@@ -90,6 +90,9 @@ impl App {
                     removed = Some(i);
                 }
             });
+            // Each section under its own row, which is what makes a loft of four sections read
+            // as four things it is made of rather than a list and a heap (§7.1, §17).
+            self.host_nested_curve(ui, current);
         }
         if let Some((from, to)) = moved {
             new_sections.swap(from, to);
@@ -194,6 +197,11 @@ impl App {
                 }
             }
         });
+        // The centerline, when there is one in the document: a derived one is no curve and has
+        // no row (§7.1, §17).
+        if let Some(spine) = spine {
+            self.host_nested_curve(ui, spine);
+        }
         if spine.is_none() {
             ui.label(
                 egui::RichText::new(

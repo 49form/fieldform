@@ -59,7 +59,7 @@ fn composed_document() -> Document {
         op: BooleanOp::Union,
         a: thinned.into(),
         b: boss.into(),
-        fillet: Fillet { radius: ParamRef::Named(blend_radius), continuity: Continuity::G1 },
+        fillet: Fillet { radius: ParamRef::Named(blend_radius), continuity: Continuity::G1, second: None },
     });
     part.material = fieldform_scene::Material::preset("Brushed aluminium");
 

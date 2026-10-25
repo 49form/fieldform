@@ -160,7 +160,7 @@ pub(crate) enum Clipboard {
         /// The subtree, root last, so inputs are always already inserted when a node arrives.
         nodes: Vec<(NodeId, Node)>,
         root: NodeId,
-        cages: Vec<(CageId, Cage)>,
+        cages: Vec<(CageId, fieldform_cage::CageBody)>,
         curves: Vec<(CurveId, fieldform_scene::Curve)>,
     },
     Curve(fieldform_scene::Curve),
@@ -345,16 +345,20 @@ pub(crate) fn make_variable(
 /// *Put back inside* (`block-ownership-spec.md` §5.2): the command, or the readers that refuse it.
 ///
 /// Inside the one block that reads it, or free when nothing does; with two or more there is no
-/// one block to go into, and the answer is who they are, ascending, for the refusal to name.
+/// one block to go into (R1 inverted 2026-10-24: a settle would declare it straight back, so the
+/// gesture would undo itself in silence), and the answer is who they are, ascending, for the refusal to name.
 /// [`Document::put_back_target`] answers where, counting readers as I2 does — a curve's in every
 /// part.
 ///
 /// **The name stays.** Clearing it used to *be* the move back inside, when the list was laid out
 /// by names, so a name somebody typed was lost to the gesture; now it is a label and the row is
 /// the ownership's, so the two come apart. A profile row's was the same, and is a label too.
-pub(crate) fn put_back_inside(doc: &Document, block: BlockKey) -> fieldform_ops::SetOwnership {
-    let target = doc.put_back_target(block);
-    fieldform_ops::SetOwnership::new(block, target, name_of(doc, block).as_deref())
+pub(crate) fn put_back_inside(
+    doc: &Document,
+    block: BlockKey,
+) -> Result<fieldform_ops::SetOwnership, Vec<NodeId>> {
+    let target = doc.put_back_target(block)?;
+    Ok(fieldform_ops::SetOwnership::new(block, target, name_of(doc, block).as_deref()))
 }
 
 /// *Put back inside* for a parameter (`block-ownership-spec.md` §11): one entry that writes its

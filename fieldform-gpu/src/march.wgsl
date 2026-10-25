@@ -45,7 +45,7 @@
 // Nothing is assumed about the field's own rate of change, only that it reads short. A cell
 // whose `field(c) - h` is positive holds no surface, so a ray may leave it by its far wall; and
 // from anywhere inside it a step of that length is safe as well, so the march takes whichever
-// is longer. The section plane only ever removes material from what the field describes, so a
+// is longer. A section plane only ever removes material from what the field describes, so a
 // region empty of the field's surface is empty of the scene's.
 //
 // Layout, in words: `[0..3)` the cube's low corner, `[3]` cells a side, `[4]` a cell's edge,
@@ -696,17 +696,45 @@ const SETTLE_FREE: f32 = 2.0;
 // How many readings `settle` takes at most, which only a divided body's pixels pay.
 const SETTLE_STEPS: u32 = 4u;
 
-/// Signed distance to the section's half-space, or "infinitely far inside" when there is none.
+/// Signed distance to the sections' kept region, or "infinitely far inside" when there is none.
 ///
 /// Returned as a distance rather than applied as a discard so the cut face comes out **solid**:
 /// intersecting the field with a half-space is `max`, and the result is a capped cross-section
 /// showing material, which is what a section is for. Discarding instead would show the inside
 /// of a hollow shell and read as a modelling error rather than as a cut.
+///
+/// Several planes are the same `max` again: what is past any of them is cut away, so the kept
+/// region is the intersection of their halves and two planes make a corner cutaway. The list is
+/// packed from the front and a zero normal ends it (see `Camera.sections`).
 fn section_distance(p: vec3<f32>) -> f32 {
-    if dot(camera.section.xyz, camera.section.xyz) < 0.5 {
-        return -3.4e38;
+    var d = -3.4e38;
+    for (var i = 0u; i < 8u; i++) {
+        let plane = camera.sections[i];
+        if dot(plane.xyz, plane.xyz) < 0.5 {
+            break;
+        }
+        d = max(d, dot(p, plane.xyz) - plane.w);
     }
-    return dot(p, camera.section.xyz) - camera.section.w;
+    return d;
+}
+
+/// The normal of the cut face at `p`: the plane whose half-space `section_distance` read there,
+/// which on a corner cutaway is whichever of the two the point is nearer to being past.
+fn section_normal(p: vec3<f32>) -> vec3<f32> {
+    var best = -3.4e38;
+    var normal = vec3<f32>(0.0, 0.0, 1.0);
+    for (var i = 0u; i < 8u; i++) {
+        let plane = camera.sections[i];
+        if dot(plane.xyz, plane.xyz) < 0.5 {
+            break;
+        }
+        let d = dot(p, plane.xyz) - plane.w;
+        if d > best {
+            best = d;
+            normal = plane.xyz;
+        }
+    }
+    return normal;
 }
 
 // The part as it is being looked at: the field intersected with the section's half-space.
@@ -727,11 +755,14 @@ fn scene(p: vec3<f32>) -> f32 {
 // The classic estimate, and an estimate is all it is — but a cheap one, five field
 // evaluations against the hundred or so the primary march spent, and the thing that makes a
 // join read as a join rather than two surfaces that happen to meet.
-fn occlusion(p: vec3<f32>, n: vec3<f32>, radius: f32) -> f32 {
+// `seam` is what a reading along this pixel's normal falls short by at a fillet -- `1/cos(θ/2)`
+// of the seam's angle, one on a plain face -- which the march left beside the pixel from the
+// blend's own normal. See `seam_scale` in the prelude: without it every fillet is a trench.
+fn occlusion(p: vec3<f32>, n: vec3<f32>, radius: f32, seam: f32) -> f32 {
     // A divided field reads short everywhere, and this function reads short as "material is
     // close" -- so without putting the divisor back a driven morph occludes itself to black.
     // See `Camera::value_scale`.
-    let scale = max(camera.occlusion.w, 1.0);
+    let scale = max(camera.occlusion.w, 1.0) * seam;
     var occluded = 0.0;
     var falloff = 1.0;
     for (var i = 1u; i <= 5u; i = i + 1u) {
@@ -1081,7 +1112,7 @@ fn trace_primary(gid: vec3<u32>) -> Primary {
     // hit itself; see `Settle` for why not on the surface.
     var normal = field_normal(origin + dir * t_normal);
     if cut >= here {
-        normal = camera.section.xyz;
+        normal = section_normal(p);
     }
     output[index] = vec4<f32>(normal, t);
     tile_live = false;
@@ -1102,7 +1133,12 @@ fn march(@builtin(global_invocation_id) gid: vec3<u32>) {
     if !found.live {
         return;
     }
-    extras[found.index] = pack2x16float(vec2<f32>(1.0, 1.0));
+    // Open and lit until `occlude` measures the pixel -- and, where this frame will measure it,
+    // the seam scale its normal left for `occlude` to read first (`seam_scale` in the prelude).
+    // The lighting pass clamps what it reads to one, so a still the driver would not measure
+    // reads as open rather than brighter than open.
+    let seam = select(1.0, seam_scale, camera.key_light.w >= 0.5);
+    extras[found.index] = pack2x16float(vec2<f32>(seam, 1.0));
 }
 
 // **The still tier's occlusion and shadow, at the pixels `occlusion_pixels` names** — every one as
@@ -1207,7 +1243,9 @@ fn occlude(
     }
     let ray = primary_ray(camera, at);
     let p = ray.origin + ray.dir * found.w;
-    let open = occlusion(p, found.xyz, camera.occlusion.x);
+    // What the march left for this pixel: the seam scale, before it is overwritten below.
+    let seam = max(unpack2x16float(extras[index]).x, 1.0);
+    let open = occlusion(p, found.xyz, camera.occlusion.x, seam);
     let lit = shadow(p, found.xyz, camera.key_light.xyz, camera.occlusion.y, camera.occlusion.z);
     extras[index] = pack2x16float(vec2<f32>(open, lit));
 }

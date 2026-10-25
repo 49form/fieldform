@@ -328,7 +328,7 @@ fn wing(stage: Stage) -> (Document, Graph) {
         op: BooleanOp::Union,
         a: mirrored.into(),
         b: fuselage.into(),
-        fillet: Fillet { radius: ParamRef::Literal(40.0), continuity: Continuity::G1 },
+        fillet: Fillet { radius: ParamRef::Literal(40.0), continuity: Continuity::G1, second: None },
     });
     (doc, graph)
 }

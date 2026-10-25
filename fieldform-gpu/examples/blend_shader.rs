@@ -26,7 +26,7 @@ fn main() {
     let c = g.add(Node::Cuboid { edge: Default::default(), centre: fieldform_scene::Place::At([lit(0.0); 3]), size: [lit(100.0); 3],
         turn: fieldform_scene::no_turn(),
     });
-    g.add(Node::Blend { op: BooleanOp::Union, a: s.into(), b: c.into(), fillet: fieldform_scene::Fillet { radius: lit(6.0), continuity: Continuity::G1 } });
+    g.add(Node::Blend { op: BooleanOp::Union, a: s.into(), b: c.into(), fillet: fieldform_scene::Fillet { radius: lit(6.0), continuity: Continuity::G1, second: None } });
     check("blend(sphere, cube)", &g);
 
     let mut g = Graph::empty();
@@ -40,7 +40,7 @@ fn main() {
         map: fieldform_scene::CellMap::Rectangular { cell: lit(20.0) },
         phase: LatticePhase::sheet(lit(2.0)),
     });
-    g.add(Node::Blend { op: BooleanOp::Union, a: s.into(), b: c.into(), fillet: fieldform_scene::Fillet { radius: lit(6.0), continuity: Continuity::G1 } });
+    g.add(Node::Blend { op: BooleanOp::Union, a: s.into(), b: c.into(), fillet: fieldform_scene::Fillet { radius: lit(6.0), continuity: Continuity::G1, second: None } });
     check("blend(sphere, cube) + a loose gyroid body", &g);
 
     let mut g = Graph::empty();

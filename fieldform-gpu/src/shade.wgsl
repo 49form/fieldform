@@ -452,7 +452,9 @@ fn draft_tint(n: vec3<f32>) -> vec3<f32> {
 fn measured_light(pixel: vec2<u32>, index: u32, p: vec3<f32>, n: vec3<f32>, t: f32) -> vec2<f32> {
     let own = unpack2x16float(extras[index]);
     if own.x >= 0.0 {
-        return own;
+        // Clamped, because the march leaves a fillet's seam scale here for `occlude` to read, and
+        // a still whose `occlude` the driver refused would otherwise read it as brighter than open.
+        return min(own, vec2<f32>(1.0, 1.0));
     }
     let measured = occlusion_pixels(camera);
     let width = camera.frame.x;

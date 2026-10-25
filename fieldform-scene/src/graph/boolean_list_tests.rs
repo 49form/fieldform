@@ -17,7 +17,7 @@
             op: BooleanOp::Difference,
             a: ball.into(),
             b: bore.into(),
-            fillet: Fillet { radius: ParamRef::Literal(2.0), continuity: Continuity::G1 },
+            fillet: Fillet { radius: ParamRef::Literal(2.0), continuity: Continuity::G1, second: None },
         });
         assert!(graph.mark_critical(Critical { tolerance: 0.05, ..Critical::new(bore) }));
         (graph, ball, bore)

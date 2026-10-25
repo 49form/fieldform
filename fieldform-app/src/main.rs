@@ -31,6 +31,7 @@ mod lattice_readout;
 mod camera;
 mod view_cube;
 mod overlay_draw;
+mod cage_select;
 mod script;
 mod console;
 mod selection;
@@ -78,7 +79,7 @@ use view_cube::{
     view_cube_rect, VIEWCUBE_MIN_VIEWPORT,
 };
 use overlay_draw::{
-    draw_axis_seed, draw_brep_edges, draw_curves, draw_dashed_polyline, draw_highlight,
+    draw_axis_seed, draw_brep_edges, draw_cage_edges, draw_curves, draw_dashed_polyline, draw_highlight,
     draw_poi_marker, draw_surface_wire, CONTROL_POLYGON_COLOR, CURVE_COLOR, CURVE_SELECTED_COLOR,
     GUIDE_COLOR, GUIDE_FILL, HOVER_COLOR, HOVER_FILL, PLANE_PREVIEW_FILL, SELECTION_COLOR,
     SELECTION_FILL,
@@ -622,7 +623,7 @@ fn tidy_mm(v: f64) -> f64 {
 
 /// Bounding-box center and radius (half the diagonal) of a cage's vertices, for `/`'s
 /// re-center-on-object behavior.
-fn cage_bounds(cage: &Cage) -> (Point3<f32>, f32) {
+fn cage_bounds(cage: &QuadMesh) -> (Point3<f32>, f32) {
     let mut min = Point3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
     let mut max = Point3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
     for v in cage.vertices() {
@@ -954,12 +955,31 @@ fn ownership_news(
     last.into_iter()
         .filter(|c| still_here(block_of(c)))
         .filter_map(|change| match change {
-            // **Only a release is news, since 112.** The other line this said was "is now a
-            // variable — Boolean and Shell both use it", for the promotion a second reader used
-            // to cause; settling never declares now (`notebook-spec.md` §12, R5), so a block
-            // gaining a second reader is simply drawn in both and there is nothing to announce.
-            // Adoption was silent before and stays silent: a block moving into the one thing that
-            // reads it is what the person just asked for by wiring it.
+            // **The promotion is news again, 2026-10-24** (R1 inverted): a second reader
+            // declares the block, which takes it out of the slot it was drawn in and gives it a
+            // row of its own. Nobody asked for that in so many words -- they wired a second
+            // block to it -- so it is said, with who uses it, and the name invented for it comes
+            // from the same drain it did before 112.
+            //
+            // Adoption stays silent: a block moving into the one thing that reads it is what the
+            // person just asked for by wiring it.
+            OwnershipChange::BecameVariable { block, .. }
+                if doc.ownership(*block) == Ownership::Variable =>
+            {
+                // Who uses it as the line is said, not who did when the settle ran: a reader
+                // deleted since is no block at all, and the block stays a variable either way.
+                let mut readers = doc.block_readers(*block);
+                readers.sort_by_key(|id| (doc.made_at(*id), id.raw()));
+                let names: Vec<String> =
+                    readers.iter().map(|id| label(BlockKey::Node(*id))).collect();
+                let using = match names.as_slice() {
+                    [] => "nothing uses it".to_string(),
+                    [only] => format!("{only} uses it"),
+                    [first, second] => format!("{first} and {second} both use it"),
+                    [rest @ .., last] => format!("{} and {last} all use it", rest.join(", ")),
+                };
+                Some(format!("{} is now a variable \u{2014} {using}", label(*block)))
+            }
             OwnershipChange::Released { block } if doc.ownership(*block) == Ownership::Free => {
                 Some(format!("{} is on its own again", label(*block)))
             }
@@ -970,27 +990,22 @@ fn ownership_news(
 
 /// The blocks a drain names, in the order it names them (`block-ownership-spec.md` §4.2, §9.2).
 ///
-/// **Nothing, in a frame, since 112.** This named the variables a settle had declared, and
-/// settling no longer declares anything (`notebook-spec.md` §12, R5) — every variable now comes
-/// from the person asking, which names it in the same command. The load keeps its rule, below,
-/// because the rule a file from before 3.15 is placed by still makes variables directly.
+/// **One rule for both now, 2026-10-24** (R1 inverted): the unnamed variables two or more blocks
+/// read. In a frame they are the blocks the settle just declared, and a variable a *person* made
+/// is named by the command that made it, so it is never among them. After a load they are what
+/// §9.2 has always had this name: the rule a file from before 3.15 is placed by makes such a block
+/// a variable directly, which no settle reports.
 ///
-/// **After a load, the unnamed variables two or more blocks read**, reported or not: the rule a
-/// file from before 3.15 is placed by makes such a block a variable directly, which no settle
-/// reports, and those are the blocks §9.2 has the load's drain name. Not every unnamed variable:
-/// one with fewer readers is the same cleared name, saved, and naming it on opening lifted it
-/// back out of the reader it had been put back into, so its row moved between a save and the
-/// next open.
+/// Not every unnamed variable: one with fewer readers is a cleared name, saved, and naming it on
+/// opening lifted it back out of the reader it had been put back into, so its row moved between a
+/// save and the next open.
 ///
 /// Free of the `App`, which supplies the names, so a test can hold which blocks get one.
-fn variables_to_name(doc: &Document, after_load: bool) -> Vec<NodeId> {
-    if after_load {
-        let mut unnamed = doc.unnamed_variables_among(doc.ownership_nodes.keys().copied());
-        // Counted only for the few with no name, since each count walks the document.
-        unnamed.retain(|id| doc.block_readers(BlockKey::Node(*id)).len() >= 2);
-        return unnamed;
-    }
-    Vec::new()
+fn variables_to_name(doc: &Document, _after_load: bool) -> Vec<NodeId> {
+    let mut unnamed = doc.unnamed_variables_among(doc.ownership_nodes.keys().copied());
+    // Counted only for the few with no name, since each count walks the document.
+    unnamed.retain(|id| doc.block_readers(BlockKey::Node(*id)).len() >= 2);
+    unnamed
 }
 
 /// Parameter edits a panel made this frame, held for the graph edit they go with.
@@ -1003,6 +1018,15 @@ fn variables_to_name(doc: &Document, after_load: bool) -> Vec<NodeId> {
 /// §3.3, root cause 7). Held here, the two go on the history as one entry
 /// ([`record_graph_edit_then`]); what no graph edit takes is settled by
 /// [`record_parameter_edits`].
+/// The rows one block holds, for the fields inside it to draw (see [`App::hosted`]).
+struct Hosted {
+    /// The block whose controls are being drawn: the holder a hosted row is nested in, which is
+    /// what its grip needs to take it out of the slot it is in (§7.2).
+    holder: NodeId,
+    /// What it holds and no field has claimed yet.
+    rows: Vec<BlockRow>,
+}
+
 #[derive(Default)]
 struct ParameterEdits {
     /// Parameters made this frame. Already in the document, so the rest of the frame reads the
@@ -2353,7 +2377,18 @@ fn file_name(path: &std::path::Path) -> String {
 /// **View state, not document state.** It changes what is on screen and nothing about the
 /// part — the graph, the save and any export are untouched, and two windows on one document
 /// could section it differently without either being wrong. That is why it lives here rather
-/// than as a `Node`, and why there is no block for it in the list.
+/// than as a `Node`.
+///
+/// **Each one has a row in the block list all the same, and the row is not a block** (the owner,
+/// 2026-10-24: the section should stay on while every other tool is used and still be
+/// adjustable, "like a block whose on/off is the toggle"; then, trying it: a section is *made* by
+/// going to View → Section, there can be several, each switched as you see fit, and several may
+/// be on at once since the field allows it). The row gives the view state the three things a
+/// block's row gives a block — a switch, a place to click to take the handles, and a mark saying
+/// the handles are its — without any of the four things a `Node` would bring: serialisation, a
+/// place in the field, an operand slot, and an undo entry per drag. `App::sections` holds them in
+/// the order they were made, `App::section_rows` draws them, and the ones that are on are what
+/// the shader cuts with (`App::section_half_spaces`): what is past any of them is cut away.
 ///
 /// Kept as an origin and a rotation rather than as a normal and an offset, even though the
 /// shader wants the latter, because the manipulator moves a *frame*: a stored normal beside a
@@ -2361,6 +2396,9 @@ fn file_name(path: &std::path::Path) -> String {
 /// codebase keeps meeting. The normal is derived, never stored.
 #[derive(Clone, Copy, Debug)]
 struct Section {
+    /// Which one this is, in the order made: kept rather than counted from the row, so removing
+    /// the first does not rename the second.
+    number: u32,
     on: bool,
     origin: Point3<f64>,
     rotation: Rotation3<f64>,
@@ -2373,6 +2411,7 @@ struct Section {
 impl Default for Section {
     fn default() -> Self {
         Self {
+            number: 0,
             on: false,
             origin: Point3::origin(),
             rotation: Rotation3::identity(),
@@ -2944,7 +2983,7 @@ enum GizmoTarget {
     },
     /// The section plane. Reverses against where it was, like the direct layer's other
     /// targets, because a section is not in the document and has no parameter to name.
-    Section { before: Section },
+    Section { index: usize, before: Section },
     /// Control points of one curve.
     ///
     /// A curve is a parametric-layer object — it is serialized, and `Node::Pipe` reads it —
@@ -3386,6 +3425,17 @@ struct App {
     /// that want to stay open while you try them, which a menu that closes on click cannot do.
     show_shortcuts: bool,
     show_about: bool,
+    /// Check Model: the window, its filter, the self-intersection check in flight, when the amber
+    /// marks stop showing on their own, and when the next check may start (`app/check_model.rs`).
+    show_check_model: bool,
+    check_only_errors: bool,
+    /// The cage tool armed, if one is, and the extrude or inset session pending, if one is
+    /// (`app/cage_tools.rs`).
+    cage_tool: Option<app::cage_tools::CageTool>,
+    cage_session: Option<app::cage_tools::CageSession>,
+    surface_check: Option<app::check_model::SurfaceCheck>,
+    amber_until: Option<std::time::Instant>,
+    check_due: std::time::Instant,
     /// The console: what is being typed, and what came back.
     ///
     /// Every line goes through the same named dispatch a menu item does, so a command and a
@@ -3471,6 +3521,42 @@ struct App {
     /// because only the focused field is being typed in — and a field that loses focus with text
     /// that resolves to nothing puts the settled name back, so there is nothing to keep.
     ref_edit: Option<(egui::Id, String)>,
+    /// The rows a block holds, while that block's own controls are being drawn, so the field that
+    /// reads each one can draw it **in place** (`notebook-spec.md` §7.1, §17).
+    ///
+    /// **Why the rows travel rather than the drawing being moved.** A nested block used to be
+    /// drawn in a list under its holder's parameters, which said twice what it is made of: the
+    /// field named the block and the list below held it again. Containment is one place — the slot
+    /// *holds* its block — and the slot is drawn by whichever row owns it, several layers inside
+    /// the per-kind controls. Handing the rows to the drawing rather than threading a parameter
+    /// through every kind's controls is what makes every slot host its block at once.
+    ///
+    /// A row is **claimed** as it is drawn ([`App::host_nested_block`]), so what is left when the
+    /// controls finish is what no field hosted — a profile's curves, a frame's source, a loft's
+    /// sections — and those are drawn below as they always were, until their own fields host them.
+    /// Nothing can be drawn twice and nothing can vanish.
+    ///
+    /// Saved and restored around the controls, because a hosted block draws its own controls and
+    /// sets this for its own rows. One frame's drawing state, in the sense `ref_edit` is.
+    hosted: Option<Hosted>,
+    /// The other half of a move begun by a drop: which block has to let go, and of what
+    /// (`notebook-spec.md` §7.3).
+    ///
+    /// **Why it is carried rather than done where it is decided.** A block dragged from one input
+    /// to another is one gesture and two slot writes -- the destination filled, the source emptied
+    /// -- and the two are owned by different code: the drop knows where the block came from
+    /// (`DraggedBlock::from`), while the destination slot is written by whichever panel row the
+    /// pointer was over, which then hands its whole node to [`App::replace_node`]. So the drop
+    /// leaves the second half here and `replace_node` completes it in the same graph edit, which
+    /// is what makes the move one undo step instead of two.
+    ///
+    /// Armed only when the drop was *taken*, so a refused drop moves nothing, and taken by the
+    /// first write that actually reads the block -- `replace_node` checks that the node it is
+    /// writing now names it, so an unrelated edit in the same frame cannot consume it.
+    ///
+    /// Presentation state in the sense `ref_edit` is: it lives for part of one frame and nothing
+    /// in the document depends on it.
+    completing_a_move: Option<(NodeId, NodeId)>,
     /// A parameter whose name field should take the keyboard on the next frame.
     ///
     /// **Set where a variable is *made* from a field, not where one is edited.** Naming a
@@ -3704,15 +3790,17 @@ struct App {
     /// Which plane Modify > Mirror reflects across. Remembered between uses, like the offset
     /// distance: a part that wants mirroring in X usually wants it again.
     mirror_axis: Axis,
-    /// The cutaway view, if one is on. See [`Section`].
-    section: Section,
-    /// Whether the manipulator is currently aimed at the section rather than at geometry.
+    /// The cutaway views, in the order they were made; any number may be on. See [`Section`].
+    sections: Vec<Section>,
+    /// How many sections have been made, which numbers the next one.
+    sections_made: u32,
+    /// Which section the manipulator is currently aimed at, rather than at geometry.
     ///
-    /// Explicit rather than inferred from "the section is on and nothing else is selected":
+    /// Explicit rather than inferred from "a section is on and nothing else is selected":
     /// two things claiming one gizmo is exactly the shape of bug this codebase keeps meeting,
-    /// and the fix each time was to decide where the claim is *made*. Turning the section on,
+    /// and the fix each time was to decide where the claim is *made*. Turning a section on,
     /// or clicking its row, makes the claim; selecting any geometry drops it.
-    section_selected: bool,
+    section_selected: Option<usize>,
     /// The graph edit in progress, so a drag lands on the undo stack once.
     ///
     /// Holds what the part looked like when the gesture *started*, which is what the entry has
@@ -4161,6 +4249,13 @@ impl App {
             splash_shown: true,
             show_shortcuts: false,
             show_about: false,
+            show_check_model: false,
+            check_only_errors: false,
+            cage_tool: None,
+            cage_session: None,
+            surface_check: None,
+            amber_until: None,
+            check_due: std::time::Instant::now(),
             console_progress: None,
             console_input: String::new(),
             console_log: vec![ConsoleLine {
@@ -4247,6 +4342,8 @@ impl App {
             surface_prints: Vec::new(),
             renaming: None,
             ref_edit: None,
+            completing_a_move: None,
+            hosted: None,
             naming_parameter: None,
             name_drafts: std::collections::HashMap::new(),
             size_locked: std::collections::HashSet::new(),
@@ -4274,8 +4371,9 @@ impl App {
             twist_axis: Axis::Z,
             mirror_axis: Axis::X,
             import_prompt: None,
-            section: Section::default(),
-            section_selected: false,
+            sections: Vec::new(),
+            sections_made: 0,
+            section_selected: None,
             gesture: None,
             verification: None,
             material_gesture: None,
@@ -4721,6 +4819,8 @@ impl App {
             "part.set_material" => self.set_material_from_console(args),
             "part.critical" => self.critical_from_console(args),
             "part.verify" => self.verify_from_console(),
+            "cage.check" => self.check_from_console(),
+            "select.loop" | "select.ring" | "select.grow" | "select.shrink" => self.select_along(op),
             "view.environment" => self.set_environment_from_console(args),
             "view.draft" => self.draft_from_console(args),
             "view.grid" => self.grid_from_console(args),
@@ -4790,11 +4890,8 @@ impl App {
             "console.help" => self.run_command("help"),
             "console.clear" => self.console_log.clear(),
             "view.section" => self.toggle_section(),
-            "view.section_flip" => {
-                self.section.flipped = !self.section.flipped;
-                self.traced.invalidate(traced::Quality::Final);
-                self.say("Section flipped");
-            }
+            "view.section_new" => self.add_section(),
+            "view.section_flip" => self.flip_section(),
             "file.new" => self.new_document(),
             // `open file="C:/in/part.fform"` opens it without the dialog; `open` alone asks.
             "file.open" => {
@@ -4823,16 +4920,37 @@ impl App {
             "cage.refine" => self.refine_cage(args),
             "modify.split" => self.split_body(args),
             "construct.axis" => self.axis_command(args),
-            _ => match self.registry.build(op, args, &self.doc) {
-                Ok(cmd) => {
-                    if let Err(e) = self.stack.execute(&mut self.doc, cmd) {
-                        self.warn(e.to_string());
-                    } else {
-                        self.after_document_change();
+            _ => {
+                // A cage verb acts on the cage on screen unless told which, as `refine` does: the
+                // registry takes the only cage and refuses to guess among several, and the app
+                // has the answer it lacks.
+                // And on the elements selected, where a key or a menu ran it without naming any.
+                let with_cage;
+                let args = if op.starts_with("cage.") {
+                    let mut filled = self.cage_selection_args(op, args);
+                    if filled.get("cage").is_none() {
+                        filled = filled.with("cage", Value::Str(self.active_cage.to_string()));
                     }
+                    with_cage = filled;
+                    &with_cage
+                } else {
+                    args
+                };
+                match self.registry.build(op, args, &self.doc) {
+                    Ok(cmd) => {
+                        if let Err(e) = self.stack.execute(&mut self.doc, cmd) {
+                            self.warn(e.to_string());
+                        } else {
+                            // A topology edit renumbers what a selection names, as a refine does.
+                            if op.starts_with("cage.") && op != "cage.set_positions" {
+                                self.forget_cage_selection();
+                            }
+                            self.after_document_change();
+                        }
+                    }
+                    Err(e) => self.warn(e.to_string()),
                 }
-                Err(e) => self.warn(e.to_string()),
-            },
+            }
         }
     }
 
@@ -4875,6 +4993,8 @@ impl App {
     /// removed the geometry the current selection referred to.
     fn after_document_change(&mut self) {
         self.mark_changed();
+        // The cages' faults and orientation re-read, and the check queued (`check_model.rs`).
+        self.cages_changed();
         // **The curves are drawn from a copy, and this is where it is refreshed.** Undoing a
         // curve move reverted the document and left the drawn line exactly where it was, which
         // is indistinguishable from undo not working — and it was not only the move: every
@@ -4887,6 +5007,9 @@ impl App {
         self.selection.keep_valid_for(vertex_count, face_count);
         self.hover = Selection::None;
         self.rebuild_render_resources();
+        // A cage block deleted, added or undone back can leave the active cage pointing at
+        // nothing in the part.
+        self.resync_active_cage();
     }
 
     /// Drops whatever is picked on the control mesh, and the gesture that was using it.
@@ -4946,21 +5069,23 @@ impl App {
         ));
     }
 
-    /// The cage the UI is editing.
+    /// The cage the UI is editing, as its mesh — red or not, since framing, picking and the
+    /// cage overlay want the mesh whatever its state. What needs a solid asks `doc.cage`.
     ///
     /// Panics only if the active id has been removed without updating it, which would be a
     /// bug in this file rather than bad input — every path that replaces the document sets
     /// `active_cage` in the same step.
-    fn cage(&self) -> &Cage {
+    fn cage(&self) -> &QuadMesh {
         self.doc
-            .cage(self.active_cage)
+            .cage_body(self.active_cage)
             .expect("active_cage must name a cage in the document")
+            .mesh()
     }
 
     /// The mesh `mesh` names, if the document still holds it.
     fn mesh_of(&self, mesh: ControlMesh) -> Option<&QuadMesh> {
         match mesh {
-            ControlMesh::Cage => self.doc.cage(self.active_cage).map(|c| &**c),
+            ControlMesh::Cage => self.doc.cage_body(self.active_cage).map(|c| c.mesh()),
             ControlMesh::Surface(id) => self.doc.quad_meshes.get(&id),
         }
     }
@@ -4969,7 +5094,7 @@ impl App {
         // A cage's extent is a body's, which the pick box is sized to, on every frame of a drag.
         self.document_moved();
         match mesh {
-            ControlMesh::Cage => self.doc.cage_mut(self.active_cage).map(|c| &mut **c),
+            ControlMesh::Cage => self.doc.cage_mesh_mut(self.active_cage),
             ControlMesh::Surface(id) => self.doc.quad_meshes.get_mut(&id),
         }
     }
@@ -5042,7 +5167,7 @@ impl App {
         self.selected_curve = None;
         self.clear_point_selection();
         self.selected_block = None;
-        self.section_selected = false;
+        self.section_selected = None;
         if was != self.control {
             let name = self.doc.surface_name(id).to_string();
             if self.view_mode.cage_is_editable() {
@@ -5146,8 +5271,9 @@ impl App {
             // up -- the copy is the whole hazard, and it has already been wrong once: this term
             // was added here while the predicate it copies still had three. Closed downstream by
             // `incomplete`, so a block reading a holed one goes with it; one pass over the graph
-            // a frame, beside the `consumed` one above.
-            let holed = part.incomplete();
+            // a frame, beside the `consumed` one above. Of the document, as the predicate it
+            // copies is, so a red cage's body is left out here too.
+            let holed = self.doc.incomplete_in(part);
             return self
                 .doc
                 .folded_bodies(part)
@@ -5965,7 +6091,9 @@ impl App {
             // Picking geometry is a more deliberate act than leaving the section selected, so
             // it takes the manipulator. The section stays *on* — only its claim on the handles
             // goes, which is the distinction the flag exists to make.
-            self.section_selected = false;
+            self.section_selected = None;
+            // Selecting a cage block makes its cage the one the cage tools act on.
+            self.resync_active_cage();
         }
     }
 
@@ -5978,7 +6106,7 @@ impl App {
         self.clear_point_selection();
         self.selected_body = None;
         self.selection.clear();
-        self.section_selected = false;
+        self.section_selected = None;
     }
 
     /// Whether `node` draws the cage the UI edits.
@@ -6142,6 +6270,9 @@ impl App {
             return;
         }
         self.stamp_new_nodes();
+        // Every graph edit comes through here, a cage block deleted among them: the cage the
+        // tools act on is re-read against the part as it now is.
+        self.resync_active_cage();
     }
 
     /// Acts on what settling moved since this was last asked (`block-ownership-spec.md` §4.2):
@@ -7096,6 +7227,30 @@ impl App {
         self.body_label_in(self.part_graph(), id)
     }
 
+    /// Why a row's block is not drawn, when the reason is a cage that is not a solid: the cage's
+    /// own row reads the state ("open: 1 hole, 4 edges — not drawn"), and a block reading it says
+    /// which cage. `None` for every row an open cage has nothing to do with, which is the usual
+    /// one.
+    fn red_cage_note(&self, id: NodeId) -> Option<String> {
+        let graph = self.part_graph();
+        if let Some(Node::Cage(cage)) = graph.node(id) {
+            let body = self.doc.cage_body(*cage)?;
+            return match body.describe_error() {
+                Some(why) => Some(format!("{why} \u{2014} not drawn")),
+                // Drawn from the unchecked surface while the check runs (R14); said so.
+                None if body.surface_unchecked() => Some("checking\u{2026}".to_string()),
+                None => None,
+            };
+        }
+        let cage = fieldform_field::red_cage_behind(&self.doc, graph, id)?;
+        let name = graph
+            .nodes()
+            .find(|(_, n)| matches!(n, Node::Cage(c) if *c == cage))
+            .map(|(node, _)| self.body_label(node))
+            .unwrap_or_else(|| "a cage".to_string());
+        Some(format!("reads {name}, which is open \u{2014} not drawn"))
+    }
+
     /// The same, for a block in `graph` — another part's, when a refusal names a block there.
     /// Asked of the part on screen, a block it does not hold reads "gone".
     fn body_label_in(&self, graph: &Graph, id: NodeId) -> String {
@@ -7387,6 +7542,15 @@ impl App {
                 _,
                 fieldform_field::LoopError::NotClosed { .. },
             ) => format!("{e} {OR_A_WALL}"),
+            // A red cage is said as what it is -- open, with its hole count -- rather than as a
+            // raw id. The two arms are kept apart because the fixes differ: an open cage is
+            // closed with Fill Hole, a missing one is a document fault.
+            fieldform_field::CompileError::OpenCage(_, why) => {
+                format!("The cage is not a solid ({why}) \u{2014} fill its holes to see the surface")
+            }
+            fieldform_field::CompileError::MissingCage(id) => {
+                format!("The part names cage {id}, which is not in the document")
+            }
             // By the curve's name, since an id is nothing a person can go and look for.
             fieldform_field::CompileError::BadWall(id, _) => {
                 let text = e.to_string();
@@ -7668,6 +7832,8 @@ impl App {
         };
         self.set_visible(id, on);
         self.say(said);
+        // A cage shown or hidden can change which cage is there to be worked on.
+        self.resync_active_cage();
     }
 
     /// Deletes whatever is selected — a curve, or a body.
@@ -7675,6 +7841,13 @@ impl App {
     /// A curve first, because it is the more specific selection: selecting one clears the body,
     /// so if a curve is selected it is what the user is pointing at.
     fn delete_selection(&mut self) {
+        // A section's row, when it is the thing selected: Delete takes the section and nothing
+        // of the part, since the section was never in it (the owner, 2026-10-24: no ✕ on the
+        // row; the menu or the key). Selecting it cleared everything below, as they clear it.
+        if let Some(index) = self.section_selected {
+            self.remove_section(index);
+            return;
+        }
         // A selected block is what was clicked last: selecting a body or a curve clears it.
         if let Some(block) = self.selected_block {
             self.delete_block(block);
@@ -8326,7 +8499,7 @@ impl App {
         let readings = self.overlay_readings();
         let lookup = move |id: fieldform_scene::ParamId| readings.values.get(&id).copied();
 
-        let section = self.section.half_space();
+        let sections = self.section_half_spaces();
         let selected = self.selected_body_index();
         // The part's own material, or the default when it has none. Read every frame rather
         // than kept, so an undo that puts a material back is drawn without anyone remembering
@@ -8339,7 +8512,7 @@ impl App {
             .unwrap_or_default();
         let view = traced::View {
             selected,
-            section,
+            sections,
             eye: self.camera.eye.cast::<f64>(),
             target: self.camera.target.cast::<f64>(),
             up: self.camera.up.cast::<f64>(),
@@ -8889,14 +9062,17 @@ impl App {
         // **Typing into a pending session's panel needs no click** (`interaction-spec.md` §4.3):
         // a digit or the first letter of a parameter's name starts it, and the plain keys this
         // frame are then text, not bindings -- `h` starting `height` must not also hide.
-        let typed_into_panel = self.panel_typed(ui.ctx());
+        let typed_into_panel = self.panel_typed(ui.ctx()) || self.cage_panel_typed(ui.ctx());
 
         // The Tab that `raw_input_hook` took off the queue, dispatched here so it still goes
         // through the keymap and can still be rebound — the interception is about *when* egui
         // sees the key, not about who decides what it means. While a session is pending it moves
         // between the panel's rows instead (§4.2).
         if let Some(modifiers) = self.stolen_tab.take() {
-            if self.session.is_some() && !modifiers.ctrl && !modifiers.alt {
+            if self.cage_session.is_some() && !modifiers.ctrl && !modifiers.alt {
+                // A pending extrude or inset: Tab walks its panel's rows.
+                self.cage_panel_tab(modifiers.shift);
+            } else if self.session.is_some() && !modifiers.ctrl && !modifiers.alt {
                 // With no panel, Tab with nothing focused goes back to the pending block's first
                 // number, so the keyboard can always find its way to the block being made.
                 if self.floating_panel {
@@ -8923,6 +9099,42 @@ impl App {
                     self.commit_session();
                 } else {
                     self.cancel_session();
+                }
+                continue;
+            }
+            // **Enter keeps a pending extrude or inset and Esc takes it back**, as a block's
+            // session is kept or taken back (R7).
+            if self.cage_session.is_some() && !shortcut.modifiers.any() && matches!(key, egui::Key::Enter | egui::Key::Escape) {
+                ui.ctx().input_mut(|i| i.consume_key(egui_modifiers, key));
+                if key == egui::Key::Enter {
+                    self.keep_cage_session();
+                } else {
+                    self.cancel_cage_session();
+                }
+                continue;
+            }
+            // **The knife's path**: Enter cuts it, Backspace takes a point back, and Esc
+            // discards it before a second Esc puts the knife down.
+            let knife_armed = self.cage_tool.as_ref().is_some_and(|t| t.command.op == "cage.cut");
+            if knife_armed && !shortcut.modifiers.any() && matches!(key, egui::Key::Enter | egui::Key::Backspace) {
+                ui.ctx().input_mut(|i| i.consume_key(egui_modifiers, key));
+                if key == egui::Key::Enter {
+                    self.knife_commit();
+                } else {
+                    self.knife_back();
+                }
+                continue;
+            }
+            // **Esc puts an armed cage tool down** (R7), and nothing else: a tool has nothing
+            // pending between clicks, so there is nothing to take back -- but the knife's
+            // path, which the first Esc discards.
+            if self.cage_tool.is_some() && !shortcut.modifiers.any() && key == egui::Key::Escape {
+                ui.ctx().input_mut(|i| i.consume_key(egui_modifiers, key));
+                if self.knife_discard() {
+                    continue;
+                }
+                if let Some(tool) = self.cage_tool.take() {
+                    self.say(format!("{} put down", tool.command.display_name));
                 }
                 continue;
             }
@@ -8969,10 +9181,18 @@ impl App {
     /// those has a cursor over the viewport when it fires.
     fn shortcut_op(&self, op: String) -> String {
         if op == "edit.paste" && self.viewport_hover.is_some() {
-            "edit.paste_here".to_string()
-        } else {
-            op
+            return "edit.paste_here".to_string();
         }
+        // **Keys by selection** (R9): with cage vertices, edges or faces picked, the letter that
+        // extrudes a profile extrudes the cage, the one that deletes a body deletes faces, and so
+        // on -- the same letters, meaning the cage while the cage is what is selected.
+        if self.control == ControlMesh::Cage && !self.selection.is_empty() {
+            let faces = self.selection.parts().iter().any(|s| matches!(s, Selection::Face(_)));
+            if let Some(cage_op) = commands::cage_element_op(&op, faces) {
+                return cage_op.to_string();
+            }
+        }
+        op
     }
 }
 
@@ -9102,11 +9322,14 @@ impl eframe::App for App {
         self.drive_script(ui.ctx());
         self.help_windows(ui.ctx());
         self.keys_panel(ui.ctx());
+        self.check_model_panel(ui.ctx());
+        self.poll_surface_checks();
         self.import_options_window(ui.ctx());
         self.handle_keys(ui);
         // After the keys, so a row typing began into this frame shows what was typed, and the
         // palette Space opened this frame has the keyboard at once.
         self.tool_panel(ui.ctx());
+        self.cage_panel(ui.ctx());
         self.palette_ui(ui.ctx());
         self.marking_ui(ui.ctx());
 
@@ -9521,8 +9744,51 @@ impl eframe::App for App {
             // moved as one piece. Read here rather than at the press: it is the click that
             // decides, and holding Shift down through a drag means nothing else in this view.
             let adding = ui.input(|i| i.modifiers.shift) && !nav_mods;
+            // **A double-click on an edge selects its loop even where the manipulator sits over
+            // it.** A selected edge's handles hide the edge from the hover, so the second click
+            // of a double-click landed on a handle and did nothing (the owner, 2026-10-24). The
+            // cage is picked here through the handles, and the drag the first click began on a
+            // handle is let go: nothing has moved.
+            if !press_over_cube
+                && editable
+                && on_gizmo
+                && !placing
+                && !self.press_on_marquee
+                && response.double_clicked_by(egui::PointerButton::Primary)
+                && let Some(pos) = response.interact_pointer_pos()
+            {
+                let under = pick(self.control(), &self.control_placement(), &self.cage_mesh, &self.camera, aspect, rect, pos);
+                if matches!(under, Selection::Edge(..)) {
+                    self.cancel_gizmo();
+                    self.press_on_gizmo = false;
+                    let op = if ui.input(|i| i.modifiers.alt) { "select.ring" } else { "select.loop" };
+                    if !self.selection.contains(under) {
+                        self.selection.toggle(under);
+                    }
+                    self.select_along(op);
+                }
+            }
             if !press_over_cube && editable && !on_gizmo {
+                // **A double-click on an edge selects its loop, and with Alt its ring**
+                // (instructions §0.4) -- the same gesture every quad modeller has.
                 if !placing
+                    && !self.press_on_marquee
+                    && response.double_clicked_by(egui::PointerButton::Primary)
+                    && matches!(self.hover, Selection::Edge(..))
+                {
+                    let op = if ui.input(|i| i.modifiers.alt) { "select.ring" } else { "select.loop" };
+                    if !self.selection.contains(self.hover) {
+                        self.selection.toggle(self.hover);
+                    }
+                    self.select_along(op);
+                } else if !placing
+                    && !self.press_on_marquee
+                    && response.clicked_by(egui::PointerButton::Primary)
+                    && self.cage_tool.is_some()
+                    && self.cage_tool_click(ui.input(|i| i.modifiers.shift), response.interact_pointer_pos())
+                {
+                    // The click was the tool's: its line has run, and nothing is picked by it.
+                } else if !placing
                     && !self.press_on_marquee
                     && response.clicked_by(egui::PointerButton::Primary)
                 {
@@ -9540,6 +9806,13 @@ impl eframe::App for App {
                             rect,
                             pos,
                         );
+                        // Picking the cage takes the manipulator from the section, as picking
+                        // a body does: the section stays on, only its claim on the handles goes
+                        // (the owner, 2026-10-24: a face picked with the section on still moved
+                        // the section).
+                        if !matches!(under, Selection::None) {
+                            self.section_selected = None;
+                        }
                         // **Shift adds and takes away; a plain click replaces.** The one rule
                         // worth keeping across every list and viewport there is, and the same
                         // one a curve's control points already follow here.
@@ -9725,6 +9998,12 @@ impl eframe::App for App {
             } else {
                 Selection::None
             };
+            // An armed cage tool reads the hover: where along the edge the pointer is, and what
+            // a click there would make (`app/cage_tools.rs`).
+            if self.cage_tool.is_some() {
+                let snap_half = ui.input(|i| i.modifiers.shift);
+                self.cage_tool_hover(aspect, rect, response.hover_pos(), snap_half);
+            }
 
             let mvp = self.camera.mvp(aspect);
             // The cage draws through its placement, exactly as picking now reads through it.
@@ -9832,6 +10111,18 @@ impl eframe::App for App {
                 if let Some(screen) = self.camera.project_to_screen(aspect, rect, poi) {
                     draw_poi_marker(ui.painter(), screen);
                 }
+            }
+
+            // What is wrong with the cage, in every mode: a red mark is about the cage whether
+            // or not the mode draws it, and the ghost is what stands where the solid was.
+            // The cage's edges, wherever the cage is drawn: a cage of flat faces shows no seam
+            // between two coplanar quads, and how dense the cage is cannot be read without them.
+            if self.control_editable() && self.control == ControlMesh::Cage {
+                draw_cage_edges(ui.painter(), &self.camera, aspect, rect, self.cage(), &self.control_placement());
+            }
+            if self.control == ControlMesh::Cage {
+                self.draw_cage_faults(ui.painter(), aspect, rect);
+                self.draw_cage_tool_preview(ui.painter(), aspect, rect);
             }
 
             // Gated on the cage actually being drawn, not merely on the mode being one that
@@ -10289,7 +10580,7 @@ fn cage_absence_reason(app: &App) -> String {
 /// The margin matters rather than being tidiness: outside its bake the shader bounds the
 /// distance using the distance to the box, and that bound is only useful while the surface
 /// keeps clear of the faces.
-fn cage_box(cage: &Cage) -> (Point3<f64>, Point3<f64>) {
+fn cage_box(cage: &QuadMesh) -> (Point3<f64>, Point3<f64>) {
     let mut lo = Point3::new(f64::MAX, f64::MAX, f64::MAX);
     let mut hi = Point3::new(f64::MIN, f64::MIN, f64::MIN);
     for v in cage.vertex_ids() {

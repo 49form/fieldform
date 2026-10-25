@@ -124,6 +124,7 @@ fn cases() -> Vec<(&'static str, Build)> {
                     fillet: fieldform_scene::Fillet {
                         radius: lit(10.0 * v),
                         continuity: fieldform_scene::Continuity::G1,
+                        second: None,
                     },
                 });
                 (Document::new(), g)
@@ -510,6 +511,7 @@ fn cases() -> Vec<(&'static str, Build)> {
                     fillet: fieldform_scene::Fillet {
                         radius: lit(10.0),
                         continuity: fieldform_scene::Continuity::G1,
+                        second: None,
                     },
                 });
                 (Document::new(), g)

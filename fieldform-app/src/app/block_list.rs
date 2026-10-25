@@ -1678,6 +1678,12 @@ impl App {
         if self.is_pending(id) {
             header.push_str("  \u{b7}  pending");
         }
+        // **A red cage says so on its row, and so does every block reading it** (R12 of the
+        // cage-editing notes): the body is left out of what is drawn the way an
+        // unfinished block's is, and nothing else on screen would say why the shape is gone.
+        if let Some(why) = self.red_cage_note(id) {
+            header.push_str(&format!("  \u{b7}  {why}"));
+        }
         // **And how many blocks it holds, because a closed row hides them.** A union of a sphere
         // and a cube reads "Union" with both of its ingredients behind a triangle, and a row that
         // said nothing about them would leave the two blocks somebody had just made looking
@@ -1755,8 +1761,9 @@ impl App {
                     "Drag to move this block in the list, or onto a block's From or Subtract field"
                 } else if nested {
                     "Drag onto the list to take this block out of the block that holds it, \
-                     leaving that slot waiting to be told what to read, or onto another block's \
-                     From or Subtract field"
+                     leaving that slot waiting to be told what to read \u{2014} or onto another \
+                     block's From or Subtract field to move it there, with Ctrl to be read in \
+                     both places at once"
                 } else {
                     "Drag onto another block's From or Subtract field to make it read this block"
                 });
@@ -1796,7 +1803,17 @@ impl App {
                 if self.drawing_pending {
                     self.pending_numbers.clear();
                 }
+                // **Its rows go to the fields that read them** (§7.1, §17): each slot draws
+                // the block it holds, in place. Saved and restored, because a hosted block does
+                // the same for its own rows while this one is still being drawn.
+                let kept = std::mem::replace(
+                    &mut self.hosted,
+                    Some(Hosted { holder: id, rows: inside.to_vec() }),
+                );
                 self.node_block_body(ui, id);
+                let unhosted = std::mem::replace(&mut self.hosted, kept)
+                    .map(|hosted| hosted.rows)
+                    .unwrap_or_default();
                 self.drawing_pending = false;
                 if awaiting {
                     // Done once the first number has the keyboard, or once the block has none.
@@ -1811,78 +1828,30 @@ impl App {
                 // the contents share the block's own disclosure rather than getting a second one:
                 // a block put away should put away what it is made of, or closing it leaves its
                 // ingredients standing where the block used to be.
-                if !inside.is_empty() || !references.is_empty() {
+                // **What no field hosted**, which should now be nothing: every field that
+                // names a block or a curve hosts what it names (§7.1, §17). Kept as the honest
+                // remainder rather than removed, because a field added later that forgets to host
+                // would otherwise draw nothing at all and the block it reads would vanish from
+                // the list. A row here is a field owing a host call, not a design.
+                if !unhosted.is_empty() {
                     ui.separator();
                 }
-                for row in inside {
+                for row in &unhosted {
                     // This block is their holder, which is what makes a drag off one of them
                     // able to empty the slot it came from (§7.2).
                     self.block_row(ui, row, nesting, Some(id));
                 }
-                // After what it owns, so the rows it holds and the variables it only refers to
-                // read as two different things in one place.
-                for key in references {
-                    self.reference_slot(ui, *key, nesting);
-                }
+                // **The variables it reads are no longer listed here** (the owner, 2026-10-24:
+                // "if i make something a V - variable it is still listed at the bottom of the
+                // block its used in - i think there is no need for that"). Item 108 put them here
+                // because the block had to account for every input it reads and the field alone
+                // did not say where one had gone. The field is where it says so now: it names the
+                // variable, in place, in the row that reads it, and a second copy at the bottom
+                // is exactly the redundancy containment removed for nested blocks. The count
+                // stays on the header, which is what a *collapsed* block can still say.
+                let _ = references;
             });
         let _ = header_response;
-    }
-
-    /// One input of a block that lives outside it as a variable: named, marked as living
-    /// elsewhere, and leading to it (backlog item 108).
-    ///
-    /// **A reference, not a copy, so it shows no numbers.** The variable's own row is where it is
-    /// edited; drawing its fields here too would be one block edited from two places, which is
-    /// what "one editor, not one per block" (D9) exists to prevent. A click selects the variable,
-    /// which is the way to it, and the hover says who else shares it — the durable form of the
-    /// sentence settle composes once in the status line.
-    ///
-    /// The same green V the variable's own row wears, so the two are recognisably one thing.
-    fn reference_slot(&mut self, ui: &mut egui::Ui, key: BlockKey, nesting: &fieldform_scene::Nesting) {
-        // A curve that is one side of a closed loop is shown as the profile it belongs to, which
-        // is what the person made a variable and what its row is called.
-        let label = match key {
-            BlockKey::Node(n) => self.body_label(n),
-            BlockKey::Curve(c) => {
-                self.refresh_profiles();
-                match self.profiles.key_of(c) {
-                    Some(loop_key) => self.profile_label(loop_key),
-                    None => self.doc.curve(c).map(|c| c.name.clone()).unwrap_or_default(),
-                }
-            }
-        };
-        let others: Vec<String> = nesting
-            .readers_of_variable(key)
-            .into_iter()
-            .map(|reader| self.body_label(reader))
-            .collect();
-        let shared = match others.len() {
-            0 | 1 => "Nothing else reads it yet".to_string(),
-            _ => format!("Read by {}", others.join(", ")),
-        };
-        let response = ui
-            .horizontal(|ui| {
-                row_label(ui, "");
-                ui.label(egui::RichText::new("V").color(VARIABLE_ON).strong());
-                ui.add(
-                    egui::Button::selectable(
-                        false,
-                        egui::RichText::new(format!("↗ {label}")).italics(),
-                    )
-                    .frame(false),
-                )
-            })
-            .inner
-            .on_hover_text(format!(
-                "{label} is a variable: a row of its own at the top of the list, which this block \
-                 refers to rather than holds. Edit it there. {shared}. Click to go to it."
-            ));
-        if response.clicked() {
-            match key {
-                BlockKey::Node(n) => self.select_body(Some(n)),
-                BlockKey::Curve(c) => self.select_curve(c),
-            }
-        }
     }
 
     /// Draws one row of the block list, and whatever is nested inside it.
@@ -1962,6 +1931,72 @@ impl App {
             Some(onto) => self.arrange_block(dragged.id, onto),
             None => self.arrange_block_last(dragged.id),
         }
+    }
+
+    /// **The block a slot holds, drawn in the row that reads it** (`notebook-spec.md` §7.1, §17).
+    ///
+    /// Called by every row that draws a block-naming field, after the field: the field says which
+    /// block, and the block opens underneath it, indented, with its own header, controls and
+    /// whatever it holds in turn. The row is taken out of [`App::hosted`] as it is drawn, so the
+    /// holder knows not to draw it again below.
+    ///
+    /// **Nothing happens for a block that is not one of the holder's rows**, which is the honest
+    /// answer for a field naming a *variable*: that block's row is at the top level, the field
+    /// refers to it by name, and drawing it here would be the second copy the containment model
+    /// exists to remove. The same silence covers a field drawn outside any block's controls.
+    ///
+    /// The nesting comes from [`Self::list_readings`], the same cached reading the list was laid
+    /// out from, so a hosted row is drawn from the same arrangement as every other row and the
+    /// clone is an `Rc`'s.
+    ///
+    /// **It cannot recurse forever**, which matters because the failure would be a hung frame
+    /// rather than a wrong picture: the rows come from `nest_rows`, which places each block under
+    /// an owner *further down the flat list* and so builds a tree, and each row is removed from
+    /// its holder's list as it is drawn. A block can therefore be hosted once, below itself never.
+    pub(crate) fn host_nested_block(&mut self, ui: &mut egui::Ui, block: NodeId) {
+        let Some(hosted) = self.hosted.as_mut() else { return };
+        let holder = hosted.holder;
+        let Some(at) = hosted.rows.iter().position(|row| row.block == Block::Node(block)) else {
+            return;
+        };
+        // Taken before the row is drawn, since drawing it replaces `self.hosted` with its own
+        // rows: the parent's list is on the stack by then, not in the field.
+        let row = hosted.rows.remove(at);
+        let list = self.list_readings();
+        ui.indent(("hosted", block.raw()), |ui| {
+            self.block_row(ui, &row, &list.nesting, Some(holder));
+        });
+    }
+
+    /// **The curve a field names, drawn in the row that names it** — [`Self::host_nested_block`]
+    /// for a curve rather than a block: a sweep's spine, a pipe's curve, an extrude's profile.
+    ///
+    /// **A profile row is claimed by its loop, not by its key.** The row stands for a closed loop
+    /// and is keyed by the first curve of it, while the block that reads it names whichever curve
+    /// was picked — so matching the key alone left an extrude built on the third side of a square
+    /// drawing nothing under its field and the row below as before. The loops are
+    /// `ProfileRows::loops`, whose first entry is the key, which is the same reading the rows were
+    /// built from.
+    pub(crate) fn host_nested_curve(&mut self, ui: &mut egui::Ui, curve: CurveId) {
+        // `ProfileRows::key_of` is the one reading of which loop a curve belongs to, and the
+        // one the profile rows themselves were drawn from; a second walk of `loops` here would
+        // be a second answer to the same question, which is how a curve once ended up drawn in
+        // neither place (see `folded_curve_row_in`).
+        self.refresh_profiles();
+        let key = self.profiles.key_of(curve);
+        let Some(hosted) = self.hosted.as_ref() else { return };
+        let holder = hosted.holder;
+        let at = hosted.rows.iter().position(|row| match row.block {
+            Block::Curve(id) => id == curve,
+            Block::Profile(of) => Some(of) == key,
+            _ => false,
+        });
+        let Some(at) = at else { return };
+        let row = self.hosted.as_mut().expect("asked a moment ago").rows.remove(at);
+        let list = self.list_readings();
+        ui.indent(("hosted curve", curve.raw()), |ui| {
+            self.block_row(ui, &row, &list.nesting, Some(holder));
+        });
     }
 
     /// §7.2's drag-out: the slot the row came from is emptied and the block stays as it is.
@@ -2514,7 +2549,27 @@ impl App {
             && let Some(dropped) = response.dnd_release_payload::<DraggedBlock>()
         {
             let what = self.body_label(dropped.id);
-            return self.take_dropped_reference(f(dropped.id), choices, kind, &what);
+            let taken = self.take_dropped_reference(f(dropped.id), choices, kind, &what);
+            // **Plain moves it, Ctrl shares it** (`notebook-spec.md` §7.3, §7.1). §7.1 says a
+            // plain drop onto an input moves the block inside and it "leaves the top level", and
+            // §7.3 gives Ctrl the one job of making a second reader -- so a plain drag from one
+            // input to another is the same move between two slots, and Ctrl is what keeps the
+            // block in both. Without the modifier there was one gesture doing Ctrl's job and no
+            // way to ask for the move at all.
+            //
+            // Read at the release, which is when the hand has decided: egui reports the modifiers
+            // held in the frame the button came up, and that is the state every file manager
+            // answers a drop by.
+            //
+            // Only for a row that came out of a slot (`from`): a top-level block has nothing to
+            // let go of it, so plain and Ctrl mean the same thing there and §7.1 already says
+            // what happens. And only when the drop was taken, so a slot that refused the block
+            // leaves it where it was.
+            let sharing = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+            if let Some(from) = dropped.from.filter(|_| !sharing && taken.is_some()) {
+                self.completing_a_move = Some((from, dropped.id));
+            }
+            return taken;
         }
         if let Some(f) = drops.curve
             && let Some(dropped) = response.dnd_release_payload::<CurveId>()
@@ -2727,14 +2782,25 @@ impl App {
     /// block's — and a curve's flag was written off the history, where Ctrl+Z passed it by. No
     /// edge changes, and the block is consumed by exactly what consumed it a moment before.
     ///
-    /// **Never refused for reader count, since 112.** Two readers used to refuse, there being no
-    /// single block to go back inside; with no parent stored the block goes inside both and is one
-    /// block in each — a shared instance (§7.3) — so the gesture always has an answer and the line
-    /// names every block it went into.
+    /// **Refused again for two or more readers, 2026-10-24**, which is R1 inverted by the owner
+    /// ([`fieldform_scene::Document::put_back_target`]). 112 had it always answer, because two
+    /// readers could each draw the block — a shared instance. A second reader declares the block
+    /// now, so putting it back inside would be undone by the settle that follows it, in silence
+    /// and within the same frame. Refused by name instead, which is what the V's hover says too.
     fn nest_back(&mut self, what: Declarable) {
         let name = self.declarable_label(what);
         let readers = self.reader_names(what);
-        let cmd = put_back_inside(&self.doc, what.block());
+        let cmd = match put_back_inside(&self.doc, what.block()) {
+            Ok(cmd) => cmd,
+            Err(_) => {
+                let used = names_in_a_row(&readers);
+                self.warn(format!(
+                    "\u{201c}{name}\u{201d} has to stay a variable: {used} both read it, and a block \
+                     can only be inside one of them"
+                ));
+                return;
+            }
+        };
         if !self.set_ownership(cmd) {
             return;
         }

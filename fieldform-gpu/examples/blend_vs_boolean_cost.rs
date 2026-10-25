@@ -87,7 +87,7 @@ fn chain(n: usize, radius: Option<f64>) -> Graph {
                     op: BooleanOp::Union,
                     a: acc.into(),
                     b: (*next).into(),
-                    fillet: Fillet { radius: lit(r), continuity: Continuity::G1 },
+                    fillet: Fillet { radius: lit(r), continuity: Continuity::G1, second: None },
                 });
             }
         }

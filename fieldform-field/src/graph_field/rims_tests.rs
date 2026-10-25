@@ -22,7 +22,7 @@
     }
 
     fn rims(reach: f64, continuity: Continuity) -> Rims {
-        Rims { radius: lit(reach), continuity, at: fieldform_scene::RimEnds::Both }
+        Rims { radius: lit(reach), continuity, at: fieldform_scene::RimEnds::Both, second: None }
     }
 
     /// The square extruded thirty up, as told, with its rims as told.
@@ -290,7 +290,7 @@
     }
 
     fn rims_at(reach: f64, continuity: Continuity, at: fieldform_scene::RimEnds) -> Rims {
-        Rims { radius: lit(reach), continuity, at }
+        Rims { radius: lit(reach), continuity, at, second: None }
     }
 
     /// Whether the corner where the side `x = 20` meets the face at `z` has been rounded off: a
@@ -480,7 +480,7 @@
     /// and 8 for a chamfer. A round within the room compiles, and a hard edge is the cone it was.
     #[test]
     fn a_cone_edge_too_large_is_refused_naming_what_ran_out() {
-        let edge = |r: f64, c: Continuity| fieldform_scene::Fillet { radius: lit(r), continuity: c };
+        let edge = |r: f64, c: Continuity| fieldform_scene::Fillet { radius: lit(r), continuity: c, second: None };
         match cone_with(0.0, edge(5.5, Continuity::G1)) {
             Err(CompileError::EdgeTooLarge { what, room, .. }) => {
                 assert_eq!(what, "cone's section");
@@ -506,7 +506,7 @@
     /// `r > min(b)`, so the half-side itself is allowed. A hard edge is the solid it always was.
     #[test]
     fn a_box_or_cylinder_edge_too_large_is_refused_naming_what_ran_out() {
-        let edge = |r: f64| fieldform_scene::Fillet { radius: lit(r), continuity: Continuity::G1 };
+        let edge = |r: f64| fieldform_scene::Fillet { radius: lit(r), continuity: Continuity::G1, second: None };
         match cuboid_with(edge(8.5)) {
             Err(CompileError::EdgeTooLarge { what, room, .. }) => {
                 assert_eq!((what, room), ("box's smallest half-side", 8.0))
@@ -519,7 +519,7 @@
             other => panic!("5.5 on a cylinder 10 long: {:?}", other.err()),
         }
         let hard = cuboid_with(fieldform_scene::Fillet::hard()).expect("a box");
-        let nought = cuboid_with(fieldform_scene::Fillet { radius: lit(0.0), continuity: Continuity::Chamfer }).expect("a box");
+        let nought = cuboid_with(fieldform_scene::Fillet { radius: lit(0.0), continuity: Continuity::Chamfer, second: None }).expect("a box");
         for p in [Point3::new(25.0, 3.0, 9.0), Point3::new(19.9, 11.9, 7.9), Point3::new(0.0, 0.0, 0.0)] {
             assert_eq!(hard.distance(p), nought.distance(p), "a reach of nought is hard at {p:?}");
         }

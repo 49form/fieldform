@@ -56,7 +56,7 @@ fn main() {
 
     let id = CageId::new();
     let mut doc = Document::new();
-    doc.cages.insert(id, cage);
+    doc.cages.insert(id, cage.into());
     let mut graph = Graph::empty();
     graph.add(Node::Cage(id));
     let program = fieldform_gpu::generate(&doc, &graph).expect("a cage generates");

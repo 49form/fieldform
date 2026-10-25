@@ -111,7 +111,7 @@ fn pattern(graph: &mut Graph, input: fieldform_scene::NodeId, count: u32, k: f64
         count: lit(f64::from(count)),
         kind: PatternKind::Radial { frame: Frame::default() },
         join: k > 0.0,
-        fillet: Fillet { radius: lit(k), continuity: Continuity::G1 },
+        fillet: Fillet { radius: lit(k), continuity: Continuity::G1, second: None },
     })
 }
 

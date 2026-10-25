@@ -282,9 +282,18 @@ impl Continuity {
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Fillet {
     /// How far back from the join the rounding starts, in millimetres. Zero is a hard join.
+    ///
+    /// With a chamfer of two legs this is the first face's leg: how far along face `a` (a
+    /// blend's first operand, a rim's side wall) the bevel reaches from the other face.
     pub radius: ParamRef,
     /// Which continuity the rounding has, which is the exponent the smooth minimum uses.
     pub continuity: Continuity,
+    /// A chamfer's second leg, where its two legs differ: how far along face `b` (a blend's
+    /// second operand, a rim's end) the bevel reaches from the first. `None` is the one number
+    /// both ways, which is every fillet written before this existed and every rounded one
+    /// still -- a round has one radius, and only a chamfer may take two
+    /// (`round-chamfer-spec.md` §9.2).
+    pub second: Option<ParamRef>,
 }
 
 /// A hard join, which is what every block carrying a `Fillet` was before it had one.
@@ -300,6 +309,7 @@ impl Fillet {
         Fillet {
             radius: ParamRef::Literal(0.0),
             continuity: Continuity::G1,
+            second: None,
         }
     }
 
@@ -308,6 +318,7 @@ impl Fillet {
         Fillet {
             radius,
             continuity: Continuity::G1,
+            second: None,
         }
     }
 
@@ -325,14 +336,26 @@ impl Fillet {
         matches!(self.radius, ParamRef::Literal(r) if r <= 0.0)
     }
 
-    /// The parameter this fillet reads, for the graph's wiring.
-    pub(crate) fn params(&self) -> [&ParamRef; 1] {
-        [&self.radius]
+    /// The second leg a chamfer of two legs has, and nothing for any other shape: a `second`
+    /// left on a fillet whose shape was switched back to a round is not read, so switching
+    /// the shape never moves the seam.
+    pub fn second_leg(&self) -> Option<&ParamRef> {
+        match self.continuity {
+            Continuity::Chamfer => self.second.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// The parameters this fillet reads, for the graph's wiring: the radius, and the second leg
+    /// where there is one. An iterator and not a list, because the walk that asks who reads a
+    /// block runs on every edit and allocates nothing.
+    pub(crate) fn params(&self) -> impl Iterator<Item = &ParamRef> {
+        std::iter::once(&self.radius).chain(self.second.as_ref())
     }
 
     /// The same, to edit.
-    pub(crate) fn params_mut(&mut self) -> [&mut ParamRef; 1] {
-        [&mut self.radius]
+    pub(crate) fn params_mut(&mut self) -> impl Iterator<Item = &mut ParamRef> {
+        std::iter::once(&mut self.radius).chain(self.second.as_mut())
     }
 }
 
@@ -383,6 +406,10 @@ pub struct Rims {
     pub continuity: Continuity,
     /// Which ends are cut.
     pub at: RimEnds,
+    /// A chamfer's second leg: how far in from the side each end is cut, where that differs from
+    /// how far back from the end the side is. `None` is one number both ways
+    /// ([`Fillet::second`]).
+    pub second: Option<ParamRef>,
 }
 
 /// Hard, which is what every profile solid was before it had rims.
@@ -395,19 +422,29 @@ impl Default for Rims {
 impl From<Fillet> for Rims {
     /// The fillet's cut at both ends.
     fn from(fillet: Fillet) -> Self {
-        Rims { radius: fillet.radius, continuity: fillet.continuity, at: RimEnds::Both }
+        Rims {
+            radius: fillet.radius,
+            continuity: fillet.continuity,
+            at: RimEnds::Both,
+            second: fillet.second,
+        }
     }
 }
 
 impl Rims {
     /// No rounding at either end.
     pub const fn hard() -> Self {
-        Rims { radius: ParamRef::Literal(0.0), continuity: Continuity::G1, at: RimEnds::Both }
+        Rims {
+            radius: ParamRef::Literal(0.0),
+            continuity: Continuity::G1,
+            at: RimEnds::Both,
+            second: None,
+        }
     }
 
     /// The radius and shape alone, as a blend's fillet would carry them.
     pub fn fillet(&self) -> Fillet {
-        Fillet { radius: self.radius, continuity: self.continuity }
+        Fillet { radius: self.radius, continuity: self.continuity, second: self.second }
     }
 
     /// The exponent the cut's shape blends with.
@@ -421,14 +458,15 @@ impl Rims {
         self.fillet().is_plainly_hard()
     }
 
-    /// The parameter these rims read, for the graph's wiring.
-    pub(crate) fn params(&self) -> [&ParamRef; 1] {
-        [&self.radius]
+    /// The parameters these rims read, for the graph's wiring: the radius, and the second leg
+    /// where there is one. An iterator, as [`Fillet::params`] is, so the walk allocates nothing.
+    pub(crate) fn params(&self) -> impl Iterator<Item = &ParamRef> {
+        std::iter::once(&self.radius).chain(self.second.as_ref())
     }
 
     /// The same, to edit.
-    pub(crate) fn params_mut(&mut self) -> [&mut ParamRef; 1] {
-        [&mut self.radius]
+    pub(crate) fn params_mut(&mut self) -> impl Iterator<Item = &mut ParamRef> {
+        std::iter::once(&mut self.radius).chain(self.second.as_mut())
     }
 }
 

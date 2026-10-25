@@ -35,7 +35,7 @@
             op: BooleanOp::Union,
             a: a.into(),
             b: b.into(),
-            fillet: Fillet { radius: lit(K), continuity },
+            fillet: Fillet { radius: lit(K), continuity, second: None },
         });
         GraphField::compile_graph(&Document::new(), &graph, 1e-3).expect("compiles")
     }
@@ -51,7 +51,7 @@
             count: fieldform_scene::ParamRef::Literal(7.0),
             kind: fieldform_scene::PatternKind::Linear { step: [lit(10.0), lit(0.0), lit(0.0)] },
             join: true,
-            fillet: Fillet { radius: lit(K), continuity: Continuity::G1 },
+            fillet: Fillet { radius: lit(K), continuity: Continuity::G1, second: None },
         });
         GraphField::compile_graph(&Document::new(), &graph, 1e-3).expect("compiles")
     }
@@ -238,7 +238,7 @@
                 op: BooleanOp::Union,
                 a: joined.into(),
                 b: next.into(),
-                fillet: Fillet { radius: lit(3.0), continuity: Continuity::G1 },
+                fillet: Fillet { radius: lit(3.0), continuity: Continuity::G1, second: None },
             });
         }
         let doc = Document::new();
@@ -265,7 +265,7 @@
         let mut graph = Graph::empty();
         let a = slab(&mut graph, -40.0, 10.0);
         let b = slab(&mut graph, -10.0, 40.0);
-        let fillet = |k: f64| Fillet { radius: lit(k), continuity: Continuity::G1 };
+        let fillet = |k: f64| Fillet { radius: lit(k), continuity: Continuity::G1, second: None };
         let body = graph.add(Node::Blend { op: BooleanOp::Union, a: a.into(), b: b.into(), fillet: fillet(3.0) });
         let boss = graph.add(Node::Sphere {
             centre: fieldform_scene::Place::At([lit(9.0), lit(3.0), lit(1.0)]),

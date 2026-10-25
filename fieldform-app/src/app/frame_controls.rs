@@ -562,6 +562,8 @@ impl App {
                         out = fieldform_scene::Frame::From { node: picked };
                     }
                 });
+                // The block the frame is taken from, under the row that names it (§7.1, §17).
+                self.host_nested_block(ui, node);
             }
             fieldform_scene::Frame::Between { from, to } => {
                 // Two rows rather than one with two boxes, so each end is picked the way every
@@ -589,6 +591,8 @@ impl App {
                             };
                         }
                     });
+                    // Each end under its own row, which is why the two ends are two rows.
+                    self.host_nested_block(ui, current);
                 }
                 // Where it actually points, since the answer comes from geometry rather than
                 // from anything typed here -- and two ends in the same place have no direction
@@ -640,6 +644,8 @@ impl App {
                         out = fieldform_scene::Frame::Tangent { curve: picked };
                     }
                 });
+                // The curve itself, under the row that names it (§7.1, §17).
+                self.host_nested_curve(ui, curve);
                 ui.horizontal(|ui| {
                     row_label(ui, "Read:");
                     if ui
@@ -678,6 +684,8 @@ impl App {
                         out = fieldform_scene::Frame::Along { curve: picked };
                     }
                 });
+                // The line itself, under the row that names it (§7.1, §17).
+                self.host_nested_curve(ui, curve);
                 ui.horizontal(|ui| {
                     row_label(ui, "Read:");
                     ui.add(mode_button(true, "Along it"))
@@ -858,6 +866,8 @@ impl App {
                         out = fieldform_scene::Sweep::Along { curve: picked };
                     }
                 });
+                // The curve it is swept along, under the row that names it (§7.1, §17).
+                self.host_nested_curve(ui, curve);
             }
             fieldform_scene::Sweep::Toward { xyz } => {
                 let edited = self.direction_fields(ui, "Toward:", xyz);
@@ -1356,6 +1366,10 @@ impl App {
                 out = picked;
             }
         });
+        // **The profile itself, under the row that names it** (§7.1, §17) -- the row for the
+        // whole loop, claimed by the loop rather than by the curve this block happens to name
+        // ([`App::host_nested_curve`]).
+        self.host_nested_curve(ui, current);
         out
     }
 

@@ -308,9 +308,9 @@ fn main() {
             assert_eq!(n, 1, "the march reads the field once in `field_here`");
             program.source = program.source.replace("    let d = field(p);", &salted);
             println!("  salt {salt}");
-            let mut cut = |from: &str, to: &str| {
-                let n = program.source.matches(from).count();
-                program.source = program.source.replace(from, to);
+            let cut = |src: &mut String, from: &str, to: &str| {
+                let n = src.matches(from).count();
+                *src = src.replace(from, to);
                 println!("  variant {variant}: {n} x {from:?}");
             };
             let stub = |signature: &str, body: &str| -> (String, String) {
@@ -318,23 +318,139 @@ fn main() {
                 (signature.to_string(), format!("{signature} {body} }}\n{name}_unused({rest}"))
             };
             match variant.as_str() {
-                "no_outline" => cut("if (exact_reads) {", "if (false) {"),
+                "no_outline" => cut(&mut program.source, "if (exact_reads) {", "if (false) {"),
+                // The polyline walk a profile without a bake falls back to, cut out: every
+                // profile solid's section is baked, so this asks what the dead path costs.
+                "no_fallback" => cut(&mut program.source, "    if (span.count < 3u) {", "    if (true) { return 1e30; }\n    if (span.count < 3u) {"),
+                // The wedge's differenced normal reading the section's bake alone -- no outline
+                // walk (`normal_from_bake`), and no polyline fallback either
+                // (`normal_from_bake_only`) -- as a second copy of the wedge reading that the
+                // normal's loop calls, so the value pass is untouched. Asks what the normal pass
+                // pays for the exact finish it does not need.
+                "normal_from_bake" | "normal_from_bake_only" => {
+                    let only = variant == "normal_from_bake_only";
+                    let head = "fn revolve_wedge_rim_distance(";
+                    let start = program.source.find(head).expect("the wedge reading");
+                    let end = start + program.source[start..].find("\nfn ").expect("a function after it");
+                    let copy = program.source[start..end]
+                        .replacen(head, "fn revolve_wedge_rim_distance_bake(", 1)
+                        .replace("profile_distance(", "profile_distance_bake(");
+                    let reader = if only {
+                        "fn profile_distance_bake(index: u32, q: vec2<f32>) -> f32 {\n    let span = curve_spans[index];\n    if (span.bake_wide > 0u) { return baked_profile_distance(span, q); }\n    return 1e30;\n}\n"
+                    } else {
+                        "fn profile_distance_bake(index: u32, q: vec2<f32>) -> f32 {\n    let span = curve_spans[index];\n    if (span.bake_wide > 0u) { return baked_profile_distance(span, q); }\n    return profile_distance(index, q);\n}\n"
+                    };
+                    program.source.insert_str(start, &format!("{reader}{copy}\n"));
+                    cut(&mut program.source, 
+                        "n[axis] += weight * revolve_wedge_rim_distance(",
+                        "n[axis] += weight * revolve_wedge_rim_distance_bake(",
+                    );
+                }
                 "no_wedge_normal" => {
                     let (from, to) = stub(
                         "fn revolve_wedge_rim_normal(index: u32, p: vec3<f32>, begins: f32, sweep: f32, rim: vec4<f32>, euler: vec3<f32>) -> vec3<f32> {",
                         "return vec3<f32>(0.0, 0.0, 1.0);",
                     );
-                    cut(&from, &to);
+                    cut(&mut program.source, &from, &to);
                 }
                 "no_normal" => {
                     let (from, to) = stub("fn field_normal(p: vec3<f32>) -> vec3<f32> {", "return vec3<f32>(0.0, 0.0, 1.0);");
-                    cut(&from, &to);
+                    cut(&mut program.source, &from, &to);
                 }
                 "no_wedge_outside" => {
-                    cut("cap_distance(profile_distance(index, vec2<f32>(r * cos(psi_a), p.z)), r * sin(psi_a))", "cap_distance(x, r * sin(psi_a))");
-                    cut("cap_distance(profile_distance(index, vec2<f32>(r * cos(psi_b), p.z)), r * sin(psi_b))", "cap_distance(x, r * sin(psi_b))");
+                    cut(&mut program.source, "cap_distance(profile_distance(index, vec2<f32>(r * cos(psi_a), p.z)), r * sin(psi_a))", "cap_distance(x, r * sin(psi_a))");
+                    cut(&mut program.source, "cap_distance(profile_distance(index, vec2<f32>(r * cos(psi_b), p.z)), r * sin(psi_b))", "cap_distance(x, r * sin(psi_b))");
                 }
-                "no_rim" => cut("fn rim_join(x: f32, y: f32, rim: vec4<f32>) -> f32 {", "fn rim_join(x: f32, y: f32, rim: vec4<f32>) -> f32 {\n    return max(x, y);"),
+                // The normal fold's own value reads of each wedge made constants, so the fold
+                // picks by nothing: what those four copies cost beside the twenty in `field`.
+                // A second, never-taken call of `field_normal` in the march's entry: if the
+                // driver inlines a function called once into the entry and keeps one called
+                // twice as a call, the compile drops and that is the whole of the cost.
+                "normal_twice" => cut(
+                    &mut program.source,
+                    "    let found = trace_primary(gid);",
+                    "    let found = trace_primary(gid);\n    if (camera.frame.w > 7u) { output[0] = vec4<f32>(field_normal(vec3<f32>(f32(gid.x))), 0.0); }",
+                ),
+                // The `_bake` copies of the sweep and loft families cut out of the prelude, for a
+                // document that calls none of them: whether a copy nothing calls still costs the
+                // driver anything.
+                "no_unused_copies" => {
+                    let names = fieldform_gpu::bake_copy_names();
+                    let from = names.iter().position(|n| n == "wall_extrude_rim_normal").expect("the first region") + 1;
+                    let mut cut_count = 0;
+                    for name in &names[from..] {
+                        let head = format!("fn {name}_bake(");
+                        if let Some(start) = program.source.find(&head) {
+                            let end = start + program.source[start..].find("\n}").expect("closes") + 2;
+                            program.source.replace_range(start..end, "");
+                            cut_count += 1;
+                        }
+                    }
+                    println!("  variant {variant}: {cut_count} copies cut");
+                }
+                // The value pass a sphere, the normal pass as it is: the normal pass's own cost.
+                "no_field" => {
+                    let (from, to) = stub("fn field(p: vec3<f32>) -> f32 {", "return length(p) - 10.0;");
+                    cut(&mut program.source, &from, &to);
+                }
+                // Every wedge reading in the normal pass from the bake alone, value and
+                // differences both.
+                "normal_all_bake_only" | "normal_all_bake" => {
+                    let only = variant == "normal_all_bake_only";
+                    let head = "fn revolve_wedge_rim_distance(";
+                    let start = program.source.find(head).expect("the wedge reading");
+                    let end = start + program.source[start..].find("\nfn ").expect("a function after it");
+                    let copy = program.source[start..end]
+                        .replacen(head, "fn revolve_wedge_rim_distance_bake(", 1)
+                        .replace("profile_distance(", "profile_distance_bake(");
+                    let fallback = if only { "return 1e30;" } else { "return profile_distance(index, q);" };
+                    let reader = format!("fn profile_distance_bake(index: u32, q: vec2<f32>) -> f32 {{\n    let span = curve_spans[index];\n    if (span.bake_wide > 0u) {{ return baked_profile_distance(span, q); }}\n    {fallback}\n}}\nfn revolve_wedge_distance_bake(index: u32, p: vec3<f32>, begins: f32, sweep: f32) -> f32 {{\n    return revolve_wedge_rim_distance_bake(index, p, begins, sweep, NO_RIM);\n}}\n");
+                    program.source.insert_str(start, &format!("{reader}{copy}\n"));
+                    cut(&mut program.source, "n[axis] += weight * revolve_wedge_rim_distance(", "n[axis] += weight * revolve_wedge_rim_distance_bake(");
+                    let mut n = 0;
+                    program.source = program
+                        .source
+                        .lines()
+                        .map(|l| {
+                            let t = l.trim_start();
+                            if t.starts_with("let v") && t.contains("= revolve_wedge_distance(") {
+                                n += 1;
+                                l.replacen("= revolve_wedge_distance(", "= revolve_wedge_distance_bake(", 1)
+                            } else {
+                                l.to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    println!("  variant {variant}: {n} value reads from the bake");
+                }
+                "no_normal_value" | "no_normal_both" => {
+                    if variant == "no_normal_both" {
+                        let (from, to) = stub(
+                            "fn revolve_wedge_rim_normal(index: u32, p: vec3<f32>, begins: f32, sweep: f32, rim: vec4<f32>, euler: vec3<f32>) -> vec3<f32> {",
+                            "return vec3<f32>(0.0, 0.0, 1.0);",
+                        );
+                        cut(&mut program.source, &from, &to);
+                    }
+                    let mut n = 0;
+                    program.source = program
+                        .source
+                        .lines()
+                        .map(|l| {
+                            let t = l.trim_start();
+                            if t.starts_with("let v") && t.contains("= revolve_wedge_distance(") {
+                                n += 1;
+                                let name = t.split_whitespace().nth(1).unwrap_or("v");
+                                format!("    let {name} = 0.0;")
+                            } else {
+                                l.to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    println!("  variant {variant}: {n} value reads made constant");
+                }
+                "no_rim" => cut(&mut program.source,"fn rim_join(x: f32, y: f32, rim: vec4<f32>) -> f32 {", "fn rim_join(x: f32, y: f32, rim: vec4<f32>) -> f32 {\n    return max(x, y);"),
                 // The wedge normal's six-count made one the driver cannot know, to ask whether
                 // it unrolled the literal: a difference here is the unrolling's cost.
                 "opaque_normal_bound" => {
@@ -343,8 +459,8 @@ fn main() {
                     program.source.replace_range(bound..bound + 7, "k < 6u + u32(sweep > 1e30);");
                     println!("  variant {variant}: the wedge normal's bound made opaque");
                 }
-                "no_shadow" => cut("for (var i = 0u; i < 48u; i = i + 1u) {", "for (var i = 0u; i < 0u; i = i + 1u) {"),
-                "no_occlusion" => cut("for (var i = 1u; i <= 5u; i = i + 1u) {", "for (var i = 1u; i <= 0u; i = i + 1u) {"),
+                "no_shadow" => cut(&mut program.source, "for (var i = 0u; i < 48u; i = i + 1u) {", "for (var i = 0u; i < 0u; i = i + 1u) {"),
+                "no_occlusion" => cut(&mut program.source, "for (var i = 1u; i <= 5u; i = i + 1u) {", "for (var i = 1u; i <= 0u; i = i + 1u) {"),
                 "" => {}
                 other => panic!("no variant named {other}"),
             }
@@ -353,6 +469,18 @@ fn main() {
             std::fs::write(&path, &program.source).expect("the dump path is writable");
             println!("  wrote {}", path.to_string_lossy());
         }
+        // Whether the normal pass will read bakes alone, or keep the walk for a section the
+        // tolerance could not bake -- which decides the compile time as much as anything here.
+        let unbaked = program
+            .curves
+            .iter()
+            .zip(curves.iter())
+            .filter(|(use_, (_, bake))| {
+                matches!(use_, fieldform_gpu::CurveUse::Profile(_) | fieldform_gpu::CurveUse::Wall(..))
+                    && bake.is_none()
+            })
+            .count();
+        println!("  sections without a bake: {unbaked} (the normal pass walks when any)");
         let compiling = std::time::Instant::now();
         let renderer = match pollster::block_on(Renderer::new(&program, &[], &curves, &[], 64, size * 0.15)) {
             Ok(r) => r,

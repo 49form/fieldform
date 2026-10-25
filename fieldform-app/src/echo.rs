@@ -135,6 +135,10 @@ fn rims_keys(rims: &fieldform_scene::Rims, n: &Names, keys: &mut Vec<(&'static s
             }
             .to_string(),
         ));
+        // A chamfer's second leg, only where there is one.
+        if let Some(second) = &rims.second {
+            keys.push(("rims_second", value(second, n)?));
+        }
     }
     Ok(())
 }
@@ -311,11 +315,15 @@ pub fn keys_of(node: &Node, n: &Names) -> Result<Written, String> {
             let named: Result<Vec<String>, String> = inputs.iter().map(|o| operand(o, n)).collect();
             keys.push(("in", named?.join(",")));
         }
-        Node::Blend { op, a, b, fillet: Fillet { radius, continuity } } => {
+        Node::Blend { op, a, b, fillet: Fillet { radius, continuity, second } } => {
             keys.push(("op", op_word(*op).to_string()));
             keys.push(("in", format!("{},{}", operand(a, n)?, operand(b, n)?)));
             keys.push(("radius", value(radius, n)?));
             keys.push(("g", g_word(*continuity).to_string()));
+            // A chamfer's second leg, only where there is one.
+            if let Some(second) = second {
+                keys.push(("second", value(second, n)?));
+            }
         }
         Node::Morph { a, b, t } => {
             keys.push(("a", operand(a, n)?));
@@ -627,6 +635,30 @@ pub struct Snapshot {
     /// The second is the application's to fill, as the labels are.
     pub profiles: std::collections::HashMap<CurveId, String>,
     pub profile_labels: std::collections::HashMap<CurveId, String>,
+    /// Each cage's positions, by their bits, and its face count -- so a vertex moved by hand is
+    /// written as the line that moves it (R11). A cage whose face count changed was edited by a
+    /// topology verb, which is a typed line and its own record, or by a tool that writes its own.
+    pub cages: std::collections::HashMap<fieldform_scene::CageId, CageState>,
+}
+
+/// A cage as the echo remembers it: enough to say which vertices moved, and whether the mesh is
+/// still the same mesh.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CageState {
+    pub positions: Vec<[u64; 3]>,
+    pub face_count: usize,
+}
+
+impl CageState {
+    pub fn of(mesh: &fieldform_cage::QuadMesh) -> Self {
+        CageState {
+            positions: mesh
+                .vertex_ids()
+                .map(|v| mesh.vertex_position(v).coords.map(f64::to_bits).into())
+                .collect(),
+            face_count: mesh.face_count(),
+        }
+    }
 }
 
 impl Snapshot {
@@ -635,6 +667,7 @@ impl Snapshot {
             graph: graph.clone(),
             parameters: doc.parameters.clone(),
             curves: doc.curves.clone(),
+            cages: doc.cages.iter().map(|(id, body)| (*id, CageState::of(body.mesh()))).collect(),
             variables: graph
                 .nodes()
                 .map(|(id, _)| id)
@@ -912,7 +945,50 @@ pub fn lines(before: &Snapshot, doc: &Document, graph: &Graph, fresh: &[NodeId])
         before.curves.values().filter(|c| !doc.curves.contains_key(&c.id)).map(|c| c.name.clone()).collect();
     curves_gone.sort();
     out.extend(curves_gone.into_iter().map(|name| format!("delete {}", word("target", &name))));
+    out.extend(cage_lines(before, doc));
     out
+}
+
+/// The cage vertices moved by hand since `before`, as `setpositions` lines -- one per cage, in a
+/// fixed order, naming the cage only where the document holds more than one. A cage whose vertex
+/// or face count changed is left out: that was a topology edit, which writes its own line.
+fn cage_lines(before: &Snapshot, doc: &Document) -> Vec<String> {
+    let mut ids: Vec<_> = doc.cages.keys().copied().collect();
+    ids.sort_by_key(|id| id.raw());
+    let several = ids.len() > 1;
+    ids.into_iter()
+        .filter_map(|id| {
+            let now = doc.cages.get(&id)?.mesh();
+            let was = before.cages.get(&id)?;
+            if was.face_count != now.face_count() || was.positions.len() != now.vertex_count() {
+                return None;
+            }
+            let moved: Vec<_> = now
+                .vertex_ids()
+                .filter(|&v| {
+                    let bits: [u64; 3] = now.vertex_position(v).coords.map(f64::to_bits).into();
+                    was.positions[v.index()] != bits
+                })
+                .collect();
+            if moved.is_empty() {
+                return None;
+            }
+            let vertices: Vec<String> = moved.iter().map(|v| v.index().to_string()).collect();
+            let to: Vec<String> = moved
+                .iter()
+                .map(|&v| {
+                    let p = now.vertex_position(v);
+                    format!("{},{},{}", number(p.x), number(p.y), number(p.z))
+                })
+                .collect();
+            let mut line = String::from("setpositions ");
+            if several {
+                line.push_str(&format!("cage={id} "));
+            }
+            line.push_str(&format!("vertices={} to={}", vertices.join(","), to.join(";")));
+            Some(line)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1062,6 +1138,47 @@ mod tests {
             written += 1;
         }
         assert!(written >= 30, "only {written} samples were written");
+    }
+
+    /// **A cage vertex moved by hand is written as the line that moves it, and the line puts the
+    /// cage back bit for bit** (R11). A topology edit writes nothing here: it is a typed line, or
+    /// a tool's own.
+    #[test]
+    fn a_moved_cage_vertex_echoes_as_setpositions_and_the_line_replays_to_the_same_cage() {
+        let mut doc = Document::with_cage(fieldform_cage::Cage::cube_of(10.0));
+        let id = *doc.cages.keys().next().unwrap();
+        let graph = doc.parts.values().next().unwrap().graph.clone();
+        let before = Snapshot::of(&doc, &graph);
+        assert!(cage_lines(&before, &doc).is_empty(), "nothing moved, nothing written");
+
+        let v = fieldform_cage::VertexId::from_index(3);
+        doc.cage_mesh_mut(id).unwrap().set_vertex_position(v, nalgebra::Point3::new(1.25, -2.0, 0.1));
+        let lines = cage_lines(&before, &doc);
+        assert_eq!(lines, vec!["setpositions vertices=3 to=1.25,-2,0.1".to_string()], "one cage, so unnamed");
+
+        // Replayed on the cage as it was: the same positions, to the bit.
+        let moved = doc.cage_body(id).unwrap().geometry_fingerprint();
+        doc.cage_mesh_mut(id).unwrap().set_vertex_position(v, before_position(&before, id, v));
+        let (verb, rest) = lines[0].split_once(' ').unwrap();
+        assert_eq!(verb, "setpositions");
+        let args = rest.split(' ').fold(Args::new(), |a, kv| {
+            let (k, val) = kv.split_once('=').unwrap();
+            a.with(k, crate::console::parse_value(val))
+        });
+        let cmd = fieldform_ops::OpRegistry::default().build("cage.set_positions", &args, &doc).unwrap();
+        fieldform_ops::CommandStack::default().execute(&mut doc, cmd).unwrap();
+        assert_eq!(doc.cage_body(id).unwrap().geometry_fingerprint(), moved);
+
+        // A face taken off is a topology edit, and not this line's to write.
+        let after_move = Snapshot::of(&doc, &graph);
+        let open = fieldform_cage::edit::delete_faces(doc.cage_body(id).unwrap().mesh(), &[fieldform_cage::FaceId::from_index(0)]).unwrap();
+        doc.cage_body_mut(id).unwrap().set_mesh(open.mesh);
+        assert!(cage_lines(&after_move, &doc).is_empty());
+    }
+
+    fn before_position(s: &Snapshot, id: fieldform_scene::CageId, v: fieldform_cage::VertexId) -> nalgebra::Point3<f64> {
+        let b = s.cages[&id].positions[v.index()];
+        nalgebra::Point3::new(f64::from_bits(b[0]), f64::from_bits(b[1]), f64::from_bits(b[2]))
     }
 
     /// A number is written as the shortest text that reads back to the same bits.

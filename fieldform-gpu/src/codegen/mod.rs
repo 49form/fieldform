@@ -39,6 +39,85 @@ use std::collections::{HashMap, HashSet};
 /// the generated function calls.
 pub const PRELUDE: &str = include_str!("../prelude.wgsl");
 
+/// The start and end of the prelude's profile-solid region, every `fn` of which is instantiated
+/// again as a `_bake` copy for the normal pass. The marker lines say why.
+const BAKE_REGION_START: &str = "// ---- profile solids: instantiated again for the normal pass ----";
+const BAKE_REGION_END: &str = "// ---- end of profile solids ----";
+
+/// The prelude as the shader gets it: the file, and after it the `_bake` copy of every function
+/// in the profile-solid region, renamed and reading sections through `profile_distance_bake`.
+///
+/// **Generated rather than written twice**, because two copies of forty functions kept by hand
+/// are the drift D9 is about: the copy is the original with its names changed and nothing else,
+/// made once per process. `bake_copy_names` is what the normal pass renames its calls by.
+pub fn prelude() -> &'static str {
+    static INSTANTIATED: std::sync::OnceLock<(String, Vec<String>)> = std::sync::OnceLock::new();
+    &INSTANTIATED.get_or_init(instantiate_bake_copies).0
+}
+
+/// The names of the functions the normal pass reads through their `_bake` copies.
+pub fn bake_copy_names() -> &'static [String] {
+    static INSTANTIATED: std::sync::OnceLock<(String, Vec<String>)> = std::sync::OnceLock::new();
+    &INSTANTIATED.get_or_init(instantiate_bake_copies).1
+}
+
+fn instantiate_bake_copies() -> (String, Vec<String>) {
+    let start = PRELUDE.find(BAKE_REGION_START).expect("the profile-solid region starts");
+    let end = PRELUDE[start..].find(BAKE_REGION_END).expect("and ends") + start;
+    let region = &PRELUDE[start..end];
+    // Every function block: from a line starting `fn ` to the first line that is `}` alone.
+    // Structs, constants and comments between them are not copied.
+    let mut names = Vec::new();
+    let mut blocks = Vec::new();
+    let mut rest = region;
+    while let Some(at) = rest.find("\nfn ") {
+        let from = at + 1;
+        let close = rest[from..].find("\n}").expect("a function closes") + from + 2;
+        let block = &rest[from..close];
+        let name = block[3..].split('(').next().expect("a name").trim().to_string();
+        names.push(name);
+        blocks.push(block.to_string());
+        rest = &rest[close..];
+    }
+    let mut copies = String::from(
+        "\n// ---- the profile solids again, for the normal pass: generated from the region above \
+         by `instantiate_bake_copies`, reading every section through `profile_distance_bake` ----\n",
+    );
+    for block in &blocks {
+        copies.push_str(&to_bake_names(block, &names));
+        copies.push_str("\n\n");
+    }
+    (format!("{PRELUDE}{copies}"), names)
+}
+
+/// `text` with every call of, and definition of, a function in `names` renamed to its `_bake`
+/// copy, and every section read through `profile_distance_bake`. A name is matched whole: the
+/// character before it is not part of an identifier, so `extrude_distance` leaves
+/// `wall_extrude_distance` to its own entry in the list.
+pub fn to_bake_names(text: &str, names: &[String]) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    'scan: while i < bytes.len() {
+        if i == 0 || !ident(bytes[i - 1]) {
+            let here = &text[i..];
+            for name in names.iter().map(String::as_str).chain(["profile_distance"]) {
+                if here.starts_with(name) && here[name.len()..].starts_with('(') {
+                    out.push_str(name);
+                    out.push_str("_bake(");
+                    i += name.len() + 1;
+                    continue 'scan;
+                }
+            }
+        }
+        let c = text[i..].chars().next().expect("a char");
+        out.push(c);
+        i += c.len_utf8();
+    }
+    out
+}
+
 /// The sphere tracer, appended after the generated function because WGSL requires a function
 /// to be declared before it is called.
 #[cfg(not(feature = "march-stats"))]
@@ -76,6 +155,10 @@ pub enum CodegenError {
          is nothing to generate for it. Put a block in it, or take out what reads it."
     )]
     EmptySlot(NodeId),
+    /// A body that is, or reads, a cage the document holds open -- the same refusal
+    /// `CompileError::OpenCage` is, for the same reason `EmptySlot` is shared (R12).
+    #[error("cage {0} is not a solid, so there is nothing to generate for it")]
+    OpenCage(fieldform_scene::CageId),
     /// The field refuses this by name and so does the shader: an aimed lattice is asked in its
     /// own frame, and a ramp driving its phase would be read there rather than in the world.
     #[error(
@@ -257,7 +340,7 @@ impl ShaderProgram {
         // to start at `fn field(` and so returned only the fold, which was the whole of the
         // generated composition right up until each body became a function of its own. The
         // narrower version quietly excluded the part the tests were looking for.
-        self.source.strip_prefix(PRELUDE).unwrap_or(&self.source)
+        self.source.strip_prefix(prelude()).unwrap_or(&self.source)
     }
 }
 
@@ -1081,8 +1164,14 @@ fn generate_inner(
     // operand reads: having got past this, every node the two passes walk has every operand, so
     // the reads stay the plain lookups they were and whoever adds the next kind of block has
     // nothing to remember. `source_of` says the same thing where it would otherwise be missed.
-    let incomplete = graph.incomplete();
+    //
+    // Of the document rather than the graph, so a cage block whose cage is open is in it too
+    // (R12): a red cage has no field to bake, exactly as an empty slot has no value.
+    let incomplete = document.incomplete_in(graph);
     if let Some((met, _)) = plan.emit.iter().find(|(id, _)| incomplete.contains(id)) {
+        if let Some(cage) = red_cage_behind(document, graph, *met) {
+            return Err(CodegenError::OpenCage(cage));
+        }
         return Err(empty_slot(graph, *met));
     }
     // The point chain, shared by every body: one line per context, each depending only on its
@@ -1400,8 +1489,9 @@ fn generate_inner(
         "}\n".to_string(),
     ]
     .join("\n");
+    let prelude = prelude();
     let source = format!(
-        "{PRELUDE}\n\
+        "{prelude}\n\
          // ---- generated from the composition graph ----\n\
          //\n\
          // Structure only. Every number is a `params[..]` read, so changing one costs a buffer\n\
@@ -2144,6 +2234,7 @@ impl NodeEmitter<'_> {
             (!rims.is_plainly_hard()).then(|| {
                 let r = params.len();
                 params.push(rims.radius.clone());
+                params.extend(rims.fillet().second_leg().cloned());
                 rim_vector(r, rims, square)
             })
         };
@@ -2565,11 +2656,26 @@ impl NodeEmitter<'_> {
             // pass counts it the same. The mask's floor wants a number that holds over a whole
             // cell, which for a ramp is the most it can give; a ramp's numbers are generated
             // constants already, so a literal here changes nothing about when a rebuild happens.
+            let mut second_slot = None;
             let (k, k_most, divided_by) = match fillet.radius.driver() {
                 None => {
                     let r = params.len();
                     params.push(fillet.radius.clone());
-                    (format!("params[{r}]"), format!("params[{r}]"), None)
+                    // A chamfer's second leg, a slot after the radius's (`round-chamfer-spec.md`
+                    // §9.2): read by scaling the operands below, the most either leg reaches
+                    // for the mask's floor.
+                    match fillet.second_leg() {
+                        Some(second) => {
+                            params.push(second.clone());
+                            second_slot = Some(r + 1);
+                            (
+                                format!("params[{r}]"),
+                                format!("max(params[{r}], params[{}])", r + 1),
+                                None,
+                            )
+                        }
+                        None => (format!("params[{r}]"), format!("params[{r}]"), None),
+                    }
                 }
                 Some(driver) => {
                     let amount = operand(&slot, (driver, ctx))?;
@@ -2618,6 +2724,20 @@ impl NodeEmitter<'_> {
             );
             let (a, b) = (oa.name, ob.name);
             let n = fillet.exponent();
+            // A chamfer of two legs is the equal-legged one over scaled operands, as the field
+            // reads it (`two_legs` in the compile): the slot after the radius's is the second
+            // leg, and `k` becomes the lesser of the two.
+            let (a, b, k) = match second_slot {
+                Some(sb) => {
+                    let m = format!("min({k}, params[{sb}])");
+                    (
+                        format!("(({a}) * {m} / params[{sb}])"),
+                        format!("(({b}) * {m} / {k})"),
+                        m,
+                    )
+                }
+                None => (a, b, k),
+            };
             // Each blended boolean is the smooth minimum of possibly-negated operands,
             // exactly as the CPU path composes it -- and divided as the CPU path divides
             // it, so the march never reads more room than there is over a shared face.
@@ -3102,6 +3222,7 @@ impl NodeEmitter<'_> {
             } else {
                 let r = params.len();
                 params.push(rims.radius.clone());
+                params.extend(rims.fillet().second_leg().cloned());
                 format!(
                     "loft_rim_distance({s}u, {f}u, {p}, {table}u, {}u, params[{eased}], \
                      params[{bend}], {})",
@@ -3122,6 +3243,7 @@ fn rimmed_call(call: String, rims: &fieldform_scene::Rims, params: &mut Vec<Para
     }
     let r = params.len();
     params.push(rims.radius.clone());
+    params.extend(rims.fillet().second_leg().cloned());
     rim_call(&call, &rim_vector(r, rims, "0.0"))
 }
 
@@ -3140,8 +3262,9 @@ fn rimmed_revolve_call(
     }
     let r = params.len();
     params.push(rims.radius.clone());
+    params.extend(rims.fillet().second_leg().cloned());
     params.push(ParamRef::Literal(scale.unwrap_or(0.0)));
-    rim_call(&call, &rim_vector(r, rims, &format!("params[{}]", r + 1)))
+    rim_call(&call, &rim_vector(r, rims, &format!("params[{}]", r + rim_slots(rims))))
 }
 
 /// A box's or a cylinder's edge as the prelude's `_edge_` functions take it -- the reach a slot
@@ -3162,8 +3285,8 @@ fn edge_like_slot(rims: &fieldform_scene::Rims, params: &mut usize) -> Option<St
         return None;
     }
     let r = *params;
-    *params += 2;
-    Some(rim_vector(r, rims, &format!("params[{}]", r + 1)))
+    *params += rim_slots(rims) + 1;
+    Some(rim_vector(r, rims, &format!("params[{}]", r + rim_slots(rims))))
 }
 
 /// The same in the normal pass, which counts the slot the value pass pushed rather than pushing.
@@ -3180,13 +3303,29 @@ fn edge_slot(edge: &fieldform_scene::Fillet, params: &mut usize) -> Option<Strin
 /// which ends as literals -- 0 both, 1 the start, 2 the end, which `rim_join_ends` reads -- and
 /// `square`, the text of the square-corner scale: `0.0` for the max-norm bound, `1.0` for an
 /// upright extrude's exact corner, a slot for a revolve's (`Rim::cut`).
+///
+/// **A chamfer's second leg rides in the exponent's place, negated.** A chamfer's exponent is
+/// one and nothing else, so a negative exponent is unambiguous: `rim_join` reads `−y` as the leg
+/// along the end and the shape as the bevel. The vector stays four wide, which every rim function
+/// in the prelude takes; a fifth component would have been forty signatures for one number. The
+/// leg is a slot pushed right after the reach's, in both passes (`rim_slots`), so dragging it
+/// writes a buffer rather than compiling a shader.
 fn rim_vector(r: usize, rims: &fieldform_scene::Rims, square: &str) -> String {
     let ends = match rims.at {
         fieldform_scene::RimEnds::Both => 0.0f32,
         fieldform_scene::RimEnds::Start => 1.0,
         fieldform_scene::RimEnds::End => 2.0,
     };
-    format!("vec4<f32>(params[{r}], {:?}, {ends:?}, {square})", rims.exponent() as f32)
+    let shape = match rims.fillet().second_leg() {
+        Some(_) => format!("-params[{}]", r + 1),
+        None => format!("{:?}", rims.exponent() as f32),
+    };
+    format!("vec4<f32>(params[{r}], {shape}, {ends:?}, {square})")
+}
+
+/// How many slots a rim's vector reads after its reach: one more for a chamfer's second leg.
+fn rim_slots(rims: &fieldform_scene::Rims) -> usize {
+    1 + usize::from(rims.fillet().second_leg().is_some())
 }
 
 /// Whether an extrude's two readings are square to each other, so its rims read the exact
@@ -3805,7 +3944,7 @@ fn normal_function(
                 let rim_slot = |params: &mut usize| -> Option<String> {
                     rimmed.then(|| {
                         let r = *params;
-                        *params += 1;
+                        *params += rim_slots(rims);
                         rim_vector(r, rims, square)
                     })
                 };
@@ -4103,10 +4242,16 @@ fn normal_function(
                 // One slot either way, counted as the value pass pushed it: the radius, or --
                 // driven -- the divisor, with the radius the ramp's own expression. The two
                 // passes agree by counting rather than by reasoning.
+                let mut second_slot = None;
                 let (k, divided_by) = match fillet.radius.driver() {
                     None => {
                         let r = params;
                         params += 1;
+                        // The second leg's slot, counted as the value pass pushed it.
+                        if fillet.second_leg().is_some() {
+                            second_slot = Some(params);
+                            params += 1;
+                        }
                         (format!("params[{r}]"), None)
                     }
                     Some(driver) => {
@@ -4115,6 +4260,21 @@ fn normal_function(
                         params += 1;
                         (format!("({amount})"), Some(d))
                     }
+                };
+                // A chamfer of two legs: the operands and their gradients scaled as the value
+                // pass scales them, and the radius the lesser leg.
+                let (va, vb, ga, gb, k) = match second_slot {
+                    Some(sb) => {
+                        let m = format!("min({k}, params[{sb}])");
+                        (
+                            format!("(({va}) * {m} / params[{sb}])"),
+                            format!("(({vb}) * {m} / {k})"),
+                            format!("(({ga}) * ({m} / params[{sb}]))"),
+                            format!("(({gb}) * ({m} / {k}))"),
+                            m,
+                        )
+                    }
+                    None => (va, vb, ga, gb, k),
                 };
                 let n = fillet.exponent();
                 // The negations that turn a smooth union into a difference or an intersection
@@ -4525,7 +4685,7 @@ fn normal_function(
                 // the five it is.
                 if !rims.is_plainly_hard() {
                     let r = params;
-                    params += 1;
+                    params += rim_slots(rims);
                     let line = blocks_before.pop().expect("the sweep wrote its walk");
                     let call = line
                         .strip_prefix(&format!("    let sw{n} = "))
@@ -4562,7 +4722,7 @@ fn normal_function(
                 } else {
                     // The rim's slot after the bound, as the value pass pushed it.
                     let r = params;
-                    params += 1;
+                    params += rim_slots(rims);
                     blocks_before.push(format!(
                         "    let sw{n} = loft_rim_value_normal({s}u, {f}u, {p}, {table}u, {}u, \
                          params[{eased}], params[{bend}], {});\n",
@@ -4604,7 +4764,13 @@ fn normal_function(
     let (bodies_source, calls) =
         split_into_bodies(&body, &node_lines, &returned, "body_normal", "vec4<f32>");
     // Subtree functions first: WGSL wants a function declared before it is called.
-    let functions = format!("{}{bodies_source}", subtrees.concat());
+    //
+    // **And every profile solid read through its `_bake` copy** -- the value a body hands up
+    // beside its normal as much as the normal itself -- so the normal pass holds no outline walk
+    // and no section walk for the driver to inline. See the profile-solids marker in the
+    // prelude; `to_bake_names` leaves a name that is not in the region, and the value pass, as
+    // they are.
+    let functions = to_bake_names(&format!("{}{bodies_source}", subtrees.concat()), bake_copy_names());
 
     // The union's normal is the active body's, chosen the same way the boolean above chooses
     // between its operands — by which value is smaller, the earlier body keeping a tie. A
@@ -4625,8 +4791,15 @@ fn normal_function(
         }
     }
     body.push_str("    var nearest = vec4<f32>(0.0, 0.0, 1.0, 3.4e38);\n");
+    // Each body's normal starts with no seam, and the hit body's seam is what the pass keeps:
+    // a blend in a body the fold passes over must not leave its scale on the pixel. See
+    // `seam_scale` in the prelude.
+    body.push_str("    var hit_scale = 1.0;\n");
     for (i, call) in calls.iter().enumerate() {
-        let take = format!("let r{i} = {call}; if (r{i}.w < nearest.w) {{ nearest = r{i}; }}");
+        let take = format!(
+            "seam_scale = 1.0; let r{i} = {call}; if (r{i}.w < nearest.w) {{ nearest = r{i}; \
+             hit_scale = seam_scale; }}"
+        );
         // **Word for word what the value fold does, including the bound.** A normal is taken from
         // the body the value pass found nearest, so a pass that ruled out a different set -- or
         // that let its running minimum fall to a different number -- would hand back the normal of
@@ -4679,7 +4852,8 @@ fn normal_function(
          // The field's own normal, not the gradient of its sampled distance. See\n\
          // `normal_function` in codegen.rs for why those differ and why it matters.\n\
          fn field_normal(p: vec3<f32>) -> vec3<f32> {{\n\
-         {body}    return normalize(nearest.xyz);\n\
+         {body}    seam_scale = hit_scale;\n\
+         \x20   return normalize(nearest.xyz);\n\
          }}\n"
     ))
 }
@@ -7500,6 +7674,23 @@ fn source_of(at: impl Into<Operand>) -> NodeId {
 /// function on the CPU side, worded to match.
 fn empty_slot(graph: &Graph, met: NodeId) -> CodegenError {
     CodegenError::EmptySlot(graph.first_empty_operand().map_or(met, |(node, _)| node))
+}
+
+/// The open cage a body is, or reads, if any -- the same question `compile.rs` asks, so the two
+/// refuse one part for one reason.
+fn red_cage_behind(
+    document: &fieldform_scene::Document,
+    graph: &Graph,
+    body: NodeId,
+) -> Option<fieldform_scene::CageId> {
+    graph.nodes().find_map(|(id, n)| match n {
+        Node::Cage(cage)
+            if document.cage_is_red(*cage) && (id == body || graph.downstream_of(id).contains(&body)) =>
+        {
+            Some(*cage)
+        }
+        _ => None,
+    })
 }
 
 #[cfg(test)]

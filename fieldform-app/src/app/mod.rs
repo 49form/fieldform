@@ -18,6 +18,10 @@ pub(crate) mod tool_panel;
 pub(crate) mod palette_ui;
 // Every command's keys, rebound by pressing them.
 mod keys_panel;
+pub(crate) mod check_model;
+pub(crate) mod cage_tools;
+pub(crate) mod knife_tool;
+pub(crate) mod cage_panel;
 // Right-click: eight directions, fixed per kind of thing selected.
 pub(crate) mod marking_ui;
 // A person's own strip of commands, and the hint an empty document shows.

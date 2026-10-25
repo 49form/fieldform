@@ -408,7 +408,7 @@ mod tests {
     }
 
     fn fillet(k: f64) -> Fillet {
-        Fillet { radius: lit(k), continuity: Continuity::G1 }
+        Fillet { radius: lit(k), continuity: Continuity::G1, second: None }
     }
 
     fn slab(graph: &mut Graph, x_lo: f64, x_hi: f64) -> NodeId {

@@ -256,6 +256,7 @@ fn spokes(blended: bool) -> (Document, Graph) {
                 fillet: fieldform_scene::Fillet {
                     radius: ParamRef::Literal(3.0),
                     continuity: fieldform_scene::Continuity::G1,
+                    second: None,
                 },
             });
         }
