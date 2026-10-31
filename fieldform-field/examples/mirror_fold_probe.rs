@@ -133,8 +133,7 @@ fn cases() -> Vec<(&'static str, Build)> {
                 });
                 g.add(Node::Blend {
                     op: BooleanOp::Union,
-                    a: a.into(),
-                    b: b.into(),
+                    inputs: vec![a.into(), b.into()],
                     fillet: Fillet { radius: lit(12.0), continuity: Continuity::G1, second: None },
                 });
                 (Document::new(), g)

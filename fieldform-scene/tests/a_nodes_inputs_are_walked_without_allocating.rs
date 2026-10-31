@@ -178,6 +178,45 @@ fn every_kind_with_every_edge() -> Vec<Case> {
         vec![s, e],
     );
 
+    let (d, w, o) = (n(), n(), n());
+    case(
+        "a coil with a driven diameter and wire, aimed at a block",
+        Node::Coil {
+            frame: Frame::From { node: o },
+            diameter: driven(d),
+            size: fieldform_scene::CoilSize::TurnsPitch { turns: lit(5.0), pitch: lit(6.0) },
+            section: fieldform_scene::CoilSection::Circle { wire: driven(w) },
+            hand: fieldform_scene::Hand::Right,
+        },
+        vec![d, w, o],
+    );
+    let (l, c, o) = (n(), n(), n());
+    case(
+        "a thread of a driven length and clearance, aimed at a block",
+        Node::Thread {
+            frame: Frame::From { node: o },
+            major: lit(8.0),
+            pitch: lit(1.25),
+            length: driven(l),
+            hand: fieldform_scene::Hand::Left,
+            clearance: driven(c),
+            designation: Some("M8".to_string()),
+        },
+        vec![l, c, o],
+    );
+
+    let (f, d, a) = (n(), n(), n());
+    case(
+        "a counterbored hole from a block, its depth and point driven",
+        Node::Hole {
+            ends: Ends::At { from: Place::From { node: f }, to: Place::At([lit(0.0), lit(0.0), lit(-1.0)]) },
+            kind: fieldform_scene::HoleKind::Counterbore { diameter: lit(6.6), bore_diameter: lit(11.0), bore_depth: lit(6.5) },
+            depth: fieldform_scene::HoleDepth::Blind(driven(d)),
+            tip: fieldform_scene::HoleTip::Drill(driven(a)),
+        },
+        vec![d, a, f],
+    );
+
     let (m, c, t) = (n(), n(), n());
     case(
         "a torus on a block, faced by another",
@@ -378,8 +417,7 @@ fn every_kind_with_every_edge() -> Vec<Case> {
         "a blend with a driven radius",
         Node::Blend {
             op: BooleanOp::Union,
-            a: a.into(),
-            b: b.into(),
+            inputs: vec![a.into(), b.into()],
             fillet: Fillet::of(driven(k)),
         },
         vec![a, b, k],
@@ -475,6 +513,17 @@ fn every_kind_with_every_edge() -> Vec<Case> {
         vec![input, f],
     );
 
+    let (input, f, o) = (n(), n(), n());
+    case(
+        "a scale with a driven factor, aimed at a block",
+        Node::Scale {
+            input: input.into(),
+            factors: [lit(2.0), driven(f), lit(1.0)],
+            frame: Frame::From { node: o },
+        },
+        vec![input, f, o],
+    );
+
     let (input, t) = (n(), n());
     case("a shell", Node::Shell { input: input.into(), thickness: driven(t) }, vec![input, t]);
 
@@ -545,6 +594,9 @@ fn kind(node: &Node) -> &'static str {
         Node::Point { .. } => "point",
         Node::Torus { .. } => "torus",
         Node::Capsule { .. } => "capsule",
+        Node::Coil { .. } => "coil",
+        Node::Thread { .. } => "thread",
+        Node::Hole { .. } => "hole",
         Node::Pipe { .. } => "pipe",
         Node::Sweep { .. } => "sweep",
         Node::Loft { .. } => "loft",
@@ -555,6 +607,7 @@ fn kind(node: &Node) -> &'static str {
         Node::Attract { .. } => "attract",
         Node::Pattern { .. } => "pattern",
         Node::Mirror { .. } => "mirror",
+        Node::Scale { .. } => "scale",
         Node::Shell { .. } => "shell",
         Node::Ramp { .. } => "ramp",
         Node::Offset { .. } => "offset",
@@ -568,7 +621,7 @@ fn kind(node: &Node) -> &'static str {
 fn the_sample_holds_every_kind() {
     let held: std::collections::BTreeSet<&str> =
         every_kind_with_every_edge().iter().map(|case| kind(&case.node)).collect();
-    assert_eq!(held.len(), 29, "a kind of node has no case: {held:?}");
+    assert_eq!(held.len(), 33, "a kind of node has no case: {held:?}");
 }
 
 /// **A node's inputs are its operands, then what drives its parameters, then what it is pointed

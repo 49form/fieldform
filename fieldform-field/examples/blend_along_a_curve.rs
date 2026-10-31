@@ -96,8 +96,7 @@ fn ball_blended_with_a_curve(pipe_radius: f64, blend_radius: f64) -> (Document, 
     let pipe = graph.add(Node::Pipe { curve, radius: lit(pipe_radius) });
     graph.add(Node::Blend {
         op: BooleanOp::Union,
-        a: ball.into(),
-        b: pipe.into(),
+        inputs: vec![ball.into(), pipe.into()],
         fillet: Fillet { radius: lit(blend_radius), continuity: Continuity::G1, second: None },
     });
     (doc, graph)

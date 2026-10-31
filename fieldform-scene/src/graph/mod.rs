@@ -31,7 +31,7 @@ mod pattern;
 mod serde;
 
 pub use lattice::{Banding, CellMap, LatticeCell, LatticePhase};
-pub use node::Node;
+pub use node::{uniform_factor, Node};
 pub use operand::Operand;
 pub use params::{
     no_turn, Attractor, BooleanOp, Continuity, Fillet, ParamRef, RampShape, RimEnds, Rims,
@@ -681,17 +681,45 @@ impl Graph {
     /// than guessed at; the boolean's own panel says what it means, since a difference of a body
     /// with itself is empty and that is worth knowing before wondering where the body went.
     ///
+    /// **A block of one operand is lifted out, not left as a gap.** Deleting a placement around a
+    /// hole in a subtract means "stop moving this hole", so the subtract reads the hole where it
+    /// read the placement. Handing it the cube beside it instead -- the rule for a leaf -- made a
+    /// subtract of the cube from itself and dropped the hole out of the body, which is what the
+    /// owner saw on deleting one (2026-10-28).
+    ///
     /// On the graph rather than in the application, so the rule can be asserted without one.
     pub fn remove_cascading(&mut self, id: NodeId) {
+        self.remove_cascading_after(id, &[]);
+    }
+
+    /// [`Self::remove_cascading`], with the blocks whose going sent the cascade here: a wrapper
+    /// is removed *because* what it wrapped is going, and lifting that out would hand its
+    /// consumer a block about to vanish.
+    fn remove_cascading_after(&mut self, id: NodeId, going: &[NodeId]) {
         let consumers: Vec<NodeId> = self.consumers_of(id).collect();
+        let wrapped = self.node(id).map(|n| n.operands()).and_then(|o| match o[..] {
+            [only] if !going.contains(&only) => Some(only),
+            _ => None,
+        });
 
         for consumer in consumers {
             let Some(node) = self.node(consumer).cloned() else { continue };
+            if let Some(inner) = wrapped
+                && inner != consumer
+                && node.operands().contains(&id)
+            {
+                let map = std::collections::HashMap::from([(id, inner)]);
+                if let Some(node) = self.node_mut(consumer) {
+                    node.remap_inputs(&map);
+                }
+                continue;
+            }
             // A boolean of three or more loses this operand and keeps the rest: "these five,
             // joined" less one is "these four, joined", not nothing.
-            if let Node::Boolean { inputs, .. } = &node
+            if let Node::Boolean { inputs, .. } | Node::Blend { inputs, .. } = &node
                 && inputs.len() > 2
-                && let Some(Node::Boolean { inputs: live, .. }) = self.node_mut(consumer)
+                && let Some(Node::Boolean { inputs: live, .. } | Node::Blend { inputs: live, .. }) =
+                    self.node_mut(consumer)
             {
                 // **The slot goes rather than emptying**, which is what "these four, joined"
                 // means: a boolean above two operands keeps its arity by losing the whole slot,
@@ -725,7 +753,10 @@ impl Graph {
                         node.remap_inputs(&map);
                     }
                 }
-                None => self.remove_cascading(consumer),
+                None => {
+                    let going: Vec<NodeId> = going.iter().copied().chain([id]).collect();
+                    self.remove_cascading_after(consumer, &going);
+                }
             }
         }
         // **`remove_body` asks whether this is a root, and a ramp can never answer yes.** By this

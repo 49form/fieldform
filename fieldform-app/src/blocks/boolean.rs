@@ -12,7 +12,7 @@ use crate::blocks::operands::same_block_twice;
 use fieldform_scene::Operand;
 
 impl App {
-    /// A boolean's list of bodies or a blend's pair: the operands, the operation, and the
+    /// A boolean's list of bodies, hard or rounded: the operands, the operation, and the
     /// fillet that turns one kind into the other.
     ///
     /// **The whole node, where the other panels take its fields**: what this rebuilds may be
@@ -20,17 +20,17 @@ impl App {
     /// field. The caller has already cloned it, and only the arm that matched these two kinds
     /// calls this, which is what the `unreachable!` below leans on.
     pub(crate) fn boolean_controls(&mut self, ui: &mut egui::Ui, id: NodeId, node: Node) {
-        // One panel for both, because the join control turns one into the other. A
-        // boolean is a list; a blend is the pair it always was, since a fillet rolls
-        // between two surfaces and no more.
+        // One panel for both, because the join control turns one into the other. Both are
+        // lists since 2026-10-28: a rounded one is the chain of joins a nest of pairs was, so a
+        // body with five holes rounded into it is one block, not five each hiding the last.
         let (op, operands, fillet, continuity, second) = match &node {
             Node::Boolean { op, inputs } => (*op, inputs.clone(), None, None, None),
-            Node::Blend { op, a, b, fillet } => {
-                (*op, vec![*a, *b], Some(fillet.radius), Some(fillet.continuity), fillet.second)
+            Node::Blend { op, inputs, fillet } => {
+                (*op, inputs.clone(), Some(fillet.radius), Some(fillet.continuity), fillet.second)
             }
             _ => unreachable!("matched above"),
         };
-        let is_list = fillet.is_none();
+        let hard = fillet.is_none();
 
         // Operands first: which body is cut from which is the thing a subtraction gets
         // wrong, and it is not visible from the result. The first row of a subtraction
@@ -45,7 +45,7 @@ impl App {
             .operand_choices(id)
             .into_iter()
             .filter(|(n, _)| {
-                !is_list || !matches!(self.part_graph().node(*n), Some(Node::Point { .. }))
+                !hard || !matches!(self.part_graph().node(*n), Some(Node::Point { .. }))
             })
             .collect();
         // Each block the rows may read, with its refusal already on it, built once for the whole
@@ -60,10 +60,9 @@ impl App {
         // leaves the block **complete** with the operands that remain, which is why it needs a
         // list with a row to spare and emptying needs nothing. `RowEdits` holds the pair; this is
         // only the half that depends on the list.
-        let over_two = is_list && operands.len() > 2;
-        // The list's own header: what it holds, and the two ways to fill it. A pair
-        // (a fillet) has neither, since a pair is all it can be.
-        if is_list {
+        let over_two = operands.len() > 2;
+        // The list's own header: what it holds, and the two ways to fill it.
+        {
             let collecting = self.collecting == Some(id);
             ui.horizontal(|ui| {
                 ui.label(
@@ -111,7 +110,7 @@ impl App {
                 removed = Some(i);
             }
         }
-        if is_list {
+        {
             // Adding by name, for the bodies the viewport cannot show — a named block
             // already consumed elsewhere — and for anyone who would rather read a list
             // than click a model. Never a button that silently picks something.
@@ -258,9 +257,8 @@ impl App {
         let approximate =
             self.approximate_join(new_operands.iter().filter_map(|slot| slot.source()));
 
-        // A fillet rolls between two surfaces. With more operands than that the join
-        // stays hard, and the reason is on the control rather than in a refusal.
-        let two = new_operands.len() == 2;
+        // A fillet joins every operand of the list, each to what the ones before it made.
+        let two = new_operands.len() >= 2;
         let mut new_continuity = continuity;
         // Switched before the row is drawn, so it shows the state it is about to be in
         // rather than the one the click left behind for a frame.
@@ -282,10 +280,9 @@ impl App {
                 // unavailable, and they are different reasons.
                 let allowed = match mode {
                     // A plain boolean does nothing with an operand that encloses
-                    // nothing -- but only worth forcing when a fillet is possible at
-                    // all, which is a pair.
-                    None => hollow.is_none() || new_operands.len() != 2,
-                    // A fillet rolls between two surfaces.
+                    // nothing.
+                    None => hollow.is_none(),
+                    // A fillet needs something to join.
                     Some(_) => two,
                 };
                 ui.add_enabled_ui(allowed, |ui| {
@@ -310,8 +307,8 @@ impl App {
                                      boolean depends only on sign — it would \
                                      leave the body exactly as it is, or empty it. A \
                                      blend reaches the point instead.",
-                            Some(_) => "A fillet joins two bodies. Take this down to \
-                                        two operands to fillet it, or nest booleans.",
+                            Some(_) => "A fillet joins bodies — give this a second one \
+                                        to fillet it.",
                         });
                 });
             }
@@ -442,10 +439,9 @@ impl App {
         }
 
         let rebuilt = match new_continuity {
-            Some(continuity) if new_operands.len() == 2 => Node::Blend {
+            Some(continuity) if new_operands.len() >= 2 => Node::Blend {
                 op: new_op,
-                a: new_operands[0],
-                b: new_operands[1],
+                inputs: new_operands,
                 fillet: fieldform_scene::Fillet { radius: new_fillet, continuity, second: new_second },
             },
             _ => Node::Boolean { op: new_op, inputs: new_operands },

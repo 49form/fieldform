@@ -215,8 +215,7 @@ fn blends(n: usize) -> (Document, Graph) {
         let next = ball(&mut g, i);
         acc = g.add(Node::Blend {
             op: BooleanOp::Union,
-            a: acc.into(),
-            b: next.into(),
+            inputs: vec![acc.into(), next.into()],
             fillet: Fillet { radius: lit(6.0), continuity: Continuity::G1, second: None },
         });
     }
@@ -350,8 +349,7 @@ fn wing_up_to(stage: usize) -> (Document, Graph) {
 
     let joined = g.add(Node::Blend {
         op: BooleanOp::Union,
-        a: fuselage.into(),
-        b: both.into(),
+        inputs: vec![fuselage.into(), both.into()],
         fillet: Fillet { radius: lit(30.0), continuity: Continuity::G1, second: None },
     });
     g.add(Node::Boolean { op: BooleanOp::Difference, inputs: vec![joined.into(), bore.into()] });

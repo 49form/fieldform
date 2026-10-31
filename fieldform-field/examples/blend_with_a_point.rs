@@ -78,8 +78,7 @@ fn ball_blended_with_a_point(at: f64, radius: f64) -> (Document, Graph) {
     let point = graph.add(Node::Point { at: [lit(at), lit(0.0), lit(0.0)] });
     graph.add(Node::Blend {
         op: BooleanOp::Union,
-        a: ball.into(),
-        b: point.into(),
+        inputs: vec![ball.into(), point.into()],
         fillet: Fillet { radius: lit(radius), continuity: Continuity::G1, second: None },
     });
     (doc, graph)

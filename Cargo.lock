@@ -1807,7 +1807,7 @@ dependencies = [
 
 [[package]]
 name = "fieldform-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "eframe",
@@ -1833,7 +1833,7 @@ dependencies = [
 
 [[package]]
 name = "fieldform-cage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nalgebra",
  "serde",
@@ -1843,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "fieldform-field"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "approx",
  "fidget-core",
@@ -1863,13 +1863,14 @@ dependencies = [
 
 [[package]]
 name = "fieldform-gpu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytemuck",
  "fieldform-cage",
  "fieldform-field",
  "fieldform-io",
  "fieldform-scene",
+ "fieldform-subd",
  "half",
  "image",
  "naga",
@@ -1883,14 +1884,14 @@ dependencies = [
 
 [[package]]
 name = "fieldform-import"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fieldform-io",
 ]
 
 [[package]]
 name = "fieldform-io"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fieldform-cage",
  "fieldform-field",
@@ -1909,7 +1910,7 @@ dependencies = [
 
 [[package]]
 name = "fieldform-ops"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fieldform-cage",
  "fieldform-scene",
@@ -1922,7 +1923,7 @@ dependencies = [
 
 [[package]]
 name = "fieldform-scene"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fieldform-cage",
  "nalgebra",
@@ -1934,7 +1935,7 @@ dependencies = [
 
 [[package]]
 name = "fieldform-subd"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "approx",
  "fieldform-cage",

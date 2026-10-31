@@ -10,7 +10,10 @@ use crate::ends::Ends;
 use crate::id::{CageId, CurveId, MeshId, NodeId};
 use crate::graph::Operand;
 use crate::Frame;
-use crate::{Corners, LoftSmooth, Outline, Section, SweepLaw};
+use crate::{
+    CoilSection, CoilSize, Corners, Hand, HoleDepth, HoleKind, HoleTip, LoftSmooth, Outline,
+    Section, SweepLaw,
+};
 #[cfg(doc)] use super::{pattern_count, CountFit, Graph};
 
 /// One operation in the graph.
@@ -263,6 +266,64 @@ pub enum Node {
         start_radius: ParamRef,
         end_radius: ParamRef,
     },
+    /// A coil: a wire of round or square section wound helically about the frame's axis.
+    ///
+    /// **A helix is a coordinate here, not a curve.** Every curve is a single Bézier span and a
+    /// helix is not one; nor does it need to be. Read a point as its radius and its height
+    /// reduced by the pitch times the turn, and a section drawn in the axial half-plane is
+    /// carried helically about the axis — exact by construction, with one bound for the
+    /// stretch of the map (`LowerBound`, as a twist is). The section is defined in the **axial
+    /// half-plane**, centred on the mean diameter, not square to the wire.
+    ///
+    /// Basic by decision: no spiral, no taper, no triangle sections, no inside/outside
+    /// placement. The coil starts in the frame's `+X` half-plane at its origin and climbs along
+    /// `+Z`.
+    Coil {
+        /// The axis and the start point. See [`Frame`].
+        frame: Frame,
+        /// To the section's centre: the mean diameter.
+        diameter: ParamRef,
+        /// Two of turns, pitch and height; the third is derived. See [`CoilSize`].
+        size: CoilSize,
+        /// The wire's section, in the axial half-plane. See [`CoilSection`].
+        section: CoilSection,
+        hand: Hand,
+    },
+    /// A threaded rod: the ISO basic profile carried helically about the frame's axis, cut to
+    /// a length with flat ends.
+    ///
+    /// **The output is the threaded solid**, used as a body or unioned to a shaft for an
+    /// external thread, and subtracted as the cutter for an internal one — one block, because
+    /// the basic profile is shared. `clearance` offsets the profile radially: positive opens an
+    /// internal cutter, negative shrinks an external rod for a print's fit. A designation, when
+    /// set, names the major diameter and pitch from the metric coarse table and the two fields
+    /// beside it are not read; cleared, the two fields are the thread.
+    Thread {
+        /// The axis and where the rod starts. See [`Frame`].
+        frame: Frame,
+        /// The major diameter, read when `designation` is `None`.
+        major: ParamRef,
+        /// The pitch, read when `designation` is `None`.
+        pitch: ParamRef,
+        /// Along the axis from the frame's origin.
+        length: ParamRef,
+        hand: Hand,
+        /// A radial offset of the profile, nought for the basic one.
+        clearance: ParamRef,
+        /// `"M8"` and the like, from [`crate::THREAD_TABLE`]; `None` for a custom thread.
+        designation: Option<String>,
+    },
+    /// A drilled hole, as a cutter: made already subtracted from a body, and its own block after.
+    ///
+    /// **Placed by two points and nothing else.** `ends` runs from the entry point to a point
+    /// along the axis into the material; the tool that picks a surface stores both as literals at
+    /// that moment, so the hole remembers no face and stays where it was put when the body
+    /// changes, as a cylinder would. Only the direction of `ends` is read; the depth is the
+    /// hole's own number. Retyped, or pointed at a line, it follows that instead.
+    ///
+    /// **A plain hole is an exact distance**: a revolve of its section about the axis, read in
+    /// closed form. A tapped one is the union of its tap drill and a thread, and so a bound.
+    Hole { ends: Ends, kind: HoleKind, depth: HoleDepth, tip: HoleTip },
     /// A curve swept into a round tube of the given radius — the field generator.
     ///
     /// The radius is a [`ParamRef`] rather than a bare number because that is the whole point
@@ -326,10 +387,16 @@ pub enum Node {
     /// demand different things of their operands: a boolean's surface depends only on sign,
     /// while a blend mixes by magnitude, so a blend requires true distance fields and a
     /// boolean does not.
+    ///
+    /// **A list, as a boolean's is, and read as the chain it replaces** (the owner, 2026-10-28):
+    /// the first operand blended with the second, that with the third, and on -- so a body with
+    /// five holes rounded into it is one block of six operands rather than five blocks each
+    /// hiding the last, and it reads exactly what that nest of pairs read. `Difference` keeps the
+    /// first and subtracts each of the rest, as a boolean's does. Two or more; the panel and the
+    /// console refuse fewer, and a deletion that would leave one empties a slot instead.
     Blend {
         op: BooleanOp,
-        a: Operand,
-        b: Operand,
+        inputs: Vec<Operand>,
         /// How the seam is rounded. See [`Fillet`] — the same type a pattern's fold takes, so
         /// the number means the same thing in both and there is one editor for it.
         fillet: Fillet,
@@ -572,6 +639,35 @@ pub enum Node {
         /// ask for separately.
         join: bool,
     },
+    /// Another field, stretched by a different factor along each of three axes.
+    ///
+    /// **Its own block rather than three factors on `Transform`, because the two make different
+    /// claims.** A placement is exact: a rigid motion keeps a distance, and a uniform scale keeps
+    /// one once the value is multiplied back. A per-axis scale cannot — the value is `s_min`
+    /// times the input read at the squeezed point, which never overstates and reads short by up
+    /// to `s_max / s_min` — so it is a lower bound, and a blend against it is marked approximate
+    /// where its radius is typed. Putting the factors on the placement would have made *editing a
+    /// number* change what the block claims, which is the objection the project notes raised
+    /// against folding a blend radius onto a boolean.
+    ///
+    /// Three factors that are the same `ParamRef` — three equal literals, or one named parameter
+    /// three times — are a uniform scale and compile to the exact placement arithmetic, so the
+    /// block reports its input's own claim. Decided by structure, never by comparing resolved
+    /// numbers against a tolerance.
+    Scale {
+        input: Operand,
+        /// How much along the frame's X, Y and Z, in that order. `[1, 1, 1]` changes nothing.
+        ///
+        /// A factor at or below nought is refused at compile time: a negative one is a mirror,
+        /// which has its own block, and nought has no inverse to read the input through.
+        factors: [ParamRef; 3],
+        /// The point the stretch happens about, and the axis its third factor runs along.
+        ///
+        /// A [`Frame`], so the centre and the direction can be a typed point and vector, another
+        /// block, or a drawn line, exactly as a twist's or a mirror's can (D9). The first two
+        /// factors run along the two directions the frame's rotation carries world X and Y onto.
+        frame: Frame,
+    },
     /// A body hollowed out to a wall of a given thickness.
     ///
     /// One block, though what it means is two operations: the body, minus an inward offset of
@@ -707,6 +803,18 @@ pub enum Node {
     Unknown(UnknownNode),
 }
 
+/// The one factor a [`Node::Scale`] applies along every axis, when its three are the same
+/// `ParamRef` — and so the one case in which the block is an exact uniform scale.
+///
+/// **By structure, never by value.** Three equal literals or one named parameter three times
+/// are uniform; `2` and `2.0000001`, or two parameters that happen to resolve alike, are not. A
+/// test against a tolerance would make the block's claim about its own distance flip on a typed
+/// digit, which is the thing a claim must not do. The compiler, the panel's walk and the shader
+/// all ask this one question, so they cannot disagree about which scales are exact.
+pub fn uniform_factor(factors: &[ParamRef; 3]) -> Option<&ParamRef> {
+    (factors[0] == factors[1] && factors[1] == factors[2]).then_some(&factors[0])
+}
+
 impl Node {
     /// Rewrites every input this node names, for whichever of them the map mentions.
     ///
@@ -836,6 +944,32 @@ impl Node {
                 out.push(start_radius);
                 out.push(end_radius);
             }
+            Node::Coil { frame, diameter, size, section, .. } => {
+                out.push(diameter);
+                out.extend(size.params());
+                out.extend(section.params());
+                out.extend(frame.params());
+            }
+            // The major and pitch are listed whether or not a designation stands in for them,
+            // so a named parameter in either slot is kept alive while the designation is set
+            // and is still there when it is cleared.
+            Node::Thread { frame, major, pitch, length, clearance, .. } => {
+                out.push(major);
+                out.push(pitch);
+                out.push(length);
+                out.push(clearance);
+                out.extend(frame.params());
+            }
+            Node::Hole { ends, kind, depth, tip } => {
+                out.extend(ends.params());
+                out.extend(kind.params());
+                if let HoleDepth::Blind(d) = depth {
+                    out.push(d);
+                }
+                if let HoleTip::Drill(a) = tip {
+                    out.push(a);
+                }
+            }
             // A typed origin's three numbers are still numbers, so `fx` names them like any
             // other. One taken from a block has none to name, and `Place::refs` says so.
             Node::Plane { origin, turn, .. } => {
@@ -919,6 +1053,10 @@ impl Node {
                 out.push(out_max);
             }
             Node::Mirror { frame, .. } => out.extend(frame.params()),
+            Node::Scale { factors, frame, .. } => {
+                out.extend(factors);
+                out.extend(frame.params());
+            }
             Node::Pattern { kind, fillet, count, options, .. } => {
                 match kind {
                     PatternKind::Linear { step } => out.extend(step),
@@ -994,6 +1132,29 @@ impl Node {
                 out.push(start_radius);
                 out.push(end_radius);
             }
+            Node::Coil { frame, diameter, size, section, .. } => {
+                out.push(diameter);
+                out.extend(size.params_mut());
+                out.extend(section.params_mut());
+                out.extend(frame.params_mut());
+            }
+            Node::Thread { frame, major, pitch, length, clearance, .. } => {
+                out.push(major);
+                out.push(pitch);
+                out.push(length);
+                out.push(clearance);
+                out.extend(frame.params_mut());
+            }
+            Node::Hole { ends, kind, depth, tip } => {
+                out.extend(ends.params_mut());
+                out.extend(kind.params_mut());
+                if let HoleDepth::Blind(d) = depth {
+                    out.push(d);
+                }
+                if let HoleTip::Drill(a) = tip {
+                    out.push(a);
+                }
+            }
             Node::Plane { origin, turn, .. } => {
                 out.extend(origin.refs_mut());
                 out.extend(turn.params_mut());
@@ -1067,6 +1228,10 @@ impl Node {
                 out.push(out_max);
             }
             Node::Mirror { frame, .. } => out.extend(frame.params_mut()),
+            Node::Scale { factors, frame, .. } => {
+                out.extend(factors.iter_mut());
+                out.extend(frame.params_mut());
+            }
             Node::Pattern { kind, fillet, count, options, .. } => {
                 let row = matches!(kind, PatternKind::Linear { .. });
                 match kind {
@@ -1190,13 +1355,16 @@ impl Node {
             | Node::Cone { .. }
             | Node::Torus { .. }
             | Node::Capsule { .. }
+            | Node::Coil { .. }
+            | Node::Thread { .. }
+            | Node::Hole { .. }
             | Node::Plane { .. }
             | Node::Point { .. }
             | Node::Lattice { .. }
             | Node::Mesh(_)
             | Node::Unknown(_) => {}
-            Node::Blend { a, b, .. } | Node::Morph { a, b, .. } => out.extend([a, b]),
-            Node::Boolean { inputs, .. } => out.extend(inputs.iter()),
+            Node::Morph { a, b, .. } => out.extend([a, b]),
+            Node::Boolean { inputs, .. } | Node::Blend { inputs, .. } => out.extend(inputs.iter()),
             Node::Transform { input, .. }
             | Node::Offset { input, .. }
             | Node::Twist { input, .. }
@@ -1209,7 +1377,8 @@ impl Node {
             | Node::Ramp { input, .. }
             // The plane a mirror reads is a frame now, so its edge comes from
             // `for_each_reference` with everything else's — see D9.
-            | Node::Mirror { input, .. } => out.push(input),
+            | Node::Mirror { input, .. }
+            | Node::Scale { input, .. } => out.push(input),
         }
     }
 
@@ -1294,13 +1463,16 @@ impl Node {
             | Node::Cone { .. }
             | Node::Torus { .. }
             | Node::Capsule { .. }
+            | Node::Coil { .. }
+            | Node::Thread { .. }
+            | Node::Hole { .. }
             | Node::Plane { .. }
             | Node::Point { .. }
             | Node::Lattice { .. }
             | Node::Mesh(_)
             | Node::Unknown(_) => Vec::new(),
-            Node::Blend { a, b, .. } | Node::Morph { a, b, .. } => vec![a, b],
-            Node::Boolean { inputs, .. } => inputs.iter_mut().collect(),
+            Node::Morph { a, b, .. } => vec![a, b],
+            Node::Boolean { inputs, .. } | Node::Blend { inputs, .. } => inputs.iter_mut().collect(),
             Node::Transform { input, .. }
             | Node::Offset { input, .. }
             | Node::Twist { input, .. }
@@ -1308,7 +1480,8 @@ impl Node {
             | Node::Pattern { input, .. }
             | Node::Attract { input, .. }
             | Node::Ramp { input, .. }
-            | Node::Mirror { input, .. } => vec![input],
+            | Node::Mirror { input, .. }
+            | Node::Scale { input, .. } => vec![input],
         }
     }
 
@@ -1377,6 +1550,7 @@ impl Node {
             // pair of places says so once.
             Node::Cylinder { ends, .. }
             | Node::Cone { ends, .. }
+            | Node::Hole { ends, .. }
             | Node::Capsule { ends, .. } => ends.places().for_each(visit),
             // A placement's pivot, so putting it on a point makes the graph edge that keeps
             // the point alive and moves the placement when the point moves -- without anybody
@@ -1397,6 +1571,7 @@ impl Node {
             | Node::Torus { centre, .. } => vec![centre],
             Node::Cylinder { ends, .. }
             | Node::Cone { ends, .. }
+            | Node::Hole { ends, .. }
             | Node::Capsule { ends, .. } => ends.places_mut(),
             Node::Transform { about, .. } => vec![about],
             _ => Vec::new(),
@@ -1462,7 +1637,10 @@ impl Node {
         match self {
             Node::Lattice { frame, .. }
             | Node::Mirror { frame, .. }
+            | Node::Scale { frame, .. }
             | Node::Twist { frame, .. }
+            | Node::Coil { frame, .. }
+            | Node::Thread { frame, .. }
             | Node::Revolve { frame, .. } => visit(frame),
             Node::Pattern { kind: PatternKind::Radial { frame }, .. } => visit(frame),
             _ => {}
@@ -1493,7 +1671,10 @@ impl Node {
         match self {
             Node::Lattice { frame, .. }
             | Node::Mirror { frame, .. }
+            | Node::Scale { frame, .. }
             | Node::Twist { frame, .. }
+            | Node::Coil { frame, .. }
+            | Node::Thread { frame, .. }
             | Node::Revolve { frame, .. } => vec![frame],
             Node::Pattern { kind: PatternKind::Radial { frame }, .. } => vec![frame],
             _ => Vec::new(),
@@ -1558,6 +1739,7 @@ impl Node {
         match self {
             Node::Cylinder { ends, .. }
             | Node::Cone { ends, .. }
+            | Node::Hole { ends, .. }
             | Node::Capsule { ends, .. } => visit(ends),
             _ => {}
         }
@@ -1568,6 +1750,7 @@ impl Node {
         match self {
             Node::Cylinder { ends, .. }
             | Node::Cone { ends, .. }
+            | Node::Hole { ends, .. }
             | Node::Capsule { ends, .. } => vec![ends],
             _ => Vec::new(),
         }

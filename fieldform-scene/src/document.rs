@@ -511,6 +511,14 @@ pub struct Document {
     /// property of how the axis is *edited*, not of its geometry. The application re-derives them
     /// whenever the part changes, so a body that moves takes its axes with it.
     pub surface_axes: std::collections::BTreeMap<CurveId, crate::SurfaceAxis>,
+    /// Points stood on a body's surface: the `Node::Point` each one is, and how its `at` is
+    /// *derived* (`SurfacePoint`).
+    ///
+    /// **Beside the graph, for the reason `surface_axes` is beside the curves.** The block is an
+    /// ordinary point with its position stored, so everything that stands on a point stands on it
+    /// and an older build shows it where it last stood; this is only the rule that re-derives that
+    /// position. A record outlives its block in the document, so undoing a delete finds it again.
+    pub surface_points: std::collections::BTreeMap<NodeId, crate::SurfacePoint>,
     /// Relations between curves (`profile-group-spec.md` §5): which curve follows which, how,
     /// and whether it was found not to hold on open. Beside the curves rather than on them,
     /// since a curve referencing another curve is the dependency direction this document
@@ -750,6 +758,7 @@ impl Document {
             declared_curves: std::collections::BTreeSet::new(),
             ungrouped_curves: std::collections::BTreeSet::new(),
             surface_axes: std::collections::BTreeMap::new(),
+            surface_points: std::collections::BTreeMap::new(),
             relations: std::collections::BTreeMap::new(),
             tessellations: Vec::new(),
             exports: Vec::new(),
@@ -1365,6 +1374,10 @@ impl Document {
                 .any(|(_, node)| node.param_refs().iter().any(|r| **r == ParamRef::Named(id)))
         };
         !self.parameters_reading(id).is_empty()
+            // An axis on a surface is a reader too: its place and length may name one.
+            || self.surface_axes.values().any(|a| a.params().any(|r| *r == ParamRef::Named(id)))
+            // And a point on a surface: its U, V or seed may name one.
+            || self.surface_points.values().any(|p| p.params().any(|r| *r == ParamRef::Named(id)))
             || self.parts.iter().any(|(&p, part)| match pending {
                 Some((edited, graph)) if edited == p => reads(graph),
                 _ => reads(&part.graph),

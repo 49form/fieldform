@@ -86,10 +86,19 @@ impl App {
         let Some((&cage, body)) = due else { return };
         let Some(closed) = body.closed() else { return };
         let fingerprint = body.mesh().geometry_fingerprint();
-        // The tessellation the field is built from, at the depth the viewport uses for this cage.
+        // The tessellation the field is built from: the depth the settled bake asks for here --
+        // the tolerance `rebuild` hands the compile, from the scene's box and the rung's cells --
+        // so a check that overlaps the bake reads the very surface the bake builds
+        // (`shared_tessellation`). Never below the floor the check always used, so a rung that
+        // asks for little does not make the check coarser than it was.
         let (lo, hi) = cage_box(body.mesh());
-        let tolerance = (((hi - lo).norm() / 64.0) * 0.5).max(1e-4);
-        let levels = fieldform_field::levels_for_tolerance((hi - lo).norm(), tolerance);
+        let size = (hi - lo).norm();
+        let scene = self.pick_bounds();
+        let scene_extent = scene.1 - scene.0;
+        let settled = (scene_extent.x.max(scene_extent.y).max(scene_extent.z) / self.mesh_resolution as f64 * 0.5).max(1e-4);
+        let floor = ((size / 64.0) * 0.5).max(1e-4);
+        let levels = fieldform_field::levels_for_tolerance(size, settled)
+            .max(fieldform_field::levels_for_tolerance(size, floor));
         let epsilon = fieldform_cage::validate::epsilon_length(body.mesh());
         let cage_copy = closed.clone();
         let (tx, rx) = mpsc::channel();

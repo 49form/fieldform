@@ -229,8 +229,7 @@
         });
         graph.add(Node::Blend {
             op: fieldform_scene::BooleanOp::Union,
-            a: ball.into(),
-            b: block.into(),
+            inputs: vec![ball.into(), block.into()],
             fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::Chamfer, second: Some(lit(5.0)) },
         });
         let program = generate(&doc, &graph).expect("generates");
@@ -248,7 +247,7 @@
             let mut g2 = Graph::empty();
             let a = g2.add(Node::Sphere { centre: fieldform_scene::Place::At([lit(10.0), lit(0.0), lit(0.0)]), radius: lit(12.0) });
             let b = g2.add(Node::Cuboid { edge: Default::default(), centre: fieldform_scene::Place::At([lit(-8.0), lit(0.0), lit(0.0)]), size: [lit(20.0); 3], turn: fieldform_scene::no_turn() });
-            g2.add(Node::Blend { op: fieldform_scene::BooleanOp::Union, a: a.into(), b: b.into(), fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::Chamfer, second: None } });
+            g2.add(Node::Blend { op: fieldform_scene::BooleanOp::Union, inputs: vec![a.into(), b.into()], fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::Chamfer, second: None } });
             (generate(&doc, &g2).expect("generates"), ())
         };
         assert_eq!(program.params.len(), plain.params.len() + 1, "one slot more than one leg");
@@ -391,8 +390,7 @@
         });
         graph.add(Node::Blend {
             op: fieldform_scene::BooleanOp::Union,
-            a: ball.into(),
-            b: block.into(),
+            inputs: vec![ball.into(), block.into()],
             fillet: Fillet { radius: lit(3.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         graph.add(Node::Sphere {
@@ -447,8 +445,7 @@
         });
         let blend = graph.add(Node::Blend {
             op: fieldform_scene::BooleanOp::Union,
-            a: ball.into(),
-            b: block.into(),
+            inputs: vec![ball.into(), block.into()],
             fillet: Fillet { radius: ParamRef::Field(ramp), continuity: fieldform_scene::Continuity::G1, second: None },
         });
 
@@ -1203,8 +1200,7 @@
         });
         let blended = graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: cage.into(),
-            b: placed.into(),
+            inputs: vec![cage.into(), placed.into()],
             fillet: Fillet { radius: lit(1.0), continuity: Continuity::G1, second: None },
         });
         // And now the same sphere again, from outside the placement.
@@ -1360,6 +1356,83 @@
         );
         assert!(!program.source.contains(&format!("{stretch:?}")), "and not as a literal");
         validate(&program.source).expect("the sweep's shader parses and validates");
+    }
+
+    /// **A section held at an angle or moved by a law is held to the tube, and the tube's slot
+    /// says so by its sign.** Neither reads its section as it is, so `sweep_tube` has nothing for
+    /// them; `sweep_cap_tube` has the solid's reach and the spine's tube, and the slot goes up
+    /// negated, which is what `sweep_held_to_tube` reads as "hold the divided reading to this".
+    /// A square section under the plain law keeps the positive tube it always had.
+    #[test]
+    fn a_held_or_moving_sweep_sends_its_tube_negated() {
+        let mut doc = fieldform_scene::Document::new();
+        let square = fieldform_scene::Curve::polyline(
+            CurveId::new(),
+            "Square",
+            vec![
+                nalgebra::Point3::new(-10.0, -10.0, 0.0),
+                nalgebra::Point3::new(10.0, -10.0, 0.0),
+                nalgebra::Point3::new(10.0, 10.0, 0.0),
+                nalgebra::Point3::new(-10.0, 10.0, 0.0),
+            ],
+            true,
+        )
+        .expect("closed");
+        let path = fieldform_scene::Curve::polyline(
+            CurveId::new(),
+            "Elbow",
+            vec![
+                nalgebra::Point3::new(0.0, 0.0, 0.0),
+                nalgebra::Point3::new(0.0, 0.0, 40.0),
+                nalgebra::Point3::new(0.0, 40.0, 80.0),
+            ],
+            false,
+        )
+        .expect("open");
+        let (profile, spine) = (square.id, path.id);
+        doc.curves.insert(profile, square);
+        doc.curves.insert(spine, path);
+        let outline = fieldform_scene::Outline::closed(profile);
+        let scaled = fieldform_scene::SweepLaw {
+            taper: fieldform_scene::Taper::Scale(ParamRef::Literal(0.6)),
+            ..Default::default()
+        };
+        for (section, law) in [
+            (fieldform_scene::Section::Skewed, fieldform_scene::SweepLaw::default()),
+            (fieldform_scene::Section::Parallel, fieldform_scene::SweepLaw::default()),
+            (fieldform_scene::Section::Square, scaled),
+        ] {
+            let mut graph = Graph::empty();
+            graph.add(Node::Sweep {
+                rims: Default::default(),
+                outline: outline.clone(),
+                spine,
+                section: section.clone(),
+                law: law.clone(),
+            });
+            let program = generate(&doc, &graph).expect("a sweep generates a shader");
+            assert!(fieldform_field::sweep_tube(&doc, &outline, spine, &section, &law).is_none());
+            let (reach, tube) = fieldform_field::sweep_cap_tube(&doc, &outline, spine, &section, &law)
+                .expect("the elbow's tube is wider than a 20 mm square reaches");
+            assert!(tube > reach, "{section:?}: a tube of {tube} round a reach of {reach}");
+            assert_eq!(
+                (&program.params[2], &program.params[3]),
+                (&ParamRef::Literal(reach), &ParamRef::Literal(-tube)),
+                "{section:?}: the reach and the tube negated, beside the stretch"
+            );
+            validate(&program.source).expect("the sweep's shader parses and validates");
+        }
+        assert!(
+            fieldform_field::sweep_cap_tube(
+                &doc,
+                &outline,
+                spine,
+                &fieldform_scene::Section::Square,
+                &Default::default()
+            )
+            .is_none(),
+            "a square section under the plain law reads as it is, and keeps its own tube"
+        );
     }
 
     /// **A loft's stations are slots, and so is its smoothness, so neither a dragged section
@@ -1625,13 +1698,16 @@
                 "{what}: a law'd sweep calls the law'd functions"
             );
             assert_eq!(under.params.len(), 21, "{what}: seven more slots than the plain fourteen");
-            // A law that moves the section has no tube, so both of its slots say so, and the
-            // whole reading is divided as it was.
-            assert_eq!(
-                under.params[2..4],
-                [ParamRef::Literal(0.0), ParamRef::Literal(0.0)],
-                "{what}: no tube under a law that moves the section"
-            );
+            // A law that moves the section does not read it as it is, so its whole reading is
+            // divided -- and held to the spine's tube, which goes up negated to say so
+            // (`sweep_held_to_tube`): the solid's reach under the law, then the tube.
+            match under.params[2..4] {
+                [ParamRef::Literal(reach), ParamRef::Literal(tube)] => assert!(
+                    reach > 0.0 && tube < -reach,
+                    "{what}: a reach of {reach} and a tube of {tube}, negated and wider"
+                ),
+                ref other => panic!("{what}: the reach and the tube are literals, not {other:?}"),
+            }
             // The six, in the order the shader's own `SweepLaw` reads them.
             let six = &under.params[14..];
             assert_eq!(six[0], ParamRef::Literal(kind), "{what}: which taper");
@@ -1810,8 +1886,7 @@
         let second = graph.add(Node::Pipe { curve, radius: ParamRef::Literal(2.0) });
         graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: cut.into(),
-            b: second.into(),
+            inputs: vec![cut.into(), second.into()],
             fillet: Fillet { radius: ParamRef::Literal(3.0), continuity: Continuity::G1, second: None },
         });
 
@@ -1882,7 +1957,7 @@
         let single = |k: f64| {
             let mut graph = Graph::empty();
             let (a, b) = (slab(&mut graph, -15.0), slab(&mut graph, 15.0));
-            graph.add(Node::Blend { op: BooleanOp::Union, a: a.into(), b: b.into(), fillet: fillet(k) });
+            graph.add(Node::Blend { op: BooleanOp::Union, inputs: vec![a.into(), b.into()], fillet: fillet(k) });
             graph
         };
         let chained = |k: f64| {
@@ -1892,7 +1967,7 @@
                 centre: fieldform_scene::Place::At([lit(0.0), lit(0.0), lit(4.0)]),
                 radius: lit(9.0),
             });
-            graph.add(Node::Blend { op: BooleanOp::Union, a: inner.into(), b: boss.into(), fillet: fillet(k) });
+            graph.add(Node::Blend { op: BooleanOp::Union, inputs: vec![inner.into(), boss.into()], fillet: fillet(k) });
             graph
         };
         let patterned = |k: f64| {
@@ -1953,7 +2028,7 @@
             })
         };
         let (a, b) = (block(&mut graph, -15.0), block(&mut graph, 15.0));
-        let body = graph.add(Node::Blend { op: BooleanOp::Union, a: a.into(), b: b.into(), fillet: fillet(k) });
+        let body = graph.add(Node::Blend { op: BooleanOp::Union, inputs: vec![a.into(), b.into()], fillet: fillet(k) });
         let placed = graph.add(Node::Transform {
             input: body.into(),
             translation: [lit(1.0), lit(2.0), lit(3.0)],
@@ -1981,7 +2056,7 @@
             fillet: fillet(k),
         });
         let lugged =
-            graph.add(Node::Blend { op: BooleanOp::Union, a: both.into(), b: lugs.into(), fillet: fillet(k) });
+            graph.add(Node::Blend { op: BooleanOp::Union, inputs: vec![both.into(), lugs.into()], fillet: fillet(k) });
         let bore = graph.add(Node::Cylinder { edge: Default::default(),
             ends: fieldform_scene::Ends::between(
                 fieldform_scene::Place::At([lit(2.0), lit(1.0), lit(-40.0)]),
@@ -1989,7 +2064,7 @@
             ),
             radius: lit(5.0),
         });
-        graph.add(Node::Blend { op: BooleanOp::Difference, a: lugged.into(), b: bore.into(), fillet: fillet(k) });
+        graph.add(Node::Blend { op: BooleanOp::Difference, inputs: vec![lugged.into(), bore.into()], fillet: fillet(k) });
         if marked {
             graph.mark_critical(fieldform_scene::Critical {
                 clearance: lit(clearance),
@@ -2651,8 +2726,7 @@
         });
         let rounded = graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: ids[2].into(),
-            b: ball.into(),
+            inputs: vec![ids[2].into(), ball.into()],
             fillet: fieldform_scene::Fillet { radius: lit(3.0), continuity: Continuity::G1, second: None },
         });
         let mut inputs = ids.clone();
@@ -2736,8 +2810,7 @@
         // reaches the floor.
         graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: ids[1].into(),
-            b: ball.into(),
+            inputs: vec![ids[1].into(), ball.into()],
             fillet: fieldform_scene::Fillet { radius: lit(3.0), continuity: Continuity::G1, second: None },
         });
         graph.add(Node::Boolean { op: BooleanOp::Union, inputs: ids.clone().into_iter().map(Into::into).collect() });
@@ -3572,8 +3645,7 @@
             graph.add(Node::Sphere { centre: Place::At([lit(14.0), lit(0.0), lit(0.0)]), radius: lit(10.0) });
         let join = graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: a.into(),
-            b: b.into(),
+            inputs: vec![a.into(), b.into()],
             fillet: Fillet { radius: lit(3.0), continuity: Continuity::G1, second: None },
         });
         // A second body, so the part culls at all -- one body is below the gate.
@@ -4488,8 +4560,7 @@
         let (a, b) = pipes(&mut blended);
         blended.add(Node::Blend {
             op: BooleanOp::Union,
-            a: a.into(),
-            b: b.into(),
+            inputs: vec![a.into(), b.into()],
             fillet: Fillet { radius: lit(3.0), continuity: Continuity::G1, second: None },
         });
         let source = generated(&blended);

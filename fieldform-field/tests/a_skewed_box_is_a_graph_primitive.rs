@@ -108,8 +108,7 @@ fn a_skewed_box_is_a_true_distance_and_a_blend_against_it_is_exact() {
     let b = graph.add(Node::Sphere { centre: Place::at(14.0, 0.0, 0.0), radius: lit(5.0) });
     let blend = graph.add(Node::Blend {
         op: BooleanOp::Union,
-        a: a.into(),
-        b: b.into(),
+        inputs: vec![a.into(), b.into()],
         fillet: Fillet::of(lit(2.0)),
     });
     let doc = Document::new();

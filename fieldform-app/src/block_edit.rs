@@ -55,6 +55,9 @@ pub fn verb_of(node: &Node) -> Option<(&'static str, &'static str)> {
         Node::Cone { .. } => ("cone", "create.cone"),
         Node::Torus { .. } => ("torus", "create.torus"),
         Node::Capsule { .. } => ("capsule", "create.capsule"),
+        Node::Coil { .. } => ("coil", "create.coil"),
+        Node::Thread { .. } => ("thread", "create.thread"),
+        Node::Hole { .. } => ("hole", "create.hole"),
         Node::Plane { .. } => ("plane", "create.plane"),
         Node::Point { .. } => ("point", "create.point"),
         Node::Lattice { .. } => ("tpms", "create.tpms"),
@@ -65,6 +68,7 @@ pub fn verb_of(node: &Node) -> Option<(&'static str, &'static str)> {
         Node::Shell { .. } => ("shell", "modify.shell"),
         Node::Twist { .. } => ("twist", "modify.twist"),
         Node::Mirror { .. } => ("mirror", "modify.mirror"),
+        Node::Scale { .. } => ("scale", "modify.scale"),
         Node::Attract { .. } => ("attract", "modify.attract"),
         Node::Pattern { .. } => ("pattern", "modify.pattern"),
         Node::Transform { .. } => ("move", "modify.move"),
@@ -111,9 +115,19 @@ pub fn node_with_keys(node: Node, args: &Args, cx: &Context) -> Result<Node, Str
         | Node::Cone { .. }
         | Node::Torus { .. }
         | Node::Capsule { .. }
+        | Node::Coil { .. }
+        | Node::Thread { .. }
         | Node::Plane { .. }
         | Node::Point { .. } => console_keys::primitive_with_keys(node, word, args, lookup),
         Node::Lattice { .. } => console_keys::lattice_with_keys(node, args, cx.offered, cx.seed, lookup),
+        // `target` is the tool's, read when the hole is made; on a hole that exists it names
+        // nothing to change, since the hole is already cut from its body.
+        Node::Hole { .. } => {
+            if args.get("target").is_some() {
+                return Err("a hole is already cut from its body — `target=` is for making one".to_string());
+            }
+            console_keys::hole_with_keys(node, args, lookup)
+        }
         Node::Ramp { .. } => console_keys::ramp_with_keys(node, args, lookup),
         Node::Boolean { .. } | Node::Blend { .. } => boolean_with_keys(node, args, lookup),
         Node::Morph { mut a, mut b, t } => {
@@ -129,6 +143,7 @@ pub fn node_with_keys(node: Node, args: &Args, cx: &Context) -> Result<Node, Str
         Node::Shell { .. } => console_keys::shell_with_keys(targeted(node, word, args, lookup)?, args, lookup),
         Node::Twist { .. } => console_keys::twist_with_keys(targeted(node, word, args, lookup)?, args, lookup),
         Node::Mirror { .. } => console_keys::mirror_with_keys(targeted(node, word, args, lookup)?, args, lookup),
+        Node::Scale { .. } => console_keys::scale_with_keys(targeted(node, word, args, lookup)?, args, lookup),
         Node::Attract { .. } => {
             let mut node = targeted(node, word, args, lookup)?;
             if let Some(toward) = console_keys::toward_named(args, cx.curve, lookup)?
@@ -165,6 +180,7 @@ fn targeted(mut node: Node, word: &str, args: &Args, lookup: &dyn Fn(&str) -> Lo
             | Node::Shell { input, .. }
             | Node::Twist { input, .. }
             | Node::Mirror { input, .. }
+            | Node::Scale { input, .. }
             | Node::Attract { input, .. }
             | Node::Pattern { input, .. }
             | Node::Transform { input, .. } => *input = o,
@@ -206,14 +222,14 @@ fn pattern_options_with_keys(
 
 /// A boolean or a blend, which are one block to a person: `op=`, `in=`, and `radius=` with `g=`.
 ///
-/// A radius on two operands is a blend and a radius of nought takes the fillet off, so a block
-/// can turn from one kind to the other under `set`, as it does under the panel's Sharp and
-/// Filleted.
+/// A radius makes a blend of any number of operands and a radius of nought takes the fillet off,
+/// so a block can turn from one kind to the other under `set`, as it does under the panel's Sharp
+/// and Filleted.
 fn boolean_with_keys(node: Node, args: &Args, lookup: &dyn Fn(&str) -> Lookup) -> Result<Node, String> {
     let verb = "boolean";
     let (mut op, mut inputs, mut fillet) = match node {
         Node::Boolean { op, inputs } => (op, inputs, None),
-        Node::Blend { op, a, b, fillet } => (op, vec![a, b], Some(fillet)),
+        Node::Blend { op, inputs, fillet } => (op, inputs, Some(fillet)),
         _ => return Err("`boolean` sets a boolean".to_string()),
     };
     let asked_op = [
@@ -281,12 +297,7 @@ fn boolean_with_keys(node: Node, args: &Args, lookup: &dyn Fn(&str) -> Lookup) -
         }
     }
     Ok(match fillet {
-        Some(fillet) => {
-            let [a, b] = inputs[..] else {
-                return Err("a fillet joins two bodies; union the rest first".to_string());
-            };
-            Node::Blend { op, a, b, fillet }
-        }
+        Some(fillet) => Node::Blend { op, inputs, fillet },
         None => Node::Boolean { op, inputs },
     })
 }

@@ -29,8 +29,13 @@ mod adaptive;
 mod attract;
 mod bvh;
 mod curve_field;
+mod draft_crossing;
 mod extent;
 mod graph_field;
+mod helical;
+pub use helical::{helix_stretch, Coil, Thread, ThreadProfile, WireSection};
+mod hole;
+pub use hole::{hole_basis, into_material, Hole, HoleSection};
 mod lattice;
 mod measure;
 mod mesh;
@@ -51,9 +56,16 @@ mod surface_map;
 pub use surface_map::{
     mesh_fold_mm, query_packed, PackedHit, PackedSurface, SurfaceLayout, SurfaceMap, SurfacePoint,
 };
+mod shared_tessellation;
+pub use shared_tessellation::{shared_tessellation, SharedTessellation};
 mod simplify;
 mod tessellate;
 mod spine;
+mod surface_query;
+pub use surface_query::{
+    crease_angle, crossings, surface_normal, walk_to_surface, Crossing, SearchError, CREASE_ANGLE_DEG,
+    CROSSING_LIMIT, CROSSING_SAMPLES,
+};
 mod swept;
 mod verify;
 mod wall;
@@ -79,13 +91,16 @@ pub use graph_field::{
     outline_miters, packed_surfaces, part_extent, pattern_grid_anchor_in,
     pattern_origin_in, pattern_reach, pattern_reach_axes_in, pattern_reach_in,
     profile_reads_out_to, reach_across_axis, reads_widened, red_cage_behind, surface_levels, sweep_axes,
-    sweep_frame, sweep_law, sweep_lean, sweep_offset, sweep_reads_true, sweep_stretch, sweep_tube,
+    sweep_cap_tube, sweep_frame, sweep_law, sweep_lean, sweep_offset, sweep_reads_true,
+    sweep_stretch, sweep_tube,
     taper_ratio, wall_bakes_under,
     resolve_frame, resolve_pivot, resolve_place, resolve_place_for, rotation_from_z,
-    ends_at, placement_above, turn_rotation, with_turns_flattened,
+    body_frame, ends_at, placement_above, turn_rotation, with_turns_flattened,
     may_divide, step_multiplier, step_multiplier_with, sweep_direction, sweep_lean_degrees,
     value_scale_with,
     revolve_wedge,
+    coil_of, helical_bound, helical_divisor, thread_major_and_pitch, thread_of,
+    drill_point_depth, hole_of, hole_section,
     ExtrudeSection, block_wall, extrude_section, outline_wall, outline_wall_baked,
     sweep_outline_section,
 };

@@ -103,6 +103,12 @@ impl App {
     /// create verb reads (`block_edit`), as one edit. What the echo writes for an edit, and what a
     /// person types to make one.
     pub(crate) fn set_block_keys(&mut self, id: NodeId, args: &Args) -> Result<(), String> {
+        // A point on a surface takes its record's keys. A Fixed one's position is its own again.
+        if let Some(record) = self.doc.surface_points.get(&id).copied()
+            && (record.live || args.iter().any(|(k, _)| k != "at"))
+        {
+            return self.set_surface_point_keys(id, record, args);
+        }
         self.refresh_profiles();
         let node = self.part_graph().node(id).cloned().ok_or("that block is gone")?;
         let edited = {
@@ -126,6 +132,21 @@ impl App {
             };
             block_edit::node_with_keys(node, args, &cx)?
         };
+        // **A number that breaks a part that built is refused by name, here.** The panel lets a
+        // value through and says why the part will not build on the line above its blocks; a
+        // typed line has nowhere to say it but its own answer, and `replace_node` gates only an
+        // edit that rewires the graph. So `set slot.draft=-9` on a slot the draft closes said
+        // "Set slot" and the next line inherited the complaint. Asked only of a part that built
+        // before, so a part broken elsewhere does not refuse every number in it.
+        if self.compile_error().is_none() {
+            let mut graph = self.part_graph().clone();
+            if let Some(slot) = graph.node_mut(id) {
+                *slot = edited.clone();
+            }
+            if let Some(why) = self.refuse_reason(&graph) {
+                return Err(why);
+            }
+        }
         self.replace_node(id, edited);
         Ok(())
     }

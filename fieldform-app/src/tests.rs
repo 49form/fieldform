@@ -1874,12 +1874,33 @@
         // lists them by hand now, so this is what keeps its list and this one the same.
         let primitives: Vec<&str> = crate::commands::COMMANDS
             .iter()
-            .filter(|c| c.category == ["Create", "Primitives"])
+            .filter(|c| c.category == ["Create", "Primitives"] || c.category == ["Create", "Features"])
             .filter(|c| PrimitiveKind::ALL.iter().any(|k| k.command() == c.op))
             .map(|c| c.display_name)
             .collect();
         let labels: Vec<&str> = PrimitiveKind::ALL.iter().map(|k| k.label()).collect();
-        assert_eq!(primitives, labels, "Create › Primitives offers every kind, in order");
+        assert_eq!(primitives, labels, "Create › Primitives and › Features offer every kind, in order");
+    }
+
+    /// **The clearance picker shows the bolt picked, not "a bolt".** It reads the choice back from
+    /// the block's numbers, so a hole sized from the table names its row; a value two rows share
+    /// is settled by the standard's head where the hole has one; and a size off the table, or one
+    /// a variable drives, names none.
+    #[test]
+    fn the_clearance_picker_names_the_bolt_the_hole_was_sized_for() {
+        use crate::app::block_controls::picked_clearance;
+        use fieldform_scene::{Fit, HoleKind, ParamRef::Literal};
+        let simple = |d| HoleKind::Simple { diameter: Literal(d) };
+        assert_eq!(picked_clearance(&simple(9.0)), vec![(8.0, Fit::Medium)]);
+        assert_eq!(picked_clearance(&simple(21.0)), vec![(18.0, Fit::Coarse), (20.0, Fit::Fine)]);
+        assert!(picked_clearance(&simple(9.1)).is_empty());
+        let (bore, depth) = fieldform_scene::counterbore_for("M20").unwrap();
+        let bored = HoleKind::Counterbore { diameter: Literal(21.0), bore_diameter: Literal(bore), bore_depth: Literal(depth) };
+        assert_eq!(picked_clearance(&bored), vec![(20.0, Fit::Fine)], "the head settles a shared size");
+        let retyped = HoleKind::Counterbore { diameter: Literal(21.0), bore_diameter: Literal(40.0), bore_depth: Literal(5.0) };
+        assert_eq!(picked_clearance(&retyped).len(), 2, "a head typed by hand leaves the diameter's answer");
+        let driven = HoleKind::Simple { diameter: fieldform_scene::ParamRef::Named(fieldform_scene::ParamId::new()) };
+        assert!(picked_clearance(&driven).is_empty());
     }
 
     /// **Which way each arrow moves the depth.** Side one's face moves the depth as far as it
@@ -1928,7 +1949,7 @@
                 centre: fieldform_scene::Place::At([lit(9.0); 3]),
                 radius: lit(5.0),
             });
-            g.add(Node::Blend { op: BooleanOp::Union, a: b.into(), b: c.into(), fillet: Fillet::of(lit(1.0)) })
+            g.add(Node::Blend { op: BooleanOp::Union, inputs: vec![b.into(), c.into()], fillet: Fillet::of(lit(1.0)) })
         });
         assert!(drawn_where_it_is(&graph, body), "and under a blend");
         let (graph, body, _) = build(&|g, b| {
@@ -2013,6 +2034,13 @@
                 PrimitiveKind::Torus => {
                     nalgebra::Point3::new(DEFAULT_BODY_MM * 0.35, 0.0, 0.0)
                 }
+                // A coil is hollow too: the middle of its wire a quarter turn from where it
+                // starts, which is its radius round and a quarter pitch up from its foot.
+                PrimitiveKind::Coil => nalgebra::Point3::new(
+                    0.0,
+                    DEFAULT_BODY_MM * 0.4,
+                    -DEFAULT_BODY_MM * 0.4 + DEFAULT_BODY_MM * 0.2 * 0.25,
+                ),
                 _ => nalgebra::Point3::origin(),
             };
             assert!(
@@ -2056,6 +2084,35 @@
         assert_eq!(readout(2.5), "2.5");
         assert_eq!(readout(-0.00001), "0");
         assert_eq!(readout(1.23456), "1.2346");
+    }
+
+    /// **A big cage is baked at fewer cells than the rung asks for, a small one at the rung, and
+    /// no cage at more.**
+    #[test]
+    fn a_big_cage_is_baked_at_fewer_cells_than_the_rung_asks_for() {
+        // `display_quality::cell_cap`: a ceiling on every rung that steps down as the cage grows
+        // and never rises with it, so the settled bake stays near ten seconds.
+        use super::DisplayQuality;
+        let enchilada = DisplayQuality::Enchilada;
+        assert_eq!(enchilada.fineness_for(6).resolution, 192, "the starting cube keeps the rung");
+        assert_eq!(enchilada.fineness_for(1_000).resolution, 192);
+        assert_eq!(enchilada.fineness_for(1_536).resolution, 128);
+        assert_eq!(enchilada.fineness_for(6_144).resolution, 96);
+        assert_eq!(enchilada.fineness_for(24_576).resolution, 64);
+        // A rung that asks for less is not raised by being under the cap.
+        assert_eq!(DisplayQuality::Fast.fineness_for(24_576).resolution, 64);
+        assert_eq!(DisplayQuality::Fast.fineness_for(1_536).resolution, 64);
+        assert_eq!(DisplayQuality::Balanced.fineness_for(6_144).resolution, 96);
+        // Nothing else about the rung moves.
+        assert_eq!(enchilada.fineness_for(24_576).spine_degrees, enchilada.fineness().spine_degrees);
+        for rung in DisplayQuality::ALL {
+            let mut last = usize::MAX;
+            for faces in [6, 500, 1_000, 1_001, 4_000, 4_001, 12_000, 12_001, 100_000] {
+                let cells = rung.fineness_for(faces).resolution;
+                assert!(cells <= rung.cells() && cells <= last, "{rung:?} at {faces} faces: {cells}");
+                last = cells;
+            }
+        }
     }
 
     /// The three qualities are the table in `DisplayQuality`'s doc, and `Full` is what the
@@ -2359,7 +2416,7 @@
         // inside the window, so each instant replaces the blend's entry.
         let mut blended = doc.parts[&part].graph.clone();
         let fillet = Fillet { radius: lit(0.5), ..Fillet::hard() };
-        let blend = blended.add(Node::Blend { op: BooleanOp::Union, a: a.into(), b: b.into(), fillet });
+        let blend = blended.add(Node::Blend { op: BooleanOp::Union, inputs: vec![a.into(), b.into()], fillet });
         record_graph_edit(&mut stack, &mut doc, &mut gesture, part, blended.clone())
             .expect("the blend");
         assert_eq!(doc.ownership_nodes.get(&a), Some(&Ownership::Nested), "adopted");
@@ -3817,6 +3874,50 @@
     /// **A delete that would break a part that builds is refused, in the words of the check every
     /// other graph edit asks.**
     ///
+    /// **A draft the section has no room for is refused by the gate every edit asks, in the
+    /// compile's words, and the shader is not what refuses it.** A generated program is keyed on
+    /// a document's structure and never on its numbers, so it cannot tell a draft that fits from
+    /// one that crosses: the check asks both compilers, and the viewport draws nothing while the
+    /// compile refuses, which is what keeps the two paths from showing different solids. An L
+    /// with 6 mm arms, drafted 12° in over 20 mm with its corners mitred, moves its walls past
+    /// the 3 mm at which the mitred outline crosses itself; 8° does not.
+    #[test]
+    fn a_draft_that_crosses_its_section_is_refused_by_the_gate_and_not_by_the_shader() {
+        use super::App;
+        use fieldform_scene::{Corners, Curve, CurveId, Document, Graph, Node, Outline, ParamRef, Rims, Sides, Sweep};
+        use nalgebra::Point3;
+
+        let lit = ParamRef::Literal;
+        let mut doc = Document::new();
+        let curve = CurveId::new();
+        let corners = [(0.0, 0.0), (30.0, 0.0), (30.0, 6.0), (6.0, 6.0), (6.0, 30.0), (0.0, 30.0)];
+        let points = corners.iter().map(|&(x, y)| Point3::new(x, y, 0.0)).collect();
+        doc.curves.insert(curve, Curve::polyline(curve, "L", points, true).expect("closed"));
+        let drafted = |degrees: f64| {
+            let mut graph = Graph::empty();
+            graph.add(Node::Extrude {
+                outline: Outline::closed(curve),
+                sweep: Sweep::Normal,
+                start: lit(0.0),
+                height: lit(20.0),
+                draft: lit(-degrees),
+                sides: Sides::One,
+                corners: Corners::Sharp,
+                rims: Rims::hard(),
+            });
+            graph
+        };
+        let explain = |e: &fieldform_field::CompileError| e.to_string();
+        let crossing = drafted(12.0);
+        assert!(
+            fieldform_gpu::generate(&doc, &crossing).is_ok(),
+            "the shader is written from the structure, which is the same either side of the limit"
+        );
+        let why = App::refusal_of(&doc, &crossing, &explain).expect("the mitred outline crosses itself");
+        assert!(why.contains("cross itself") && why.contains("3.00 mm"), "{why}");
+        assert_eq!(App::refusal_of(&doc, &drafted(8.0), &explain), None, "8\u{b0} fits the L");
+    }
+
     /// `delete_body` committed without asking `refuse_reason` (refactor plan §3.2). Deleting the
     /// point an attract pulls toward hands the attract its surviving operand, the very body it
     /// warps, as the point to pull toward -- and an attractor that is not a point cannot be
@@ -6793,8 +6894,7 @@
             })),
             ("blend", g.add(Node::Blend {
                 op: fieldform_scene::BooleanOp::Union,
-                a: ball.into(),
-                b: ball.into(),
+                inputs: vec![ball.into(), ball.into()],
                 fillet: round.clone(),
             })),
             ("shell", g.add(Node::Shell { input: ball.into(), thickness: lit(2.0) })),

@@ -464,9 +464,15 @@ pub fn taper_ratio(document: &Document, graph: &Graph, node: NodeId) -> f64 {
     if gap_rate <= 0.0 {
         return 0.0;
     }
+    // **A blend's first join, for a blend of more than two.** Each join of the chain a list
+    // stands for would take its own operands' rate, and the first pair's is the least of those,
+    // so its ratio -- the greatest -- holds for every join; for two operands it is the one join.
     let own = graph
         .node(node)
-        .map(|n| n.inputs())
+        .map(|n| match n {
+            fieldform_scene::Node::Blend { inputs, .. } => inputs.iter().take(2).filter_map(|o| o.source()).collect(),
+            n => n.inputs(),
+        })
         .unwrap_or_default()
         .into_iter()
         .map(|input| graph_lipschitz(document, graph, input))

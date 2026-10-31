@@ -3,7 +3,7 @@
 //! A block's panel: what `node_block_controls` draws for each kind, and the drivers it wires.
 
 use crate::*;
-use fieldform_scene::Operand;
+use fieldform_scene::{Fit, HoleKind, Operand};
 
 impl App {
     /// Turns a fixed offset into a varying one, building the ramp and its driver.
@@ -686,6 +686,13 @@ impl App {
             Node::Torus { centre, major_radius, minor_radius, turn } => {
                 self.torus_controls(ui, id, centre, major_radius, minor_radius, turn)
             }
+            Node::Coil { frame, diameter, size, section, hand } => {
+                self.coil_controls(ui, id, frame, diameter, size, section, hand)
+            }
+            Node::Thread { frame, major, pitch, length, hand, clearance, designation } => {
+                self.thread_controls(ui, id, frame, major, pitch, length, hand, clearance, designation)
+            }
+            Node::Hole { ends, kind, depth, tip } => self.hole_controls(ui, id, ends, kind, depth, tip),
             Node::Mesh(mesh) => {
                 self.mesh_controls(ui, mesh)
             }
@@ -697,9 +704,10 @@ impl App {
             Node::Plane { origin, flipped, turn } => {
                 self.plane_controls(ui, id, origin, flipped, turn)
             }
-            Node::Point { at } => {
-                self.point_controls(ui, id, at)
-            }
+            Node::Point { at } => match self.doc.surface_points.get(&id).copied() {
+                Some(record) => self.surface_point_controls(ui, id, at, record),
+                None => self.point_controls(ui, id, at),
+            },
             Node::Capsule { ends, start_radius, end_radius } => {
                 self.capsule_controls(ui, id, ends, start_radius, end_radius)
             }
@@ -714,6 +722,9 @@ impl App {
             }
             Node::Mirror { input, frame, join } => {
                 self.mirror_controls(ui, id, input, frame, join)
+            }
+            Node::Scale { input, factors, frame } => {
+                self.scale_controls(ui, id, input, factors, frame)
             }
             Node::Shell { input, thickness } => {
                 self.shell_controls(ui, id, input, thickness)
@@ -1233,6 +1244,456 @@ impl App {
         }
     }
 
+    /// Right or left, as two buttons: the hand a coil or a thread winds with.
+    fn hand_row(ui: &mut egui::Ui, hand: fieldform_scene::Hand) -> fieldform_scene::Hand {
+        use fieldform_scene::Hand;
+        let mut out = hand;
+        ui.horizontal(|ui| {
+            row_label(ui, "Hand:");
+            if ui
+                .add(mode_button(hand == Hand::Right, "Right"))
+                .on_hover_text("Climbs anticlockwise looking down the axis, as an ordinary screw does")
+                .clicked()
+            {
+                out = Hand::Right;
+            }
+            if ui
+                .add(mode_button(hand == Hand::Left, "Left"))
+                .on_hover_text("The mirror image: climbs clockwise")
+                .clicked()
+            {
+                out = Hand::Left;
+            }
+        });
+        out
+    }
+
+    /// The Coil block: where it stands, how wide, two of turns, pitch and height, and its wire.
+    ///
+    /// **The size pair is a choice of which two numbers are typed**, and the third is shown
+    /// derived beneath them rather than offered as a field that could disagree -- the `Ends`
+    /// principle the design note asks for. Switching the pair keeps the numbers the coil has: the
+    /// height of a coil said by turns and pitch becomes its typed height.
+    #[allow(clippy::too_many_arguments)]
+    fn coil_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: NodeId,
+        frame: fieldform_scene::Frame,
+        diameter: ParamRef,
+        size: fieldform_scene::CoilSize,
+        section: fieldform_scene::CoilSection,
+        hand: fieldform_scene::Hand,
+    ) {
+        use fieldform_scene::{CoilSection, CoilSize};
+        ui.label("A wire wound about an axis, from the frame's origin up the axis.");
+        ui.separator();
+        // The same frame editor every aimable block gets (D9): the origin is where the first
+        // turn starts and the axis is the one it winds about.
+        let new_frame = self.frame_controls(ui, id, "Axis:", frame.clone(), None);
+        ui.separator();
+        let (new_diameter, _) = self.parametric_field(
+            ui,
+            "Diameter:",
+            diameter,
+            0.5,
+            POSITIVE_MM,
+            "Across the coil to the middle of the wire, both sides",
+        );
+
+        // Which two are typed.
+        let (turns_now, pitch_now) =
+            size.turns_and_pitch(&|r: &ParamRef| self.doc.resolve(r)).unwrap_or((1.0, 1.0));
+        let mut new_size = size.clone();
+        ui.horizontal(|ui| {
+            row_label(ui, "Size by:");
+            for (label, hover, is, make) in [
+                ("Turns, pitch", "So many turns, this far apart", matches!(size, CoilSize::TurnsPitch { .. }), 0),
+                ("Height, pitch", "This tall, with the turns this far apart", matches!(size, CoilSize::HeightPitch { .. }), 1),
+                ("Turns, height", "So many turns in this height", matches!(size, CoilSize::TurnsHeight { .. }), 2),
+            ] {
+                if ui.add(mode_button(is, label)).on_hover_text(hover).clicked() && !is {
+                    let lit = ParamRef::Literal;
+                    new_size = match make {
+                        0 => CoilSize::TurnsPitch { turns: lit(turns_now), pitch: lit(pitch_now) },
+                        1 => CoilSize::HeightPitch { height: lit(turns_now * pitch_now), pitch: lit(pitch_now) },
+                        _ => CoilSize::TurnsHeight { turns: lit(turns_now), height: lit(turns_now * pitch_now) },
+                    };
+                }
+            }
+        });
+        let turns_field = |this: &mut Self, ui: &mut egui::Ui, r: ParamRef| {
+            this.parametric_field_in(ui, "Turns:", r, 0.05, COIL_TURNS, "How many times round; need not be whole", "").0
+        };
+        let pitch_field = |this: &mut Self, ui: &mut egui::Ui, r: ParamRef| {
+            this.parametric_field(ui, "Pitch:", r, 0.1, POSITIVE_MM, "From one turn to the next, along the axis").0
+        };
+        let height_field = |this: &mut Self, ui: &mut egui::Ui, r: ParamRef| {
+            this.parametric_field(ui, "Height:", r, 0.5, POSITIVE_MM, "From the first turn's centre to the last's, along the axis").0
+        };
+        new_size = match new_size {
+            CoilSize::TurnsPitch { turns, pitch } => {
+                let turns = turns_field(self, ui, turns);
+                let pitch = pitch_field(self, ui, pitch);
+                CoilSize::TurnsPitch { turns, pitch }
+            }
+            CoilSize::HeightPitch { height, pitch } => {
+                let height = height_field(self, ui, height);
+                let pitch = pitch_field(self, ui, pitch);
+                CoilSize::HeightPitch { height, pitch }
+            }
+            CoilSize::TurnsHeight { turns, height } => {
+                let turns = turns_field(self, ui, turns);
+                let height = height_field(self, ui, height);
+                CoilSize::TurnsHeight { turns, height }
+            }
+        };
+        // The third, derived and said.
+        if let Some((n, p)) = new_size.turns_and_pitch(&|r: &ParamRef| self.doc.resolve(r)) {
+            let derived = match new_size {
+                CoilSize::TurnsPitch { .. } => format!("{:.2} mm tall", n * p),
+                CoilSize::HeightPitch { .. } => format!("{n:.2} turns"),
+                CoilSize::TurnsHeight { .. } => format!("a pitch of {p:.2} mm"),
+            };
+            ui.label(egui::RichText::new(derived).small().weak());
+        }
+        ui.separator();
+
+        let mut new_section = section.clone();
+        ui.horizontal(|ui| {
+            row_label(ui, "Wire:");
+            for (name, label) in [("circle", "Round"), ("square", "Square")] {
+                let is = section.name() == name;
+                if ui.add(mode_button(is, label)).clicked() && !is {
+                    new_section = section.with_name(name).unwrap_or_else(|| section.clone());
+                }
+            }
+        });
+        let wire_label = match new_section {
+            CoilSection::Circle { .. } => "Across:",
+            CoilSection::Square { .. } => "Side:",
+        };
+        let (wire, _) = self.parametric_field(
+            ui,
+            wire_label,
+            *new_section.wire(),
+            0.05,
+            POSITIVE_MM,
+            "The wire's section, drawn in the plane through the axis — at most the pitch, or \
+             the turns would touch",
+        );
+        *new_section.wire_mut() = wire;
+        let new_hand = Self::hand_row(ui, hand);
+        ui.label(
+            egui::RichText::new(
+                "A helix stretches material a little, so the field is a lower bound and a blend \
+                 against a coil comes out larger than the radius asked for -- allowed, and marked \
+                 approximate where the radius is typed.",
+            )
+            .small()
+            .weak(),
+        );
+        if new_frame != frame
+            || new_diameter != diameter
+            || new_size != size
+            || new_section != section
+            || new_hand != hand
+        {
+            self.replace_node(
+                id,
+                Node::Coil {
+                    frame: new_frame,
+                    diameter: new_diameter,
+                    size: new_size,
+                    section: new_section,
+                    hand: new_hand,
+                },
+            );
+        }
+    }
+
+    /// The Thread block: where it starts, its size by name or by number, how long, and its fit.
+    ///
+    /// **A name stands for its two numbers.** Picking one writes the table's major diameter and
+    /// pitch into the fields as well, so going back to Custom leaves the thread it was; while it
+    /// is named, the two are shown and not edited, since the table is what is read.
+    #[allow(clippy::too_many_arguments)]
+    fn thread_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: NodeId,
+        frame: fieldform_scene::Frame,
+        major: ParamRef,
+        pitch: ParamRef,
+        length: ParamRef,
+        hand: fieldform_scene::Hand,
+        clearance: ParamRef,
+        designation: Option<String>,
+    ) {
+        ui.label(
+            "A threaded rod. Use it as a body for an external thread, or subtract it for a \
+             tapped hole, with a clearance for the fit.",
+        );
+        ui.separator();
+        let new_frame = self.frame_controls(ui, id, "Axis:", frame.clone(), None);
+        ui.separator();
+        let (mut new_major, mut new_pitch, mut new_designation) = (major, pitch, designation.clone());
+        ui.horizontal(|ui| {
+            row_label(ui, "Size:");
+            egui::ComboBox::from_id_salt(("thread-designation", id))
+                .selected_text(designation.clone().unwrap_or_else(|| "Custom".to_string()))
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(designation.is_none(), "Custom").clicked() {
+                        new_designation = None;
+                    }
+                    for (name, d, p) in fieldform_scene::THREAD_TABLE {
+                        let is = designation.as_deref() == Some(*name);
+                        if ui.selectable_label(is, format!("{name} \u{d7} {p}")).clicked() {
+                            new_designation = Some(name.to_string());
+                            new_major = ParamRef::Literal(*d);
+                            new_pitch = ParamRef::Literal(*p);
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("Metric coarse, by name; Custom types the major diameter and pitch");
+        });
+        match &new_designation {
+            Some(name) => {
+                let (d, p) = fieldform_scene::thread_designation(name).unwrap_or((0.0, 0.0));
+                ui.label(egui::RichText::new(format!("{d} mm across the crests, a pitch of {p} mm")).small().weak());
+            }
+            None => {
+                new_major = self
+                    .parametric_field(ui, "Major:", new_major, 0.1, POSITIVE_MM, "Across the crests")
+                    .0;
+                new_pitch = self
+                    .parametric_field(ui, "Pitch:", new_pitch, 0.01, POSITIVE_MM, "From one crest to the next, along the axis")
+                    .0;
+            }
+        }
+        let (new_length, _) =
+            self.parametric_field(ui, "Length:", length, 0.5, POSITIVE_MM, "Along the axis from the frame's origin");
+        let (new_clearance, _) = self.parametric_field(
+            ui,
+            "Clearance:",
+            clearance,
+            0.01,
+            ANYWHERE_MM,
+            "Moves the whole profile out by this much: positive opens a cutter for a tapped \
+             hole, negative shrinks a rod to fit one. Nought is the basic profile.",
+        );
+        let new_hand = Self::hand_row(ui, hand);
+        ui.label(
+            egui::RichText::new(
+                "A helix stretches material a little, so the field is a lower bound and a blend \
+                 against a thread comes out larger than the radius asked for -- allowed, and \
+                 marked approximate where the radius is typed.",
+            )
+            .small()
+            .weak(),
+        );
+        if new_frame != frame
+            || new_major != major
+            || new_pitch != pitch
+            || new_length != length
+            || new_hand != hand
+            || new_clearance != clearance
+            || new_designation != designation
+        {
+            self.replace_node(
+                id,
+                Node::Thread {
+                    frame: new_frame,
+                    major: new_major,
+                    pitch: new_pitch,
+                    length: new_length,
+                    hand: new_hand,
+                    clearance: new_clearance,
+                    designation: new_designation,
+                },
+            );
+        }
+    }
+
+    /// The Hole block: where it goes in, its type and sizes, how deep, and how it ends.
+    ///
+    /// The axis is the two points the click stored, edited as any two-ended block's are (D9), so a
+    /// hole can be pointed at a line and follow it. Only the direction is read; the depth is the
+    /// hole's own number. A tapped hole names its thread from the table and is drilled to that
+    /// thread's minor diameter, which is said rather than typed.
+    fn hole_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: NodeId,
+        ends: Ends,
+        kind: fieldform_scene::HoleKind,
+        depth: fieldform_scene::HoleDepth,
+        tip: fieldform_scene::HoleTip,
+    ) {
+        use fieldform_scene::{HoleDepth, HoleKind, HoleTip};
+        ui.label("A drilled hole, cut from the body it went into. The axis runs from where it goes in, into the material.");
+        ui.separator();
+        let new_ends = self.ends_controls(ui, id, ends);
+        ui.separator();
+
+        let mut new_kind = kind.clone();
+        ui.horizontal(|ui| {
+            row_label(ui, "Type:");
+            for (name, label) in [("simple", "Simple"), ("counterbore", "Counterbore"), ("countersink", "Countersink"), ("tapped", "Tapped")] {
+                let is = kind.name() == name;
+                if ui.add(mode_button(is, label)).clicked() && !is {
+                    new_kind = kind.with_name(name).unwrap_or_else(|| kind.clone());
+                }
+            }
+        });
+        // **Clearance for a bolt, from the table**: a size and a series fill the diameter, which
+        // stays the one number the block holds, so the field below shows what was picked and can
+        // be retyped. A tapped hole is drilled for its own thread and has no clearance to pick.
+        if new_kind.diameter().is_some() {
+            let mut picked: Option<(f64, f64)> = None;
+            let matches = picked_clearance(&new_kind);
+            let shown = if matches.is_empty() {
+                "custom size".to_string()
+            } else {
+                matches.iter().map(|(d, fit)| format!("M{d} {}", fit.name())).collect::<Vec<_>>().join(" or ")
+            };
+            ui.horizontal(|ui| {
+                row_label(ui, "Clearance for:");
+                egui::ComboBox::from_id_salt(("hole-clearance", id))
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        ui.label(egui::RichText::new("Thread: fine / medium / coarse").small().weak());
+                        for (d, fine, medium, coarse) in fieldform_scene::CLEARANCE_TABLE {
+                            ui.horizontal(|ui| {
+                                ui.label(format!("M{d}"));
+                                for (fit, value) in [(Fit::Fine, fine), (Fit::Medium, medium), (Fit::Coarse, coarse)] {
+                                    let is = matches.contains(&(*d, fit));
+                                    if ui.selectable_label(is, format!("{value}")).clicked() {
+                                        picked = Some((*d, *value));
+                                    }
+                                }
+                            });
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "The clearance-hole table (ISO 273): a bolt's size, and how loose — fine, \
+                         medium or coarse. A counterbore takes a socket cap screw's head and a \
+                         countersink a countersunk screw's, from the standard's tables (IS 3406).",
+                    );
+            });
+            if let Some((thread, value)) = picked {
+                let thread = thread.to_string();
+                let lit = ParamRef::Literal;
+                match &mut new_kind {
+                    HoleKind::Simple { diameter } => *diameter = lit(value),
+                    HoleKind::Counterbore { diameter, bore_diameter, bore_depth } => {
+                        *diameter = lit(value);
+                        if let Some((bore, depth)) = fieldform_scene::counterbore_for(&thread) {
+                            *bore_diameter = lit(bore);
+                            *bore_depth = lit(depth);
+                        }
+                    }
+                    HoleKind::Countersink { diameter, sink_diameter, sink_angle } => {
+                        *diameter = lit(value);
+                        if let Some(sink) = fieldform_scene::countersink_for(&thread) {
+                            *sink_diameter = lit(sink);
+                            *sink_angle = lit(90.0);
+                        }
+                    }
+                    HoleKind::Tapped { .. } => {}
+                }
+            }
+        }
+        new_kind = match new_kind {
+            HoleKind::Simple { diameter } => HoleKind::Simple {
+                diameter: self.parametric_field(ui, "Diameter:", diameter, 0.1, POSITIVE_MM, "Across the hole").0,
+            },
+            HoleKind::Counterbore { diameter, bore_diameter, bore_depth } => HoleKind::Counterbore {
+                diameter: self.parametric_field(ui, "Diameter:", diameter, 0.1, POSITIVE_MM, "Across the hole below the bore").0,
+                bore_diameter: self.parametric_field(ui, "Bore:", bore_diameter, 0.1, POSITIVE_MM, "Across the counterbore — wider than the hole").0,
+                bore_depth: self.parametric_field(ui, "Bore depth:", bore_depth, 0.1, POSITIVE_MM, "How deep the counterbore goes from where the hole goes in").0,
+            },
+            HoleKind::Countersink { diameter, sink_diameter, sink_angle } => HoleKind::Countersink {
+                diameter: self.parametric_field(ui, "Diameter:", diameter, 0.1, POSITIVE_MM, "Across the hole below the sink").0,
+                sink_diameter: self.parametric_field(ui, "Sink:", sink_diameter, 0.1, POSITIVE_MM, "Across the countersink where the hole goes in — wider than the hole").0,
+                sink_angle: self
+                    .parametric_field_in(ui, "Angle:", sink_angle, 1.0, DEGREES, "The countersink's included angle: 90° for most metric countersunk heads", "\u{b0}")
+                    .0,
+            },
+            HoleKind::Tapped { designation, thread_depth, clearance } => {
+                let mut name = designation.clone();
+                ui.horizontal(|ui| {
+                    row_label(ui, "Thread:");
+                    egui::ComboBox::from_id_salt(("hole-thread", id)).selected_text(name.clone()).show_ui(ui, |ui| {
+                        for (n, _, p) in fieldform_scene::THREAD_TABLE {
+                            if ui.selectable_label(name == *n, format!("{n} \u{d7} {p}")).clicked() {
+                                name = n.to_string();
+                            }
+                        }
+                    });
+                });
+                if let Some((d, p)) = fieldform_scene::thread_designation(&name) {
+                    let minor = d - 2.0 * 0.625 * 0.5 * 3f64.sqrt() * p;
+                    ui.label(egui::RichText::new(format!("Drilled to {minor:.3} mm, the thread's minor diameter")).small().weak());
+                }
+                HoleKind::Tapped {
+                    designation: name,
+                    thread_depth: self
+                        .parametric_field(ui, "Thread depth:", thread_depth, 0.5, POSITIVE_MM, "How far the thread runs in — no deeper than the hole")
+                        .0,
+                    clearance: self
+                        .parametric_field(ui, "Clearance:", clearance, 0.01, ANYWHERE_MM, "Opens the thread by this much for fit; nought is the basic profile")
+                        .0,
+                }
+            }
+        };
+        ui.separator();
+
+        let through = matches!(depth, HoleDepth::Through);
+        let mut new_depth = depth.clone();
+        ui.horizontal(|ui| {
+            row_label(ui, "Depth:");
+            if ui.add(mode_button(!through, "Blind")).clicked() && through {
+                new_depth = HoleDepth::Blind(ParamRef::Literal(12.0));
+            }
+            if ui
+                .add(mode_button(through, "Through"))
+                .on_hover_text("All the way: it runs on along its axis, so it stays through when the body grows")
+                .clicked()
+            {
+                new_depth = HoleDepth::Through;
+            }
+        });
+        if let HoleDepth::Blind(d) = new_depth {
+            new_depth = HoleDepth::Blind(
+                self.parametric_field(ui, "Deep:", d, 0.5, POSITIVE_MM, "From where it goes in to where the full diameter ends, before any drill point").0,
+            );
+        }
+        let mut new_tip = tip.clone();
+        if !matches!(new_depth, HoleDepth::Through) {
+            let drilled = matches!(tip, HoleTip::Drill(_));
+            ui.horizontal(|ui| {
+                row_label(ui, "Bottom:");
+                if ui.add(mode_button(!drilled, "Flat")).clicked() {
+                    new_tip = HoleTip::Flat;
+                }
+                if ui.add(mode_button(drilled, "Drill point")).clicked() && !drilled {
+                    new_tip = HoleTip::Drill(ParamRef::Literal(118.0));
+                }
+            });
+            if let HoleTip::Drill(a) = new_tip {
+                new_tip = HoleTip::Drill(
+                    self.parametric_field_in(ui, "Point:", a, 1.0, DEGREES, "The drill's included angle: 118° for a twist drill", "\u{b0}").0,
+                );
+            }
+        }
+        if new_ends != ends || new_kind != kind || new_depth != depth || new_tip != tip {
+            self.replace_node(id, Node::Hole { ends: new_ends, kind: new_kind, depth: new_depth, tip: new_tip });
+        }
+    }
+
     /// An imported mesh: what it is and whether it closes, said rather than edited, since
     /// nothing about it is this document's to change.
     fn mesh_controls(&self, ui: &mut egui::Ui, mesh: fieldform_scene::MeshId) {
@@ -1292,6 +1753,21 @@ impl App {
             "A half-space. Drawn as a square so you can aim it, but it has no edges \
              — cut something with it and the result is finite.",
         );
+        // A plane on a surface names its point twice, as its place and its facing, and is otherwise
+        // this same block; what it is standing on is worth a line, since the rows below say "a
+        // point" and not "the side of the block".
+        if let (fieldform_scene::Place::From { node: point }, Turn::From { node: same }) = (origin, turn)
+            && point == same
+            && let Some(record) = self.doc.surface_points.get(&point)
+        {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Standing on the surface of {}, square to it. Drag the plane to slide it over the surface.",
+                    self.body_label(record.body)
+                ))
+                .weak(),
+            );
+        }
         ui.separator();
         let new_origin = self.place_fields(ui, id, "At:", origin);
         // Where it is, then which way it faces, then what it is -- the order every
@@ -1503,6 +1979,97 @@ impl App {
                 id,
                 Node::Mirror { input: picked, frame: new_frame, join: new_join },
             );
+        }
+    }
+
+    /// The Scale block: a body stretched by a factor along each of a frame's three axes.
+    ///
+    /// **Uniform or per axis is a toggle, and locked is one field.** Three factors that are one
+    /// `ParamRef` are the exact placement arithmetic and keep the body blendable; three that
+    /// differ make a lower bound, said under the fields the way a twist says it. The toggle
+    /// reads the structure (`uniform_factor`), the same question the compiler asks, so the panel
+    /// and the kernel cannot disagree about which the block is.
+    fn scale_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: NodeId,
+        input: Operand,
+        factors: [ParamRef; 3],
+        frame: fieldform_scene::Frame,
+    ) {
+        ui.label("Stretches this body by a factor along each of three axes, about a point.");
+        ui.separator();
+        let picked = self.pick_input(ui, id, input);
+        // The same frame editor every other aimable block gets (D9): its origin is the point the
+        // stretch happens about and its axis is where the third factor runs.
+        let new_frame = self.frame_controls(ui, id, "Along:", frame.clone(), None);
+        ui.separator();
+
+        let mut uniform = fieldform_scene::uniform_factor(&factors).is_some();
+        ui.horizontal(|ui| {
+            row_label(ui, "Factors:");
+            if ui
+                .add(mode_button(uniform, "Uniform"))
+                .on_hover_text(
+                    "One factor along every axis. An exact scale: the body keeps its \
+                     distance and stays blendable.",
+                )
+                .clicked()
+            {
+                uniform = true;
+            }
+            if ui
+                .add(mode_button(!uniform, "Per axis"))
+                .on_hover_text(
+                    "A factor along each of the frame's axes. The field becomes a lower bound, \
+                     so a blend against it comes out larger than the radius asked for -- \
+                     allowed, and marked approximate where the radius is typed.",
+                )
+                .clicked()
+            {
+                uniform = false;
+            }
+        });
+        let mut new = factors;
+        if uniform {
+            // Locked onto the first, so switching from three that differed moves the body to
+            // the first's size rather than inventing a fourth number.
+            let (f, _) = self.parametric_field_in(
+                ui,
+                "Scale:",
+                factors[0],
+                0.01,
+                SCALE_FACTOR,
+                "How many times its size, along every axis. Above nought; a negative scale is a \
+                 mirror, which has its own block.",
+                "\u{d7}",
+            );
+            new = [f, f, f];
+        } else {
+            for (slot, label) in new.iter_mut().zip(["X:", "Y:", "Z:"]) {
+                let (f, _) = self.parametric_field_in(
+                    ui,
+                    label,
+                    *slot,
+                    0.01,
+                    SCALE_FACTOR,
+                    "How many times its size along this axis of the frame. Above nought.",
+                    "\u{d7}",
+                );
+                *slot = f;
+            }
+            ui.label(
+                egui::RichText::new(
+                    "Three factors stretch material unevenly, so the field is a lower bound and \
+                     a blend against it comes out larger than the radius asked for -- allowed, \
+                     and marked approximate where the radius is typed.",
+                )
+                .small()
+                .weak(),
+            );
+        }
+        if new != factors || new_frame != frame || picked != input {
+            self.replace_node(id, Node::Scale { input: picked, factors: new, frame: new_frame });
         }
     }
 
@@ -1798,4 +2365,28 @@ impl App {
             self.replace_node(id, Node::Pipe { curve: chosen, radius: changed_radius });
         }
     }
+}
+
+/// The bolt a hole's *Clearance for* shows as picked, read back from the numbers the block holds
+/// rather than remembered: the diameter names its rows, and a counterbore's or countersink's head,
+/// where it is still the standard's, narrows a value two rows share. A head retyped by hand leaves
+/// the diameter's own answer; a diameter off the table, or driven by a variable, has none.
+pub(crate) fn picked_clearance(kind: &HoleKind) -> Vec<(f64, Fit)> {
+    let Some(ParamRef::Literal(diameter)) = kind.diameter().copied() else {
+        return Vec::new();
+    };
+    let matches = fieldform_scene::clearances_of(diameter);
+    let head_agrees = |thread: f64| {
+        let thread = thread.to_string();
+        match kind {
+            HoleKind::Counterbore { bore_diameter, bore_depth, .. } => fieldform_scene::counterbore_for(&thread)
+                .is_some_and(|(b, d)| *bore_diameter == ParamRef::Literal(b) && *bore_depth == ParamRef::Literal(d)),
+            HoleKind::Countersink { sink_diameter, .. } => {
+                fieldform_scene::countersink_for(&thread).is_some_and(|s| *sink_diameter == ParamRef::Literal(s))
+            }
+            _ => true,
+        }
+    };
+    let narrowed: Vec<_> = matches.iter().copied().filter(|(d, _)| head_agrees(*d)).collect();
+    if narrowed.is_empty() { matches } else { narrowed }
 }

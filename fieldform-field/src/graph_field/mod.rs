@@ -33,6 +33,10 @@ pub use blend::Rim;
 pub(crate) use blend::{blend_bound, blend_radius_rate};
 mod compile;
 mod extent;
+mod helical_nodes;
+mod hole_node;
+pub use hole_node::{drill_point_depth, hole_of, hole_section};
+pub use helical_nodes::{coil_of, helical_bound, helical_divisor, thread_major_and_pitch, thread_of};
 mod lipschitz;
 mod loft_sweep;
 mod pattern;
@@ -51,14 +55,15 @@ pub use lipschitz::{
 };
 pub use loft_sweep::{
     LoftParts, loft_built, loft_parts, loft_stretch, sweep_axes, sweep_frame, sweep_law,
-    sweep_lean, sweep_offset, sweep_reads_true, sweep_stretch, sweep_tube, wall_bakes_under,
+    sweep_cap_tube, sweep_lean, sweep_offset, sweep_reads_true, sweep_stretch, sweep_tube,
+    wall_bakes_under,
 };
 pub use pattern::{
     pattern_grid_anchor_in, pattern_origin_in, pattern_reach, pattern_reach_axes_in,
     pattern_reach_in,
 };
 pub use resolve::{
-    AXIS_FLOOR, ends_at, mirror_one_side, mirror_reaches_its_plane, placement_above,
+    AXIS_FLOOR, body_frame, ends_at, mirror_one_side, mirror_reaches_its_plane, placement_above,
     reach_across_axis, resolve_frame,
     resolve_pivot, resolve_place, resolve_place_for, rotation_from_z, sweep_direction,
     turn_rotation, with_turns_flattened,
@@ -559,6 +564,12 @@ fn demanded_of(document: &Document, graph: &Graph, node: NodeId, depth: usize) -
                 let s = resolve(scale);
                 if s.is_finite() && s.abs() > 1e-9 { above / s.abs() } else { above }
             }
+            // The same, by the least factor: the input is read at the squeezed point, and a
+            // demand of `d` out here reaches furthest into it along the least-scaled axis.
+            fieldform_scene::Node::Scale { factors, .. } => {
+                let s = factors.iter().map(|f| resolve(f)).fold(f64::INFINITY, f64::min);
+                if s.is_finite() && s > 1e-9 { above / s } else { above }
+            }
             // Everything else passes a distance through unchanged -- booleans depend only on
             // sign, and rigid motions and patterns move distances without stretching them.
             _ => above,
@@ -580,6 +591,9 @@ mod boolean_list_tests;
 
 #[cfg(test)]
 mod point_as_a_frame;
+
+#[cfg(test)]
+mod body_frame_tests;
 
 /// `blend-integrity-spec.md` §2 and §8: what a blend does to a face its operands share, and what
 /// it may claim about its own magnitude there.
@@ -627,6 +641,12 @@ mod thin_revolve_and_sweep_tests;
 #[cfg(test)]
 mod extrude_sides_tests;
 
+/// A sweep's reading held to the contract where it was caught claiming too much: a held
+/// section's end caps, the tube's cap on held sections and moving laws, and a closed polyline
+/// where its frame closes.
+#[cfg(test)]
+mod sweep_bound_tests;
+
 /// A profile solid's rims, rounded or chamfered, through the whole graph: the shapes
 /// `round-chamfer-spec.md` section 4 says they are, and that none overstates.
 #[cfg(test)]
@@ -637,8 +657,21 @@ mod rims_tests;
 #[cfg(test)]
 mod red_cage_tests;
 
+/// A drafted extrude held to the room its section has, through the whole graph: refused just
+/// past where the section closes or its mitred outline crosses itself, built just before.
+#[cfg(test)]
+mod draft_crossing_tests;
+
 /// A revolve through part of a turn, through the whole graph: the solids
 /// `extrude-revolve-options-spec.md` section 3.3 says it makes, against references written
 /// without the leaf's own arithmetic.
 #[cfg(test)]
 mod revolve_wedge_tests;
+
+/// A coil and a thread through the whole graph.
+#[cfg(test)]
+mod helical_tests;
+
+/// A hole through the whole graph.
+#[cfg(test)]
+mod hole_tests;

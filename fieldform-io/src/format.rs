@@ -343,7 +343,35 @@ pub(crate) const FORMAT_MAJOR: u32 = 3;
 /// `rims_second` on an extrude, a sweep, a loft and a revolve, how far the bevel reaches along
 /// the second face where that differs from the first, written only when it does. A 3.21 build
 /// keeps such a node rather than drawing the bevel with equal legs it was not given.
-pub(crate) const FORMAT_MINOR: u32 = 22;
+///
+/// **3.23 adds the `scale` node** (item 69): a body stretched by a factor along each of a frame's
+/// three axes, `factors` and `frame` with its `input`. A 3.22 build keeps the node rather than
+/// drawing the body unstretched.
+///
+/// **3.24 adds the `coil` and `thread` nodes** (item 67): a wire of round or square section wound
+/// about a frame's axis, and the metric basic profile carried helically and cut to a length. A
+/// 3.23 build keeps either rather than drawing nothing where a spring or a screw was.
+///
+/// **3.25 adds the `hole` node** (item 68): a drilled hole as a cutter, simple, counterbored,
+/// countersunk or tapped, blind or through, flat or drill-pointed. A 3.24 build keeps it rather
+/// than leaving the body it was cut from whole.
+///
+/// 3.26 lets an axis on a surface (`history/surface-axes.json`) name a parameter for its `u`, `v`,
+/// `length` or a seed's number, written `{"named": …}` where a literal is still the bare number
+/// it always was. A file that names none is byte-for-byte a 3.25 one; one that does is refused by
+/// a 3.25 build rather than read as nought.
+///
+/// **3.27 lets a blend take a list** (the owner, 2026-10-28), as a boolean does: a rounded
+/// subtract of a body and five holes is one block. Its first two operands are written as `a` and
+/// `b` as they always were, and a third and on in `more`, written only where there is one -- so a
+/// blend of two is byte-for-byte a 3.26 one, and a 3.26 build keeps a longer one as a block it
+/// cannot read rather than drawing its first two with the rest dropped.
+///
+/// 3.28 adds `history/surface-points.json` (`Document::surface_points`, 2026-10-30): which point
+/// blocks stand on a body's surface, and how each one's position is derived. Additive as 3.9's
+/// surface axes were: the block is an ordinary point with its position stored, so a 3.27 build
+/// shows it where it last stood and carries the entry through. Left out when there are none.
+pub(crate) const FORMAT_MINOR: u32 = 28;
 
 #[derive(thiserror::Error, Debug)]
 pub enum FormatError {

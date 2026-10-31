@@ -113,8 +113,7 @@
             let (a, b) = (ball(&mut graph, 0.0), ball(&mut graph, 30.0));
             graph.add(Node::Blend {
                 op: fieldform_scene::BooleanOp::Union,
-                a: a.into(),
-                b: b.into(),
+                inputs: vec![a.into(), b.into()],
                 fillet: Fillet { radius: lit(k), continuity: fieldform_scene::Continuity::G1, second: None },
             });
             graph
@@ -1182,8 +1181,7 @@
             let point = graph.add(Node::Point { at: [lit(out), lit(0.0), lit(0.0)] });
             graph.add(Node::Blend {
                 op: fieldform_scene::BooleanOp::Union,
-                a: ball.into(),
-                b: point.into(),
+                inputs: vec![ball.into(), point.into()],
                 fillet: Fillet { radius: lit(blend), continuity: Continuity::G1, second: None },
             });
             GraphField::compile_graph(&Document::new(), &graph, 1e-4).expect("compiles")
@@ -1508,8 +1506,7 @@
         });
         let _blended = graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: cage_node.into(),
-            b: pipe.into(),
+            inputs: vec![cage_node.into(), pipe.into()],
             fillet: Fillet { radius: ParamRef::Literal(4.0), continuity: Continuity::G1, second: None },
         });
 
@@ -1931,8 +1928,7 @@
         });
         let _blended = graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: cage_node.into(),
-            b: pipe.into(),
+            inputs: vec![cage_node.into(), pipe.into()],
             fillet: Fillet { radius: ParamRef::Literal(12.0), continuity: Continuity::G1, second: None },
         });
         let field = GraphField::compile(&doc, &part_with(graph), 0.01).unwrap();
@@ -1975,8 +1971,7 @@
         });
         graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: cage_node.into(),
-            b: pipe.into(),
+            inputs: vec![cage_node.into(), pipe.into()],
             fillet: Fillet { radius: ParamRef::Literal(4.0), continuity: Continuity::G1, second: None },
         });
 
@@ -2435,8 +2430,7 @@
         let b_node = graph.add(Node::Cage(b_id));
         let _blend = graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: a_node.into(),
-            b: b_node.into(),
+            inputs: vec![a_node.into(), b_node.into()],
             fillet: Fillet { radius: ParamRef::Literal(1.0), continuity: Continuity::G1, second: None },
         });
         let field = GraphField::compile(&doc, &part_with(graph), 0.5).unwrap();
@@ -2522,6 +2516,244 @@
 
     fn lit(v: f64) -> ParamRef {
         ParamRef::Literal(v)
+    }
+
+    // ------------------------------------------------------------------------------ scale
+
+    /// A sphere of `radius` at the origin, scaled by `factors` about `frame`, compiled.
+    fn scaled_sphere(
+        radius: f64,
+        factors: [ParamRef; 3],
+        frame: fieldform_scene::Frame,
+    ) -> Result<GraphField, CompileError> {
+        let doc = Document::new();
+        let mut graph = Graph::empty();
+        let sphere = graph.add(Node::Sphere {
+            centre: fieldform_scene::Place::At([lit(0.0); 3]),
+            radius: lit(radius),
+        });
+        graph.add(Node::Scale { input: sphere.into(), factors, frame });
+        GraphField::compile(&doc, &part_with(graph), 0.05)
+    }
+
+    /// Three factors that are one `ParamRef` are the placement's arithmetic: a sphere of 10
+    /// scaled by two *is* a sphere of 20, pointwise and not only on its surface, and the claim
+    /// is the sphere's own. About a point off the centre, the centre moves as a scale about a
+    /// point moves it.
+    #[test]
+    fn a_uniformly_scaled_sphere_is_the_sphere_of_the_scaled_radius_and_keeps_its_claim() {
+        let probes = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(25.0, 0.0, 0.0),
+            Point3::new(-3.0, 7.0, 40.0),
+            Point3::new(12.0, -12.0, 12.0),
+        ];
+        // About the origin: the same sphere, twice the size.
+        let field = scaled_sphere(10.0, [lit(2.0); 3], fieldform_scene::Frame::default()).unwrap();
+        assert_eq!(field.normalization(), Normalization::Distance, "one factor keeps the claim");
+        for p in probes {
+            let want = (p - Point3::origin()).norm() - 20.0;
+            assert!((field.distance(p) - want).abs() < 1e-9, "at {p:?}: {} for {want}", field.distance(p));
+        }
+        // About (5, 0, 0): the centre goes to (−5, 0, 0), since it was 5 to the pivot's left
+        // and is now 10. The frame's direction does not enter a uniform scale.
+        let about = fieldform_scene::Frame::At {
+            origin: [lit(5.0), lit(0.0), lit(0.0)],
+            axis: [lit(1.0), lit(1.0), lit(0.0)],
+        };
+        let field = scaled_sphere(10.0, [lit(2.0); 3], about).unwrap();
+        assert_eq!(field.normalization(), Normalization::Distance);
+        for p in probes {
+            let want = (p - Point3::new(-5.0, 0.0, 0.0)).norm() - 20.0;
+            assert!((field.distance(p) - want).abs() < 1e-9, "at {p:?}: {} for {want}", field.distance(p));
+        }
+        // One named parameter three times is uniform by structure too; two parameters that
+        // happen to be equal are not, and that is decided before any number is read.
+        let same = ParamRef::Named(fieldform_scene::ParamId::new());
+        assert!(fieldform_scene::uniform_factor(&[same, same, same]).is_some());
+        let other = ParamRef::Named(fieldform_scene::ParamId::new());
+        assert!(fieldform_scene::uniform_factor(&[same, same, other]).is_none());
+        assert!(fieldform_scene::uniform_factor(&[lit(2.0), lit(2.0), lit(2.0000001)]).is_none());
+    }
+
+    /// Factors (2, 1, 1) put the zero set on the ellipsoid with semi-axes (20, 10, 10), the
+    /// value is a bound and not a distance, and its normal is the ellipsoid's — exactly, since
+    /// the Jacobian is diagonal — against a central difference of the field itself.
+    #[test]
+    fn a_sphere_scaled_along_one_axis_has_its_zero_set_on_the_ellipsoid() {
+        let field =
+            scaled_sphere(10.0, [lit(2.0), lit(1.0), lit(1.0)], fieldform_scene::Frame::default())
+                .unwrap();
+        assert_eq!(field.normalization(), Normalization::LowerBound, "three factors are a bound");
+        assert!((field.lipschitz() - 1.0).abs() < 1e-12, "multiplied back to a rate of one");
+        for (p, inside, outside) in [
+            (Point3::new(20.0, 0.0, 0.0), Point3::new(19.0, 0.0, 0.0), Point3::new(21.0, 0.0, 0.0)),
+            (Point3::new(-20.0, 0.0, 0.0), Point3::new(-19.0, 0.0, 0.0), Point3::new(-21.0, 0.0, 0.0)),
+            (Point3::new(0.0, 10.0, 0.0), Point3::new(0.0, 9.0, 0.0), Point3::new(0.0, 11.0, 0.0)),
+            (Point3::new(0.0, 0.0, -10.0), Point3::new(0.0, 0.0, -9.0), Point3::new(0.0, 0.0, -11.0)),
+        ] {
+            assert!(field.distance(p).abs() < 1e-9, "on the ellipsoid at {p:?}: {}", field.distance(p));
+            assert!(field.distance(inside) < 0.0 && field.distance(outside) > 0.0);
+        }
+        // Along the stretched axis the value reads half the true distance — the bound the
+        // block declares — and along the others exactly the distance.
+        assert!((field.distance(Point3::new(30.0, 0.0, 0.0)) - 5.0).abs() < 1e-9);
+        assert!((field.distance(Point3::new(0.0, 15.0, 0.0)) - 5.0).abs() < 1e-9);
+        // A general point of the ellipsoid: `x²/400 + y²/100 + z²/100 = 1`.
+        let on = Point3::new(12.0, 6.0, 28f64.sqrt());
+        assert!(field.distance(on).abs() < 1e-9, "{}", field.distance(on));
+        let exact = field.normal(on).expect("a scale's normal is exact");
+        let h = 1e-5;
+        let d = |o: Vector3<f64>| field.distance(on + o);
+        let differenced = Vector3::new(
+            d(Vector3::x() * h) - d(-Vector3::x() * h),
+            d(Vector3::y() * h) - d(-Vector3::y() * h),
+            d(Vector3::z() * h) - d(-Vector3::z() * h),
+        )
+        .normalize();
+        assert!((exact - differenced).norm() < 1e-6, "{exact:?} against {differenced:?}");
+        // And it is the ellipsoid's own: the gradient of `x²/a² + y²/b² + z²/c²`.
+        let analytic = Vector3::new(12.0 / 400.0, 6.0 / 100.0, 28f64.sqrt() / 100.0).normalize();
+        assert!((exact - analytic).norm() < 1e-9, "{exact:?} against {analytic:?}");
+    }
+
+    /// A box squeezed and stretched about a turned frame never claims more room than there
+    /// is: marching from any outside point by the value never crosses the surface early. The
+    /// march-past-the-claim test every bound here has.
+    #[test]
+    fn a_scaled_body_never_overstates_the_room_before_its_surface() {
+        let doc = Document::new();
+        let mut graph = Graph::empty();
+        let boxed = graph.add(Node::Cuboid {
+            edge: Default::default(),
+            centre: fieldform_scene::Place::At([lit(4.0), lit(-2.0), lit(0.0)]),
+            size: [lit(30.0), lit(12.0), lit(20.0)],
+            turn: fieldform_scene::no_turn(),
+        });
+        graph.add(Node::Scale {
+            input: boxed.into(),
+            factors: [lit(2.0), lit(0.5), lit(1.3)],
+            frame: fieldform_scene::Frame::At {
+                origin: [lit(3.0), lit(1.0), lit(-2.0)],
+                axis: [lit(1.0), lit(1.0), lit(0.4)],
+            },
+        });
+        let field = GraphField::compile(&doc, &part_with(graph), 0.05).unwrap();
+        assert_eq!(field.normalization(), Normalization::LowerBound);
+        let dirs = [
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(0.577, 0.577, 0.577),
+            Vector3::new(-0.577, 0.577, -0.577),
+            Vector3::new(0.0, -0.707, 0.707),
+        ];
+        let mut marched = 0usize;
+        for i in 0..20 {
+            for j in 0..8 {
+                for k in 0..6 {
+                    let p = Point3::new(
+                        -45.0 + i as f64 * 4.5,
+                        -24.0 + j as f64 * 6.0,
+                        -30.0 + k as f64 * 11.0,
+                    );
+                    let claimed = field.distance(p);
+                    if claimed <= 0.0 {
+                        continue;
+                    }
+                    for d in dirs {
+                        let mut t = 0.0;
+                        while t < claimed * 1.2 {
+                            if field.distance(p + d * t) <= 0.0 {
+                                assert!(t >= claimed - 1e-6, "claimed {claimed} at {p:?} but a surface is {t} away");
+                                marched += 1;
+                                break;
+                            }
+                            t += 0.05;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(marched > 50, "the grid has to hit the body for this to test anything: {marched}");
+    }
+
+    /// Nought and a negative factor are refused by name, and a factor following a ramp is
+    /// refused as every driven parameter but an offset's is -- a varying factor would be a warp
+    /// with a bound of its own, which this block does not have.
+    #[test]
+    fn a_scale_refuses_a_factor_at_or_below_nought_and_one_a_ramp_drives() {
+        for bad in [0.0, -1.0] {
+            match scaled_sphere(10.0, [lit(1.0), lit(bad), lit(1.0)], fieldform_scene::Frame::default()) {
+                Err(CompileError::ScaleNeedsAPositiveFactor(f)) => assert_eq!(f, bad),
+                other => panic!("a factor of {bad} compiled: {:?}", other.err()),
+            }
+        }
+        let doc = Document::new();
+        let mut graph = Graph::empty();
+        let plane = graph.add(Node::Plane {
+            origin: fieldform_scene::Place::At([lit(0.0); 3]),
+            flipped: false,
+            turn: fieldform_scene::no_turn(),
+        });
+        let ramp = graph.add(Node::Ramp {
+            input: plane.into(),
+            in_min: lit(0.0),
+            in_max: lit(40.0),
+            out_min: lit(1.0),
+            out_max: lit(4.0),
+            shape: fieldform_scene::RampShape::Linear,
+        });
+        let sphere = graph.add(Node::Sphere {
+            centre: fieldform_scene::Place::At([lit(0.0); 3]),
+            radius: lit(10.0),
+        });
+        graph.add(Node::Scale {
+            input: sphere.into(),
+            factors: [ParamRef::Field(ramp), lit(1.0), lit(1.0)],
+            frame: fieldform_scene::Frame::default(),
+        });
+        match GraphField::compile(&doc, &part_with(graph), 0.05) {
+            Err(CompileError::ParameterCannotBeDriven(what)) => {
+                assert!(what.contains("scale"), "the message names the block: {what}")
+            }
+            other => panic!("a driven factor compiled: {:?}", other.err()),
+        }
+    }
+
+    /// The interval over a box contains every value the scaled field takes in it, and the
+    /// scaled sphere's extent holds its ellipsoid.
+    #[test]
+    fn a_scaled_field_s_interval_contains_every_value_the_field_takes() {
+        let field = scaled_sphere(
+            10.0,
+            [lit(2.0), lit(0.5), lit(1.0)],
+            fieldform_scene::Frame::At {
+                origin: [lit(1.0), lit(2.0), lit(0.0)],
+                axis: [lit(0.0), lit(1.0), lit(1.0)],
+            },
+        )
+        .unwrap();
+        for (lo, hi) in [
+            (Point3::new(-5.0, -5.0, -5.0), Point3::new(5.0, 5.0, 5.0)),
+            (Point3::new(10.0, -3.0, 2.0), Point3::new(30.0, 9.0, 14.0)),
+            (Point3::new(-40.0, -40.0, -40.0), Point3::new(40.0, 40.0, 40.0)),
+        ] {
+            let (ilo, ihi) = field.interval(lo, hi);
+            for i in 0..6 {
+                for j in 0..6 {
+                    for k in 0..6 {
+                        let p = Point3::new(
+                            lo.x + (hi.x - lo.x) * i as f64 / 5.0,
+                            lo.y + (hi.y - lo.y) * j as f64 / 5.0,
+                            lo.z + (hi.z - lo.z) * k as f64 / 5.0,
+                        );
+                        let v = field.distance(p);
+                        assert!(ilo - 1e-9 <= v && v <= ihi + 1e-9, "{v} outside [{ilo}, {ihi}] at {p:?}");
+                    }
+                }
+            }
+        }
     }
 
     /// A sphere of `radius` at the origin, placed by the given transform, compiled.
@@ -2637,8 +2869,7 @@
         });
         graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: grown.into(),
-            b: b.into(),
+            inputs: vec![grown.into(), b.into()],
             fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         assert!(GraphField::compile(&doc, &part_with(graph), 0.05).is_ok());
@@ -3884,8 +4115,7 @@
             });
             graph.add(Node::Blend {
                 op: BooleanOp::Union,
-                a: solid.into(),
-                b: ball.into(),
+                inputs: vec![solid.into(), ball.into()],
                 fillet: Fillet { radius: lit(radius), continuity: fieldform_scene::Continuity::G1, second: None },
             });
 
@@ -4450,8 +4680,7 @@
             });
             g.add(Node::Blend {
                 op: fieldform_scene::BooleanOp::Union,
-                a: sphere.into(),
-                b: lattice.into(),
+                inputs: vec![sphere.into(), lattice.into()],
                 fillet: Fillet { radius: lit(1.0), continuity: fieldform_scene::Continuity::G1, second: None },
             });
             g
@@ -4626,6 +4855,58 @@
                     edge: fieldform_scene::Fillet { radius: ParamRef::Literal(0.0), continuity: fieldform_scene::Continuity::Chamfer, second: None },
                 })
             }),
+            // The helical map stretches, so both helical solids are bounds.
+            ("coil", |g| {
+                g.add(Node::Coil {
+                    frame: fieldform_scene::Frame::default(),
+                    diameter: ParamRef::Literal(20.0),
+                    size: fieldform_scene::CoilSize::default(),
+                    section: fieldform_scene::CoilSection::default(),
+                    hand: fieldform_scene::Hand::Right,
+                })
+            }),
+            ("thread", |g| {
+                g.add(Node::Thread {
+                    frame: fieldform_scene::Frame::default(),
+                    major: ParamRef::Literal(8.0),
+                    pitch: ParamRef::Literal(1.25),
+                    length: ParamRef::Literal(20.0),
+                    hand: fieldform_scene::Hand::Right,
+                    clearance: ParamRef::Literal(0.0),
+                    designation: None,
+                })
+            }),
+            // A plain hole is a revolved section, exact; a tapped one carries a thread.
+            ("counterbored hole", |g| {
+                g.add(Node::Hole {
+                    ends: fieldform_scene::Ends::between(
+                        fieldform_scene::Place::at(0.0, 0.0, 0.0),
+                        fieldform_scene::Place::at(0.0, 0.0, -1.0),
+                    ),
+                    kind: fieldform_scene::HoleKind::Counterbore {
+                        diameter: ParamRef::Literal(6.6),
+                        bore_diameter: ParamRef::Literal(11.0),
+                        bore_depth: ParamRef::Literal(6.5),
+                    },
+                    depth: fieldform_scene::HoleDepth::Blind(ParamRef::Literal(20.0)),
+                    tip: fieldform_scene::HoleTip::Drill(ParamRef::Literal(118.0)),
+                })
+            }),
+            ("tapped hole", |g| {
+                g.add(Node::Hole {
+                    ends: fieldform_scene::Ends::between(
+                        fieldform_scene::Place::at(0.0, 0.0, 0.0),
+                        fieldform_scene::Place::at(0.0, 0.0, -1.0),
+                    ),
+                    kind: fieldform_scene::HoleKind::Tapped {
+                        designation: "M8".into(),
+                        thread_depth: ParamRef::Literal(12.0),
+                        clearance: ParamRef::Literal(0.0),
+                    },
+                    depth: fieldform_scene::HoleDepth::Through,
+                    tip: fieldform_scene::HoleTip::Flat,
+                })
+            }),
             ("boolean of two spheres", |g| {
                 let a = g.add(Node::Sphere {
                     centre: fieldform_scene::Place::At([ParamRef::Literal(0.0); 3]),
@@ -4744,8 +5025,7 @@
             });
             graph.add(Node::Blend {
                 op: BooleanOp::Union,
-                a: operand.into(),
-                b: other.into(),
+                inputs: vec![operand.into(), other.into()],
                 fillet: Fillet { radius: lit(0.5), continuity: fieldform_scene::Continuity::G1, second: None },
             });
             // And the blend over it is reported as approximate exactly when the operand is
@@ -4838,8 +5118,7 @@
             });
             graph.add(Node::Blend {
                 op: BooleanOp::Union,
-                a: operand.into(),
-                b: other.into(),
+                inputs: vec![operand.into(), other.into()],
                 fillet: Fillet { radius: lit(0.5), continuity: fieldform_scene::Continuity::G1, second: None },
             });
             let flagged = !approximate_blends(&doc, &graph).is_empty();
@@ -4958,8 +5237,7 @@
             let b = slot(&mut graph, wire_b, 4.0);
             let blend = graph.add(Node::Blend {
                 op: BooleanOp::Union,
-                a,
-                b,
+                inputs: vec![a, b],
                 fillet: Fillet { radius: lit(1.0), continuity: fieldform_scene::Continuity::G1, second: None },
             });
             assert!(
@@ -4979,8 +5257,7 @@
         let wired = ball(&mut graph, 0.0);
         let hard = graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: wired.into(),
-            b: fieldform_scene::Operand::empty(),
+            inputs: vec![wired.into(), fieldform_scene::Operand::empty()],
             fillet: Fillet { radius: lit(0.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         assert!(carries_true_distance(&doc, &graph, wired), "the wired operand is a distance");
@@ -5951,8 +6228,7 @@
             if blend {
                 graph.add(Node::Blend {
                     op: BooleanOp::Union,
-                    a: pulled.into(),
-                    b: ball.into(),
+                    inputs: vec![pulled.into(), ball.into()],
                     fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1, second: None },
                 });
             } else {
@@ -6129,8 +6405,7 @@
             if blend {
                 graph.add(Node::Blend {
                     op: BooleanOp::Union,
-                    a: twist.into(),
-                    b: ball.into(),
+                    inputs: vec![twist.into(), ball.into()],
                     fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1, second: None },
                 });
             } else {
@@ -6582,8 +6857,7 @@
         });
         let blend = graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: mirror.into(),
-            b: ball.into(),
+            inputs: vec![mirror.into(), ball.into()],
             fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         assert!(
@@ -6834,8 +7108,7 @@
         });
         graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: mirrored.into(),
-            b: b.into(),
+            inputs: vec![mirrored.into(), b.into()],
             fillet: Fillet { radius: lit(2.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         assert!(GraphField::compile(&doc, &part_with(graph), 0.05).is_ok());
@@ -6876,6 +7149,41 @@
                 false,
             )
             .expect("a polyline"),
+        );
+        // **A lens held flush at sixty degrees to a straight path**, which is the owner's wing: a
+        // held section's reading is slid along the path, and its caps were read in millimetres
+        // of arc, twice the distance across them at this lean. The end cap faces up the line the
+        // probes below run along, so half of them stand in front of it.
+        let probe_line = Vector3::new(4.7, 3.1, 2.3).normalize();
+        let chord = probe_line.cross(&Vector3::z()).normalize();
+        let thick = probe_line.cross(&chord);
+        let lean = 60f64.to_radians();
+        let along = probe_line * lean.cos() + chord * lean.sin();
+        let cap = Point3::new(-33.0 + 4.7 * 6.5, -21.0 + 3.1 * 6.5, -17.0 + 2.3 * 6.5);
+        let lens_start = cap - along * 50.0;
+        let lens_curve = fieldform_scene::CurveId::new();
+        doc.curves.insert(
+            lens_curve,
+            fieldform_scene::Curve::polyline(
+                lens_curve,
+                "lens",
+                (0..48)
+                    .map(|i| {
+                        let (a, h) = (16.0, 3.5);
+                        let x = if i < 24 { -a + a * i as f64 / 12.0 } else { a - a * (i - 24) as f64 / 12.0 };
+                        let y = h * (1.0 - (x / a).powi(2));
+                        lens_start + chord * x + thick * if i < 24 { -y } else { y }
+                    })
+                    .collect(),
+                true,
+            )
+            .expect("a closed lens"),
+        );
+        let lens_path = fieldform_scene::CurveId::new();
+        doc.curves.insert(
+            lens_path,
+            fieldform_scene::Curve::polyline(lens_path, "path", vec![lens_start, cap], false)
+                .expect("a line"),
         );
         let probes: Vec<Point3<f64>> = (0..14)
             .flat_map(|i| {
@@ -7000,6 +7308,17 @@
                     start: lit(0.0),
                     sides: fieldform_scene::Sides::One,
                     corners: Default::default(),
+                });
+                g
+            }),
+            ("a lens held flush at sixty degrees to its path", {
+                let mut g = Graph::empty();
+                g.add(Node::Sweep {
+                    rims: Default::default(),
+                    outline: fieldform_scene::Outline::closed(lens_curve),
+                    spine: lens_path,
+                    section: fieldform_scene::Section::Skewed,
+                    law: Default::default(),
                 });
                 g
             }),
@@ -7134,8 +7453,7 @@
         });
         graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: walled.into(),
-            b: ball.into(),
+            inputs: vec![walled.into(), ball.into()],
             fillet: Fillet { radius: lit(3.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         assert!(GraphField::compile(&doc, &part_with(graph), 0.05).is_ok());
@@ -7288,8 +7606,7 @@
         });
         graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: varying.into(),
-            b: other.into(),
+            inputs: vec![varying.into(), other.into()],
             fillet: Fillet { radius: lit(3.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         // Allowed, and reported. A driven offset's gradient is not unit, so the fillet is
@@ -7318,8 +7635,7 @@
         });
         graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: grown.into(),
-            b: other.into(),
+            inputs: vec![grown.into(), other.into()],
             fillet: Fillet { radius: lit(3.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         assert!(GraphField::compile(&doc, &part_with(graph), 0.05).is_ok());
@@ -7506,8 +7822,7 @@
         });
         graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: a.into(),
-            b: b.into(),
+            inputs: vec![a.into(), b.into()],
             fillet: Fillet { radius: ParamRef::Field(ramp), continuity, second: None },
         });
         graph
@@ -7642,8 +7957,7 @@
         });
         graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: a.into(),
-            b: b.into(),
+            inputs: vec![a.into(), b.into()],
             fillet: Fillet {
                 radius: lit(s_a),
                 continuity: fieldform_scene::Continuity::Chamfer,
@@ -7896,8 +8210,7 @@
         });
         graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: row.into(),
-            b: bar.into(),
+            inputs: vec![row.into(), bar.into()],
             fillet: Fillet { radius: lit(1.0), continuity: fieldform_scene::Continuity::G1, second: None },
         });
         assert!(GraphField::compile(&doc, &part_with(graph), 0.05).is_ok());
@@ -8099,8 +8412,7 @@
         });
         graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: placed.into(),
-            b: sphere.into(),
+            inputs: vec![placed.into(), sphere.into()],
             fillet: Fillet { radius: lit(0.3), continuity: Continuity::G1, second: None },
         });
         assert!(GraphField::compile(&doc, &part_with(graph), 0.05).is_ok());
@@ -8740,6 +9052,49 @@
         assert_eq!(flat.roots(), vec![mirror], "one body before, the same one after");
     }
 
+    /// **Two turned blocks pivoting on two points do not ask each other where they are for ever.**
+    ///
+    /// A turned plane standing on a point lowers to a placement pivoting on that point, and
+    /// composing such a placement resolves its pivot, which walks the placements above the point
+    /// — a walk that used to compose every placement it met among the seeds, each of which
+    /// resolved its own pivot, which walked again. With one such plane the walk met nothing; with
+    /// two they met each other, and the depth guard was reading a visit counter rather than the
+    /// recursion's depth, so the first scene to hold two overflowed the stack. Each point stands
+    /// where it stands, outside both placements.
+    #[test]
+    fn two_placements_pivoting_on_two_points_resolve_each_without_asking_the_other() {
+        let lit = ParamRef::Literal;
+        let doc = Document::new();
+        let numbers = |r: &ParamRef| r.resolve(&|_| None);
+        let mut graph = Graph::empty();
+        let standing: Vec<(NodeId, NodeId)> = [(0.0, 7.0), (30.0, -4.0)]
+            .into_iter()
+            .map(|(x, z)| {
+                let point = graph.add(Node::Point { at: [lit(x), lit(0.0), lit(z)] });
+                let plane = graph.add(Node::Plane {
+                    origin: fieldform_scene::Place::From { node: point },
+                    flipped: false,
+                    turn: fieldform_scene::Turn::By([lit(45.0), lit(0.0), lit(0.0)]),
+                });
+                (point, plane)
+            })
+            .collect();
+        let flat = with_turns_flattened(&doc, &graph, &numbers);
+        for (point, plane) in standing {
+            let above = placement_above(&doc, &flat, point, None, &numbers);
+            assert!(
+                (above.isometry.translation.vector.norm() < 1e-9) && above.isometry.rotation.angle() < 1e-9,
+                "a point is not inside the placement of the plane standing on it: {above}"
+            );
+            let expected = resolve_place(&doc, &graph, &fieldform_scene::Place::From { node: point }, &numbers).unwrap();
+            let (origin, facing) =
+                resolve_frame(&doc, &flat, &fieldform_scene::Frame::From { node: plane }, &numbers).expect("a frame");
+            assert!((origin - expected.coords).norm() < 1e-9, "the plane stands on its point: {origin} against {expected}");
+            let tilt = (facing * Vector3::z()).dot(&Vector3::z()).acos().to_degrees();
+            assert!((tilt - 45.0).abs() < 1e-6, "and is turned by its own angle, once: {tilt}");
+        }
+    }
+
     /// A plane is aimed at where it is drawn.
     ///
     /// Its own field reads its origin with `resolve_place_for`, which brings a place that names
@@ -9327,8 +9682,7 @@
             });
             let soft = graph.add(Node::Blend {
                 op: BooleanOp::Union,
-                a: a.into(),
-                b: b.into(),
+                inputs: vec![a.into(), b.into()],
                 fillet: Fillet { radius: ParamRef::Literal(k), continuity: fieldform_scene::Continuity::G1, second: None },
             });
             let reach = k * (1.0 - 2f64.powf(-0.5));

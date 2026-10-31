@@ -120,6 +120,12 @@ pub(crate) const UNGROUPED_CURVES_PATH: &str = "history/ungrouped-curves.json";
 /// **identically** — only the rule for *re-deriving* those points is missing — and carries the entry
 /// through byte-intact. Left out when there are none.
 pub(crate) const SURFACE_AXES_PATH: &str = "history/surface-axes.json";
+/// Points stood on a body's surface (`Document::surface_points`), by the point block each one is.
+///
+/// An entry of its own for `SURFACE_AXES_PATH`'s reason: the block is an ordinary point with its
+/// position stored, so an older build opens the file, shows the point where it last stood, and
+/// carries the entry through byte-intact. Left out when there are none.
+pub(crate) const SURFACE_POINTS_PATH: &str = "history/surface-points.json";
 /// Relations between curves (`profile-group-spec.md` §5.5), a side entry and a minor bump.
 /// A relation does not change the shape: the points it drives are already in the curves, so
 /// an older build that never reads this draws exactly the right geometry and carries the
@@ -433,6 +439,19 @@ pub fn update_archive(archive: &mut Archive, document: &Document) -> Result<(), 
     } else {
         archive.put_json(SURFACE_AXES_PATH, &surface_axes)?;
     }
+    // **Only the points whose block is still here**, for the reason above: a record stays in the
+    // document for undo to find, and a saved file has no undo to serve.
+    let surface_points: std::collections::BTreeMap<_, _> = document
+        .surface_points
+        .iter()
+        .filter(|(point, _)| document.parts.values().any(|part| part.graph.node(**point).is_some()))
+        .map(|(point, record)| (*point, *record))
+        .collect();
+    if surface_points.is_empty() {
+        archive.remove(SURFACE_POINTS_PATH);
+    } else {
+        archive.put_json(SURFACE_POINTS_PATH, &surface_points)?;
+    }
     // **A reading of the ownership above, for an older build** (spec §9.4): the curves that are
     // variables and that build's rule would not make one without this entry. This build reads the
     // ownership and reads this only for a curve the ownership does not place, and the curve row's
@@ -634,6 +653,12 @@ pub fn from_archive(archive: &Archive) -> Result<Document, FormatError> {
             SURFACE_AXES_PATH,
         )?
         .unwrap_or_default();
+    // Absent in every document written before 3.28, which reads as no point on a surface.
+    let surface_points: std::collections::BTreeMap<NodeId, fieldform_scene::SurfacePoint> = archive
+        .get_json::<std::collections::BTreeMap<NodeId, fieldform_scene::SurfacePoint>>(
+            SURFACE_POINTS_PATH,
+        )?
+        .unwrap_or_default();
     let ungrouped_curves: std::collections::BTreeSet<CurveId> = archive
         .get_json::<Vec<CurveId>>(UNGROUPED_CURVES_PATH)?
         .unwrap_or_default()
@@ -673,6 +698,7 @@ pub fn from_archive(archive: &Archive) -> Result<Document, FormatError> {
         declared_curves,
         ungrouped_curves,
         surface_axes,
+        surface_points,
         relations,
         cages,
         quad_meshes,
@@ -930,8 +956,7 @@ mod tests {
         });
         part.graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: cut.into(),
-            b: other.into(),
+            inputs: vec![cut.into(), other.into()],
             fillet: Fillet { radius: ParamRef::Named(radius), continuity: Continuity::G1, second: None },
         });
         // A surface that must not move, with a tolerance that is not the default so that a
@@ -1003,6 +1028,45 @@ mod tests {
         );
     }
 
+
+    /// **A point on a surface comes back from a save, and a document with none writes no entry**,
+    /// so it is byte-for-byte what it was. A record whose block has gone stays in the document for
+    /// undo and is dropped on the way out, which is `SURFACE_AXES_PATH`'s rule.
+    #[test]
+    fn a_surface_point_survives_a_save_and_a_document_with_none_writes_no_entry() {
+        use fieldform_scene::{Facing, Guide, GuideFrame, Node, ParamRef, SurfacePoint};
+        let mut doc = populated();
+        assert!(
+            to_archive(&doc).unwrap().get_json::<serde_json::Value>(SURFACE_POINTS_PATH).unwrap().is_none(),
+            "no point on a surface, so nothing written",
+        );
+        let part = *doc.parts.keys().next().expect("the fixture holds a part");
+        let point = doc.parts.get_mut(&part).unwrap().graph.add(Node::Point { at: [ParamRef::Literal(0.0); 3] });
+        let record = SurfacePoint {
+            body: point,
+            frame: GuideFrame::Body,
+            guide: Guide::Ray {
+                along: fieldform_scene::Axis::Z,
+                flipped: false,
+                u: ParamRef::Literal(5.0),
+                v: ParamRef::Literal(-2.5),
+                facing: Facing::Front,
+            },
+            live: true,
+            solved: None,
+        };
+        doc.surface_points.insert(point, record);
+        assert_eq!(round_trip(&doc).surface_points.get(&point), Some(&record), "the record came back whole");
+
+        let mut orphaned = round_trip(&doc);
+        orphaned.parts.get_mut(&part).unwrap().graph.remove(point);
+        assert!(!orphaned.surface_points.is_empty(), "the record outlives the block in the document");
+        assert!(
+            to_archive(&orphaned).unwrap().get_json::<serde_json::Value>(SURFACE_POINTS_PATH).unwrap().is_none(),
+            "and not in a file",
+        );
+    }
+
     /// **A surface axis survives a save, and a document with none writes no entry** — the same
     /// bargain as a declared curve, which is what makes 3.9 additive: a document nobody has stood an
     /// axis on a surface in is byte for byte what 3.7 wrote.
@@ -1021,12 +1085,13 @@ mod tests {
             body: NodeId::from_raw(7),
             direction: Axis::Y,
             flipped: true,
-            u: 0.25,
-            v: 0.75,
-            length: 12.5,
+            u: fieldform_scene::ParamRef::Literal(0.25),
+            v: fieldform_scene::ParamRef::Literal(0.75),
+            // Named, so the round trip covers 3.26's references as well as the bare numbers.
+            length: fieldform_scene::ParamRef::Named(doc.add_parameter("reach", 12.5)),
             // Seeded, so the round trip covers the field 3.10 added rather than only the ones it
             // already had. An axis without one is the other half and is what every 3.9 file is.
-            seed: Some([0.1, 0.2, 0.3]),
+            seed: Some([0.1, 0.2, 0.3].map(fieldform_scene::ParamRef::Literal)),
         };
         doc.surface_axes.insert(id, axis);
         let back = round_trip(&doc);

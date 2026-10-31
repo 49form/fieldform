@@ -194,8 +194,7 @@ fn blended_to(radius: f64, out: f64) -> GraphField {
     let point = graph.add(Node::Point { at: [lit(out), lit(0.0), lit(0.0)] });
     graph.add(Node::Blend {
         op: BooleanOp::Union,
-        a: ball.into(),
-        b: point.into(),
+        inputs: vec![ball.into(), point.into()],
         // The only continuity there is, so "set it to G1" is the same instruction as "make it a
         // blend" — which is what the panel now does when a point is picked.
         fillet: fieldform_scene::Fillet { radius: lit(radius), continuity: Continuity::G1, second: None },

@@ -580,8 +580,7 @@
         let pipe = g.add(Node::Pipe { curve, radius: ParamRef::Named(ParamId::new()) });
         let blend = g.add(Node::Blend {
             op: BooleanOp::Union,
-            a: cage.into(),
-            b: pipe.into(),
+            inputs: vec![cage.into(), pipe.into()],
             fillet: Fillet { radius: ParamRef::Literal(3.0), continuity: Continuity::G1, second: None },
         });
 
@@ -2283,8 +2282,7 @@
         });
         let blend = g.add(Node::Blend {
             op: BooleanOp::Union,
-            a: cage.into(),
-            b: sphere.into(),
+            inputs: vec![cage.into(), sphere.into()],
             fillet: Fillet { radius: ParamRef::Literal(1.0), continuity: Continuity::G1, second: None },
         });
         assert_eq!(g.roots(), vec![blend], "the blend is the only body to begin with");
@@ -2300,8 +2298,8 @@
 
         // Still one body: the blend, now blending against the placed sphere.
         assert_eq!(g.roots(), vec![blend]);
-        let Some(Node::Blend { b, .. }) = g.node(blend) else { panic!("the blend went missing") };
-        assert_eq!(*b, placed.into(), "the blend should consume the placement, not the bare sphere");
+        let Some(Node::Blend { inputs, .. }) = g.node(blend) else { panic!("the blend went missing") };
+        assert_eq!(inputs[1], placed.into(), "the blend should consume the placement, not the bare sphere");
         // And the placement still holds the sphere, rather than having been redirected to
         // itself.
         let Some(Node::Transform { input, .. }) = g.node(placed) else { panic!("no placement") };
@@ -2546,6 +2544,42 @@
         assert!(graph.node(grown).is_none(), "an offset of nothing should not remain");
         assert!(graph.node(shelled).is_none(), "nor a shell of that");
         assert!(graph.node(bystander).is_some(), "an unrelated body was taken too");
+    }
+
+    /// **Deleting a placement hands its consumer what it placed**, in a pair or in a longer list,
+    /// where deleting a leaf hands over the operand beside it: a subtract that lost the
+    /// placement around its cutter still subtracts the cutter, never the body from itself.
+    #[test]
+    fn deleting_a_wrapper_hands_its_consumer_what_it_wrapped() {
+        let lit = ParamRef::Literal;
+        let ball = |g: &mut Graph, x: f64| g.add(Node::Sphere { centre: Place::At([lit(x), lit(0.0), lit(0.0)]), radius: lit(5.0) });
+        let placed = |g: &mut Graph, input: NodeId| {
+            g.add(Node::Transform {
+                input: input.into(),
+                translation: [lit(0.0), lit(0.0), lit(3.0)],
+                rotation: [lit(0.0); 3],
+                scale: lit(1.0),
+                about: Place::origin(),
+            })
+        };
+        for count in [2, 3] {
+            let mut graph = Graph::empty();
+            let body = ball(&mut graph, 0.0);
+            let cutter = ball(&mut graph, 4.0);
+            let wrapper = placed(&mut graph, cutter);
+            let mut inputs = vec![body.into(), wrapper.into()];
+            if count == 3 {
+                let other = ball(&mut graph, -4.0);
+                inputs.push(other.into());
+            }
+            let cut = graph.add(Node::Boolean { op: BooleanOp::Difference, inputs });
+            graph.remove_cascading(wrapper);
+            let Some(Node::Boolean { inputs, .. }) = graph.node(cut) else { panic!("the subtract stays") };
+            let read: Vec<_> = inputs.iter().filter_map(|o| o.source()).collect();
+            assert_eq!(read.len(), count, "no slot lost");
+            assert_eq!(read[..2], [body, cutter], "the cutter in the placement's place, with {count}");
+            assert_eq!(graph.roots(), vec![cut]);
+        }
     }
 
     /// A ball above the origin, and a plane through it for a block to be aimed by.
@@ -3228,11 +3262,11 @@
             "output": "0000000000000002"
         }"#;
         let g: Graph = serde_json::from_str(emptied).expect("an empty slot is a state, not damage");
-        let Some(Node::Blend { a, b, .. }) = g.node(NodeId::from_raw(2)) else {
+        let Some(Node::Blend { inputs, .. }) = g.node(NodeId::from_raw(2)) else {
             panic!("still a blend");
         };
-        assert_eq!(a.source(), Some(NodeId::from_raw(1)), "the slot that was named is filled");
-        assert!(b.is_empty(), "and the one that was absent is empty");
+        assert_eq!(inputs[0].source(), Some(NodeId::from_raw(1)), "the slot that was named is filled");
+        assert!(inputs[1].is_empty(), "and the one that was absent is empty");
     }
 
     /// **A block above an empty slot cannot be evaluated either**, so it is incomplete too.
@@ -3348,8 +3382,7 @@
         let b = g.add(Node::Cage(cb));
         let blend = g.add(Node::Blend {
             op: BooleanOp::Union,
-            a: a.into(),
-            b: b.into(),
+            inputs: vec![a.into(), b.into()],
             fillet: Fillet { radius: ParamRef::Literal(5.0), continuity: Continuity::G1, second: None },
         });
 
@@ -3368,8 +3401,7 @@
         let b = g.add(Node::Cage(CageId::new()));
         let blend = g.add(Node::Blend {
             op: BooleanOp::Union,
-            a: a.into(),
-            b: b.into(),
+            inputs: vec![a.into(), b.into()],
             fillet: Fillet { radius: ParamRef::Literal(1.0), continuity: Continuity::G1, second: None },
         });
         // Point a node at its own consumer.
@@ -3377,8 +3409,7 @@
             a,
             Node::Blend {
                 op: BooleanOp::Union,
-                a: blend.into(),
-                b: b.into(),
+                inputs: vec![blend.into(), b.into()],
                 fillet: Fillet { radius: ParamRef::Literal(1.0), continuity: Continuity::G1, second: None },
             },
         );

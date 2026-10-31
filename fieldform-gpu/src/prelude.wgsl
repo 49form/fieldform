@@ -463,6 +463,14 @@ fn to_local_about(
     return ((p - translation - pivot) * euler_rotation(euler_degrees)) / scale + pivot;
 }
 
+// The least of a scale's three factors, which its value is multiplied by: the point was divided
+// by all three, and the least is the one that brings the rate back to one along every axis
+// without overstating along any. Taken here rather than uploaded so a dragged factor is three
+// buffer writes and nothing else.
+fn scale_least(factors: vec3<f32>) -> f32 {
+    return min(factors.x, min(factors.y, factors.z));
+}
+
 // The way back out of that space, for anything that has to do work in a frame and hand the
 // result to something reading world coordinates.
 fn from_local(
@@ -1963,6 +1971,358 @@ fn torus_normal(p: vec3<f32>, centre: vec3<f32>, major: f32, minor: f32) -> vec3
     return radial_direction(q) * (ring / len) + vec3<f32>(0.0, 0.0, q.z / len);
 }
 
+// ---- The helical coordinate: a coil and a thread, matching `helical.rs` in fieldform-field.
+//
+// A point about `+Z` is read as its radius and its height less the pitch times the turn, and a
+// section drawn in the axial half-plane is read there. The divisor is the map's global stretch
+// beyond the handover radius `¾·r_min`, and inside it the solids read the step out to `r_min`
+// alone, joined continuously -- see `about_the_core` on the CPU, which this is line for line.
+// Every number is a slot, the divisor is worked out here from them, and so a drag of any of
+// them is a buffer write.
+
+fn helix_stretch(pitch: f32, r_min: f32) -> f32 {
+    let rc = 0.75 * r_min;
+    return sqrt(1.0 + pitch * pitch / (16.0 * rc * rc));
+}
+
+fn helix_about_core(r: f32, r_min: f32, hollow: bool, helical: f32) -> f32 {
+    let rc = 0.75 * r_min;
+    let radial = r_min - r;
+    if (r < rc) {
+        return select(-radial, radial, hollow);
+    }
+    let ramp = r + r_min - 2.0 * rc;
+    if (hollow) {
+        if (r < r_min) {
+            return max(radial, min(helical, ramp));
+        }
+        return min(helical, ramp);
+    }
+    if (r < r_min) {
+        return min(-radial, max(helical, -ramp));
+    }
+    return max(helical, -ramp);
+}
+
+// A wire's section in the axial half-plane, `(dr, dz)` off its centre: a circle of radius
+// `half`, or a square of half-side `half` where `square` is one.
+fn coil_section_distance(dr: f32, dz: f32, half: f32, square: f32) -> f32 {
+    if (square > 0.5) {
+        let qx = abs(dr) - half;
+        let qy = abs(dz) - half;
+        return length(vec2<f32>(max(qx, 0.0), max(qy, 0.0))) + min(max(qx, qy), 0.0);
+    }
+    return length(vec2<f32>(dr, dz)) - half;
+}
+
+// The three copies about the nearest live turn, each bounded by the end face it is near --
+// `Coil::outer`.
+fn coil_outer(
+    r: f32, phi: f32, z: f32, big_r: f32, p: f32, n: f32, half: f32, square: f32, s: f32,
+) -> f32 {
+    let turn = 6.283185307179586;
+    let quarter = 1.5707963267948966;
+    let along = phi / turn;
+    let k_hi = floor(n + 0.5 - along);
+    let k_lo = ceil(-0.5 - along);
+    let k0 = clamp(round(z / p - along), k_lo, k_hi);
+    var best = 3.0e38;
+    for (var i = -1; i <= 1; i = i + 1) {
+        let k = k0 + f32(i);
+        if (k < k_lo || k > k_hi) {
+            continue;
+        }
+        let tau = k + along;
+        var d = coil_section_distance(r - big_r, z - p * tau, half, square) / s;
+        if (d < 0.0 && tau >= 0.0 && tau <= n) {
+            let to_start = r * sin(min(turn * tau, quarter));
+            let to_end = r * sin(min(turn * (n - tau), quarter));
+            d = max(max(d, -to_start), -to_end);
+        }
+        var past = false;
+        var psi = 0.0;
+        var z_end = 0.0;
+        if (tau > n) {
+            past = true;
+            psi = turn * (tau - n);
+            z_end = p * n;
+        } else if (tau < 0.0) {
+            past = true;
+            psi = -turn * tau;
+        }
+        if (past) {
+            d = max(d, r * sin(min(psi, quarter)));
+            let landed = coil_section_distance(r * cos(psi) - big_r, z - z_end, half, square);
+            d = min(d, cap_distance(landed, r * sin(psi)));
+        }
+        best = min(best, d);
+    }
+    return best;
+}
+
+// `size_a` and `size_b` are the two numbers the size pair holds, read by `size_kind`: 0 turns
+// and pitch, 1 height and pitch, 2 turns and height -- `CoilSize::turns_and_pitch`.
+fn coil_distance(
+    p: vec3<f32>, diameter: f32, size_a: f32, size_b: f32, size_kind: f32, wire: f32,
+    square: f32, hand: f32,
+) -> f32 {
+    var n = size_a;
+    var pitch = size_b;
+    if (size_kind > 0.5 && size_kind < 1.5) {
+        n = size_a / size_b;
+    } else if (size_kind > 1.5) {
+        pitch = size_b / size_a;
+    }
+    let q = vec3<f32>(p.x, p.y * hand, p.z);
+    let r = length(q.xy);
+    let phi = atan2(q.y, q.x);
+    let big_r = diameter * 0.5;
+    let half = wire * 0.5;
+    let r_min = big_r - half;
+    let s = helix_stretch(pitch, r_min);
+    let near = helix_about_core(r, r_min, true, coil_outer(r, phi, q.z, big_r, pitch, n, half, square, s));
+    return max(max(near, -half - q.z), q.z - (pitch * n + half));
+}
+
+// A central difference, as the design note asks: the reading is a `min` over copies and caps,
+// and differencing it is what the CPU's fallback normal does too.
+fn coil_normal(
+    p: vec3<f32>, diameter: f32, size_a: f32, size_b: f32, size_kind: f32, wire: f32,
+    square: f32, hand: f32,
+) -> vec3<f32> {
+    let h = 2e-3;
+    let g = vec3<f32>(
+        coil_distance(p + vec3<f32>(h, 0.0, 0.0), diameter, size_a, size_b, size_kind, wire, square, hand)
+            - coil_distance(p - vec3<f32>(h, 0.0, 0.0), diameter, size_a, size_b, size_kind, wire, square, hand),
+        coil_distance(p + vec3<f32>(0.0, h, 0.0), diameter, size_a, size_b, size_kind, wire, square, hand)
+            - coil_distance(p - vec3<f32>(0.0, h, 0.0), diameter, size_a, size_b, size_kind, wire, square, hand),
+        coil_distance(p + vec3<f32>(0.0, 0.0, h), diameter, size_a, size_b, size_kind, wire, square, hand)
+            - coil_distance(p - vec3<f32>(0.0, 0.0, h), diameter, size_a, size_b, size_kind, wire, square, hand),
+    );
+    let len = length(g);
+    if (len < 1e-12) {
+        return vec3<f32>(0.0, 0.0, 1.0);
+    }
+    return g / len;
+}
+
+// The basic metric profile's radius at `z` and its distance, one period from the crest's start
+// at `-pitch/16` -- `ThreadProfile`. Wrapped with `floor` rather than `%`, which disagrees with
+// `rem_euclid` on a negative operand.
+fn thread_wrap(zeta: f32, pitch: f32) -> f32 {
+    let start = -pitch / 16.0;
+    let x = zeta - start;
+    return x - pitch * floor(x / pitch) + start;
+}
+
+fn thread_radius_at(z: f32, hi: f32, lo: f32, pitch: f32) -> f32 {
+    let a = pitch / 16.0;
+    if (z <= a) {
+        return hi;
+    }
+    if (z <= 6.0 * a) {
+        return hi + (lo - hi) * (z - a) / (5.0 * a);
+    }
+    if (z <= 10.0 * a) {
+        return lo;
+    }
+    if (z <= 15.0 * a) {
+        return lo + (hi - lo) * (z - 10.0 * a) / (5.0 * a);
+    }
+    return hi;
+}
+
+fn thread_segment(x: f32, y: f32, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let d = b - a;
+    let t = clamp(dot(vec2<f32>(x, y) - a, d) / dot(d, d), 0.0, 1.0);
+    return length(vec2<f32>(x, y) - (a + t * d));
+}
+
+fn thread_profile_distance(r: f32, zeta: f32, hi: f32, pitch: f32) -> f32 {
+    let lo = hi - 0.625 * 0.8660254037844386 * pitch;
+    let a = pitch / 16.0;
+    let z = thread_wrap(zeta, pitch);
+    var best = 3.0e38;
+    for (var i = -1; i <= 1; i = i + 1) {
+        let o = f32(i) * pitch;
+        best = min(best, thread_segment(z, r, vec2<f32>(-a + o, hi), vec2<f32>(a + o, hi)));
+        best = min(best, thread_segment(z, r, vec2<f32>(a + o, hi), vec2<f32>(6.0 * a + o, lo)));
+        best = min(best, thread_segment(z, r, vec2<f32>(6.0 * a + o, lo), vec2<f32>(10.0 * a + o, lo)));
+        best = min(best, thread_segment(z, r, vec2<f32>(10.0 * a + o, lo), vec2<f32>(15.0 * a + o, hi)));
+    }
+    return select(-best, best, r > thread_radius_at(z, hi, lo, pitch));
+}
+
+fn thread_distance(
+    p: vec3<f32>, major: f32, pitch: f32, len: f32, clearance: f32, hand: f32,
+) -> f32 {
+    let q = vec3<f32>(p.x, p.y * hand, p.z);
+    let r = length(q.xy);
+    let phi = atan2(q.y, q.x);
+    let zeta = q.z - pitch * phi / 6.283185307179586;
+    let hi = major * 0.5;
+    let r_min = hi - 0.625 * 0.8660254037844386 * pitch + clearance;
+    let s = helix_stretch(pitch, r_min);
+    let flanks = (thread_profile_distance(r, zeta, hi, pitch) - clearance) / s;
+    let helical = helix_about_core(r, r_min, false, flanks);
+    return max(helical, max(-q.z, q.z - len));
+}
+
+fn thread_normal(
+    p: vec3<f32>, major: f32, pitch: f32, len: f32, clearance: f32, hand: f32,
+) -> vec3<f32> {
+    let h = 2e-3;
+    let g = vec3<f32>(
+        thread_distance(p + vec3<f32>(h, 0.0, 0.0), major, pitch, len, clearance, hand)
+            - thread_distance(p - vec3<f32>(h, 0.0, 0.0), major, pitch, len, clearance, hand),
+        thread_distance(p + vec3<f32>(0.0, h, 0.0), major, pitch, len, clearance, hand)
+            - thread_distance(p - vec3<f32>(0.0, h, 0.0), major, pitch, len, clearance, hand),
+        thread_distance(p + vec3<f32>(0.0, 0.0, h), major, pitch, len, clearance, hand)
+            - thread_distance(p - vec3<f32>(0.0, 0.0, h), major, pitch, len, clearance, hand),
+    );
+    let l = length(g);
+    if (l < 1e-12) {
+        return vec3<f32>(0.0, 0.0, 1.0);
+    }
+    return g / l;
+}
+
+// ---- A drilled hole, matching `hole.rs` and `hole_node.rs` in fieldform-field.
+//
+// The section is worked out here from the slots -- the type, its sizes, the depth (below nought
+// for through), the drill's angle (nought for flat), a tapped hole's thread -- so every number is
+// a buffer write. Read in the hole's own frame: along the axis from the entry, and across it in
+// the pair `hole_basis` makes, which a tapped hole's thread is read in.
+
+fn hole_segment(r: f32, z: f32, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let d = b - a;
+    let len2 = dot(d, d);
+    var t = 0.0;
+    if (len2 > 0.0) {
+        t = clamp(dot(vec2<f32>(r, z) - a, d) / len2, 0.0, 1.0);
+    }
+    return length(vec2<f32>(r, z) - (a + t * d));
+}
+
+fn hole_distance(
+    p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, kind: f32, diameter: f32, aux1: f32, aux2: f32,
+    depth: f32, tip_angle: f32, t_major: f32, t_pitch: f32, t_depth: f32, t_clear: f32,
+) -> f32 {
+    let axis = normalize(b - a);
+    let helper = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(axis.z) < 0.9);
+    let e1 = normalize(cross(axis, helper));
+    let e2 = cross(axis, e1);
+    let q = p - a;
+    let l = vec3<f32>(dot(q, e1), dot(q, e2), dot(q, axis));
+    let r = length(l.xy);
+    let z = l.z;
+    let deg = 0.017453292519943295;
+
+    // The wall from the mouth down, from index one; index nought is the lead-in's top.
+    var w: array<vec2<f32>, 6>;
+    var n = 2u;
+    var radius = diameter * 0.5;
+    if (kind < 0.5) {
+        w[1] = vec2<f32>(radius, 0.0);
+    } else if (kind < 1.5) {
+        let rb = aux1 * 0.5;
+        w[1] = vec2<f32>(rb, 0.0);
+        w[2] = vec2<f32>(rb, aux2);
+        w[3] = vec2<f32>(radius, aux2);
+        n = 4u;
+    } else if (kind < 2.5) {
+        let rs = aux1 * 0.5;
+        w[1] = vec2<f32>(rs, 0.0);
+        w[2] = vec2<f32>(radius, (rs - radius) / tan(aux2 * deg * 0.5));
+        n = 3u;
+    } else {
+        radius = t_major * 0.5 - 0.625 * 0.8660254037844386 * t_pitch + t_clear;
+        w[1] = vec2<f32>(radius, 0.0);
+    }
+    let lead = max(w[1].x, 1.0);
+    w[0] = vec2<f32>(w[1].x, -lead);
+    let blind = depth >= 0.0;
+    var tip_z = 0.0;
+    if (blind) {
+        w[n] = vec2<f32>(radius, depth);
+        n = n + 1u;
+        tip_z = depth;
+        if (tip_angle > 0.0) {
+            tip_z = depth + radius / tan(tip_angle * deg * 0.5);
+        }
+    }
+
+    var best = hole_segment(r, z, vec2<f32>(0.0, w[0].y), w[0]);
+    for (var i = 0u; i + 1u < n; i = i + 1u) {
+        best = min(best, hole_segment(r, z, w[i], w[i + 1u]));
+    }
+    let last = w[n - 1u];
+    if (blind) {
+        best = min(best, hole_segment(r, z, last, vec2<f32>(0.0, tip_z)));
+    } else if (z >= last.y) {
+        best = min(best, abs(r - last.x));
+    } else {
+        best = min(best, length(vec2<f32>(r - last.x, z - last.y)));
+    }
+
+    // Inside: under the wall's radius at this depth, taken down the wall and the point, with a
+    // horizontal step passed over -- `HoleSection::radius_at`.
+    var inside = false;
+    if (z >= w[0].y) {
+        var found = false;
+        for (var i = 0u; i + 1u < n; i = i + 1u) {
+            let s = w[i];
+            let e = w[i + 1u];
+            if (!found && e.y > s.y && z <= e.y) {
+                inside = r <= s.x + (e.x - s.x) * (z - s.y) / (e.y - s.y);
+                found = true;
+            }
+        }
+        if (!found) {
+            if (blind) {
+                if (tip_z > last.y && z <= tip_z) {
+                    inside = r <= last.x * (tip_z - z) / (tip_z - last.y);
+                }
+            } else {
+                inside = r <= last.x;
+            }
+        }
+    }
+    var drilled = best;
+    if (inside) {
+        drilled = -best;
+    }
+    if (kind > 2.5) {
+        // Started where the lead-in starts and as much longer, as on the CPU.
+        let thread = thread_distance(vec3<f32>(l.x, l.y, z + lead), t_major, t_pitch, t_depth + lead, t_clear, 1.0);
+        return min(drilled, thread);
+    }
+    return drilled;
+}
+
+fn hole_normal(
+    p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, kind: f32, diameter: f32, aux1: f32, aux2: f32,
+    depth: f32, tip_angle: f32, t_major: f32, t_pitch: f32, t_depth: f32, t_clear: f32,
+) -> vec3<f32> {
+    let h = 2e-3;
+    let x = vec3<f32>(h, 0.0, 0.0);
+    let y = vec3<f32>(0.0, h, 0.0);
+    let zz = vec3<f32>(0.0, 0.0, h);
+    let g = vec3<f32>(
+        hole_distance(p + x, a, b, kind, diameter, aux1, aux2, depth, tip_angle, t_major, t_pitch, t_depth, t_clear)
+            - hole_distance(p - x, a, b, kind, diameter, aux1, aux2, depth, tip_angle, t_major, t_pitch, t_depth, t_clear),
+        hole_distance(p + y, a, b, kind, diameter, aux1, aux2, depth, tip_angle, t_major, t_pitch, t_depth, t_clear)
+            - hole_distance(p - y, a, b, kind, diameter, aux1, aux2, depth, tip_angle, t_major, t_pitch, t_depth, t_clear),
+        hole_distance(p + zz, a, b, kind, diameter, aux1, aux2, depth, tip_angle, t_major, t_pitch, t_depth, t_clear)
+            - hole_distance(p - zz, a, b, kind, diameter, aux1, aux2, depth, tip_angle, t_major, t_pitch, t_depth, t_clear),
+    );
+    let len = length(g);
+    if (len < 1e-12) {
+        return vec3<f32>(0.0, 0.0, 1.0);
+    }
+    return g / len;
+}
+
 fn capsule_distance(
     p: vec3<f32>,
     start: vec3<f32>,
@@ -2399,9 +2759,22 @@ fn extrude_sharp_rim_distance(
         grown.y,
         grown.w,
         dir,
-        grown.z,
+        grown.z * mitre_rate(index, miters),
         rim
     );
+}
+
+// How fast a mitred section's boundary moves per millimetre its walls move: the longest mitre
+// vector, which `fieldform_field::outline_miters` puts after the mitres themselves --
+// `Footprint::mitre_rate`. A corner moves `|m|` times as fast as a wall, so a sharp draft's
+// divisor is multiplied by it; one where nothing was put there, which is the walls' rate.
+fn mitre_rate(index: u32, miters: u32) -> f32 {
+    let span = curve_spans[index];
+    let mspan = curve_spans[miters];
+    if (mspan.count > span.count) {
+        return max(curve_points[mspan.start + span.count].x, 1.0);
+    }
+    return 1.0;
 }
 
 // The same for a wall round a closed loop: the loop's mitred reading, folded about the band.
@@ -3584,11 +3957,27 @@ fn nearest_segment(span: CurveSpan, p: vec3<f32>) -> SegmentHit {
     return best;
 }
 
+// The frame's tangent at sample `i`: `fieldform_field::SpineFrame`'s `sample_tangents`, the mean
+// of the two segments meeting there. **A closed spine wraps**: its first and last samples are the
+// same point, and the joint there is between the last segment and the first, as every other
+// joint is between its two -- read as an open path's ends, the frame turned the whole closing
+// corner at once, and a square round a hexagon claimed 13 mm too much room there.
 fn sweep_tangent(span: CurveSpan, i: u32) -> vec3<f32> {
+    // Asked only at the two ends, so a sample between them reads what it always read.
+    var closes = false;
+    if i == 0u || i + 1u >= span.count {
+        closes = span.count > 2u
+            && all(curve_points[span.start].xyz == curve_points[span.start + span.count - 1u].xyz);
+    }
     var before = vec3<f32>(0.0);
     var has_before = false;
-    if i > 0u {
-        let d = curve_points[span.start + i].xyz - curve_points[span.start + i - 1u].xyz;
+    if i > 0u || closes {
+        // At the start of a closed spine, the segment that arrives at its end.
+        var at = i;
+        if i == 0u {
+            at = span.count - 1u;
+        }
+        let d = curve_points[span.start + at].xyz - curve_points[span.start + at - 1u].xyz;
         let l = length(d);
         if l > 1e-12 {
             before = d / l;
@@ -3597,8 +3986,13 @@ fn sweep_tangent(span: CurveSpan, i: u32) -> vec3<f32> {
     }
     var after = vec3<f32>(0.0);
     var has_after = false;
-    if i + 1u < span.count {
-        let d = curve_points[span.start + i + 1u].xyz - curve_points[span.start + i].xyz;
+    if i + 1u < span.count || closes {
+        // At the end of a closed spine, the segment that leaves its start.
+        var at = i;
+        if i + 1u >= span.count {
+            at = 0u;
+        }
+        let d = curve_points[span.start + at + 1u].xyz - curve_points[span.start + at].xyz;
         let l = length(d);
         if l > 1e-12 {
             after = d / l;
@@ -3778,8 +4172,14 @@ fn sweep_landing(
     // adding it back gives the unclamped arc the slab needs — and it tilts the end caps with
     // the section, which is what puts the start face in the profile's own plane.
     let w = best_arc + slide;
-    let toward = w - arc * 0.5;
-    let slab = abs(toward) - arc * 0.5;
+    // The slab and the length a rim reads shortened by the lean, because `w` is millimetres of
+    // arc and a cap is a plane: along a path crossing it at the lean, a point is `1 / cos` as far
+    // from the cap as it is across it. Times the cosine, the slab is the distance to the cap's
+    // plane on a straight path, exactly -- `Swept::distance`, and the owner's wing, whose cap read
+    // a quarter of a millimetre as half of one. One for a section held square.
+    let lean = abs(square);
+    let toward = (w - arc * 0.5) * lean;
+    let slab = abs(toward) - arc * 0.5 * lean;
     return SweepLanding(
         vec2<f32>(dot(landed, u), dot(landed, v)), square, slab, toward, w, length(d), tilt
     );
@@ -3896,25 +4296,63 @@ fn sweep_rim_over(
             section, lean, at.slab, at.toward, lean >= 1.0 - 1e-6, at, closed, bend, rim
         );
     }
+    let divided = sweep_divided(section, lean, at.slab, at.toward, lean >= 1.0 - 1e-6, closed, bend.x, rim);
+    return sweep_held_to_tube(divided, at, bend);
+}
+
+// The whole reading divided by the bend's stretch: the section shortened by the lean, the slab
+// at the path's ends, and the corner between them.
+fn sweep_divided(
+    section: f32,
+    lean: f32,
+    slab: f32,
+    toward: f32,
+    corner: bool,
+    closed: f32,
+    stretch: f32,
+    rim: vec4<f32>,
+) -> f32 {
     if closed > 0.5 {
-        return section * lean / bend.x;
+        return section * lean / stretch;
     }
     // A rim through the blend's bound, which holds whatever the lean does to the corner.
     if rim.x > 0.0 {
-        return rim_join_ends(section * lean, at.slab, at.toward, rim) / bend.x;
+        return rim_join_ends(section * lean, slab, toward, rim) / stretch;
     }
     // Pythagoras only between perpendicular measurements: a leaning section and its own end cap
     // are not, and taking the corner anyway overstated a 45-degree lean by 8 mm where
     // `SkewExtrusion` first met it.
-    if section > 0.0 && at.slab > 0.0 && lean >= 1.0 - 1e-6 {
-        return length(vec2<f32>(section, at.slab)) / bend.x;
+    if section > 0.0 && slab > 0.0 && corner {
+        return length(vec2<f32>(section, slab)) / stretch;
     }
-    return max(section * lean, at.slab) / bend.x;
+    return max(section * lean, slab) / stretch;
+}
+
+// **A divided reading held to the tube**, for a section held at an angle or moved by a law: a
+// negative `bend.z` is the spine's tube where the section is not read as it is, nought where
+// there is no tube at all. Every point inside it has one nearest place, and the divided reading
+// rises no faster than one a millimetre wherever that is so, so the bound the tube puts on the
+// reading in `sweep_in_tube_rim` holds this one as well: at least `tube - near` to the surface,
+// or the straight way there stays inside, and at least `near - reach`. The reach is the solid's
+// under the law, lengthened by the walk's lean, and the tube narrowed to where the walk's first
+// segment closes over, exactly as there. Without it an arm round a coil read 7.0 mm past its
+// surface held flush, 5.2 scaled and 5.8 turned (`Swept::distance`).
+fn sweep_held_to_tube(divided: f32, at: SweepLanding, bend: vec3<f32>) -> f32 {
+    if bend.z >= 0.0 {
+        return divided;
+    }
+    let tube = min(-bend.z, at.tilt.z);
+    let cos_lean = 1.0 - at.tilt.x;
+    if tube * cos_lean <= bend.y {
+        return divided;
+    }
+    let reach = bend.y / cos_lean;
+    return min(divided, max(at.near - reach, tube - at.near));
 }
 
 // The same as `sweep_over` under a law: the slab is the window's, and a drafted section does
-// not take the corner, for the reason given at `law_upright`. A law that moves the section has
-// no tube; one whose numbers have all come to rest has, and reads as the plain sweep does.
+// not take the corner, for the reason given at `law_upright`. A law that moves the section is
+// only held to the tube; one whose numbers have all come to rest reads as the plain sweep does.
 fn sweep_law_over(
     section: f32,
     at: SweepLanding,
@@ -3934,23 +4372,15 @@ fn sweep_law_rim_over(
     rim: vec4<f32>,
 ) -> f32 {
     let lean = abs(at.square);
-    let slab = law_slab(law, at.w);
-    let toward = at.w - (law.a0 + law.a1) * 0.5;
+    // Shortened by the lean, as `sweep_landing` shortens the whole path's slab and for its reason.
+    let slab = law_slab(law, at.w) * lean;
+    let toward = (at.w - (law.a0 + law.a1) * 0.5) * lean;
+    let corner = lean >= 1.0 - 1e-6 && law_upright(law);
     if bend.z > 0.0 {
-        return sweep_in_tube_rim(
-            section, lean, slab, toward, lean >= 1.0 - 1e-6 && law_upright(law), at, closed, bend
-        , rim);
+        return sweep_in_tube_rim(section, lean, slab, toward, corner, at, closed, bend, rim);
     }
-    if closed > 0.5 {
-        return section * lean / bend.x;
-    }
-    if rim.x > 0.0 {
-        return rim_join_ends(section * lean, slab, toward, rim) / bend.x;
-    }
-    if section > 0.0 && slab > 0.0 && lean >= 1.0 - 1e-6 && law_upright(law) {
-        return length(vec2<f32>(section, slab)) / bend.x;
-    }
-    return max(section * lean, slab) / bend.x;
+    let divided = sweep_divided(section, lean, slab, toward, corner, closed, bend.x, rim);
+    return sweep_held_to_tube(divided, at, bend);
 }
 
 // **Inside the tube the section reads as it is** -- `fieldform_field::Swept::distance`, and

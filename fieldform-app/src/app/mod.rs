@@ -21,13 +21,14 @@ mod keys_panel;
 pub(crate) mod check_model;
 pub(crate) mod cage_tools;
 pub(crate) mod knife_tool;
+pub(crate) mod click_panel;
 pub(crate) mod cage_panel;
 // Right-click: eight directions, fixed per kind of thing selected.
 pub(crate) mod marking_ui;
 // A person's own strip of commands, and the hint an empty document shows.
 pub(crate) mod shelf;
 mod block_list;
-mod block_controls;
+pub(crate) mod block_controls;
 mod frame_controls;
 mod operations;
 mod curves;

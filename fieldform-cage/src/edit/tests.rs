@@ -347,6 +347,35 @@ fn welding_the_two_ends_of_a_tube_makes_a_torus() {
     );
 }
 
+/// The weld's boundary mode: from one vertex on each rim of a tube, the rest follow, whichever way
+/// round the second rim runs, and the weld of them is the torus the by-hand weld makes.
+#[test]
+fn zipping_the_two_rims_of_a_tube_welds_them_vertex_for_vertex() {
+    let (around, along) = (6, 8);
+    let tube = torus_grid(around, along, false);
+    for start in 0..around {
+        let pairs = zip_pairs(&tube, v(along * around + start), v(start)).unwrap();
+        assert_eq!(pairs.len(), around, "every vertex of the rim is paired once");
+        for (from, to) in &pairs {
+            let (pf, pt) = (tube.vertex_position(*from), tube.vertex_position(*to));
+            assert!(
+                (pf.x - pt.x).hypot(pf.y - pt.y) < 1e-9,
+                "{from:?} onto {to:?}: facing vertices of the two rims share their place round the tube"
+            );
+        }
+        let zipped = weld(&tube, &pairs).unwrap();
+        assert_eq!(zipped.mesh.geometry_fingerprint(), torus_grid(around, along, true).geometry_fingerprint());
+    }
+}
+
+#[test]
+fn a_zip_needs_two_vertices_on_open_rims() {
+    let tube = torus_grid(6, 8, false);
+    let err = zip_pairs(&tube, v(6 * 3), v(0)).unwrap_err();
+    assert!(err.reason.contains("open rims"), "{}", err.reason);
+    assert!(zip_pairs(&tube, v(0), v(0)).is_err());
+}
+
 #[test]
 fn a_weld_into_a_bowtie_is_refused() {
     // Two quads apart; welding one corner of the second onto a corner of the first touches them at

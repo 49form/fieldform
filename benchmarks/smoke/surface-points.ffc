@@ -1,0 +1,43 @@
+# Points and planes on a surface (backlog items 127 and 85), as far as the console reaches them. A
+# line cannot yet stand a block on a point, so what they are measured against is in the app's own
+# tests; this holds that the verbs run, that the refusals below are refused, and that the document
+# saves. Read the positions back out of the saved document's graph and `history/surface-points.json`.
+#
+#   fieldform.exe --run benchmarks/smoke/surface-points.ffc --keep-going --report surface-points.json --exit
+#
+# Every line here is meant to succeed, but for the two in the last section, which are refused on
+# purpose and are marked so.
+
+new
+cube size=60,60,20 'block'
+cube size=10 centre=70,0,0 'boss'
+boolean op=union in=block,boss 'body'
+point on=body u=5 v=-3 'spot'
+
+# Growing the body elsewhere leaves the point on the same face at the same place.
+set boss.centre=120,0,0
+
+# Moving it by its numbers keeps it on the face.
+set spot.u=-12
+
+# A spot, which is what a click leaves: the surface nearest the numbers, facing its way. Typing
+# a place afterwards moves the spot, and the surface answers again: this one lands at (-30, 5, 4).
+point on=body at=-30,0,0 'west'
+set west.at=-60,5,4
+
+# A plane on the surface at a spot, and a plane on an existing point.
+plane on=body at=0,0,10 'lid'
+plane on=west 'west_face'
+
+# A seed in world, nearest the same face; a side wall, looking along X; and the far wall's back.
+point on=body near=10,10,40 'seeded'
+point on=body u=0 v=0 dir=x 'side'
+point on=body u=0 v=0 flip=true back=true 'underside'
+fix target=side
+live target=side
+
+# Refused on purpose: a position typed over a live ray, and a ray that misses when it is made.
+set spot.at=1,2,3
+point on=body u=900 v=0 'nowhere'
+
+saveas file=target/surface-points.fform

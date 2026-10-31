@@ -275,8 +275,7 @@ fn main() {
             for next in &pipes[1..] {
                 joined = graph.add(Node::Blend {
                     op: fieldform_scene::BooleanOp::Union,
-                    a: joined.into(),
-                    b: (*next).into(),
+                    inputs: vec![joined.into(), (*next).into()],
                     fillet: fieldform_scene::Fillet {
                         radius: ParamRef::Literal(3.0),
                         continuity: fieldform_scene::Continuity::G1,

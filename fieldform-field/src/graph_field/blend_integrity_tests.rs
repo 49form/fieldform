@@ -33,8 +33,7 @@
         let b = slab(&mut graph, -10.0, 40.0);
         graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: a.into(),
-            b: b.into(),
+            inputs: vec![a.into(), b.into()],
             fillet: Fillet { radius: lit(K), continuity, second: None },
         });
         GraphField::compile_graph(&Document::new(), &graph, 1e-3).expect("compiles")
@@ -236,8 +235,7 @@
             let next = ball(&mut graph, 15.0 * f64::from(i));
             joined = graph.add(Node::Blend {
                 op: BooleanOp::Union,
-                a: joined.into(),
-                b: next.into(),
+                inputs: vec![joined.into(), next.into()],
                 fillet: Fillet { radius: lit(3.0), continuity: Continuity::G1, second: None },
             });
         }
@@ -266,13 +264,13 @@
         let a = slab(&mut graph, -40.0, 10.0);
         let b = slab(&mut graph, -10.0, 40.0);
         let fillet = |k: f64| Fillet { radius: lit(k), continuity: Continuity::G1, second: None };
-        let body = graph.add(Node::Blend { op: BooleanOp::Union, a: a.into(), b: b.into(), fillet: fillet(3.0) });
+        let body = graph.add(Node::Blend { op: BooleanOp::Union, inputs: vec![a.into(), b.into()], fillet: fillet(3.0) });
         let boss = graph.add(Node::Sphere {
             centre: fieldform_scene::Place::At([lit(9.0), lit(3.0), lit(1.0)]),
             radius: lit(7.0),
         });
         let bossed =
-            graph.add(Node::Blend { op: BooleanOp::Union, a: body.into(), b: boss.into(), fillet: fillet(4.0) });
+            graph.add(Node::Blend { op: BooleanOp::Union, inputs: vec![body.into(), boss.into()], fillet: fillet(4.0) });
         let bore = graph.add(Node::Cylinder { edge: Default::default(),
             ends: fieldform_scene::Ends::between(
                 fieldform_scene::Place::At([lit(1.5), lit(-2.0), lit(-30.0)]),
@@ -282,8 +280,7 @@
         });
         graph.add(Node::Blend {
             op: BooleanOp::Difference,
-            a: bossed.into(),
-            b: bore.into(),
+            inputs: vec![bossed.into(), bore.into()],
             fillet: fillet(2.5),
         });
         if let Some(clearance) = critical {

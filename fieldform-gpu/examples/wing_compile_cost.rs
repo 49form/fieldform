@@ -326,8 +326,7 @@ fn wing(stage: Stage) -> (Document, Graph) {
     });
     graph.add(Node::Blend {
         op: BooleanOp::Union,
-        a: mirrored.into(),
-        b: fuselage.into(),
+        inputs: vec![mirrored.into(), fuselage.into()],
         fillet: Fillet { radius: ParamRef::Literal(40.0), continuity: Continuity::G1, second: None },
     });
     (doc, graph)

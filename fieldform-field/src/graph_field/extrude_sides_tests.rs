@@ -161,3 +161,41 @@
         let opening = upright.distance(Point3::new(13.0, 0.0, 4.0 + 19.0));
         assert!(opening < 0.0, "3 mm outside the drawn wall, on the opened-out side: {opening}");
     }
+
+    /// **A sharp narrowing draft is refused where its corners cross, with how far along.** The
+    /// square twenty across closes to a point under a −10° sharp draft at `10 / tan 10°` =
+    /// 56.71 mm: fifty compiles, sixty is refused naming 56.71, on either side and folded about
+    /// the plane alike. Round corners do not cross, but they close at the same height -- the
+    /// square's inradius is its half-side -- so the round sixty is refused too and the round fifty
+    /// compiles.
+    #[test]
+    fn a_sharp_narrowing_draft_is_refused_where_its_corners_cross() {
+        let build = |height: f64, sides: Sides, corners: fieldform_scene::Corners| {
+            let mut doc = Document::new();
+            let id = square(&mut doc);
+            let mut graph = Graph::empty();
+            graph.add(Node::Extrude {
+                rims: Default::default(),
+                outline: Outline::closed(id),
+                sweep: Sweep::Normal,
+                start: lit(0.0),
+                height: lit(height),
+                draft: lit(-10.0),
+                sides,
+                corners,
+            });
+            GraphField::compile_graph(&doc, &graph, 1e-4)
+        };
+        let closes = 10.0 / 10f64.to_radians().tan();
+        assert!(build(50.0, Sides::One, fieldform_scene::Corners::Sharp).is_ok());
+        for (height, sides) in [(60.0, Sides::One), (120.0, Sides::Symmetric), (10.0, two(60.0, -10.0))] {
+            match build(height, sides.clone(), fieldform_scene::Corners::Sharp) {
+                Err(CompileError::DraftCrossesTheSection { along, .. }) => {
+                    assert!((along - closes).abs() < 1e-6, "{sides:?}: {along}")
+                }
+                other => panic!("{sides:?} compiled: {:?}", other.err()),
+            }
+        }
+        assert!(build(50.0, Sides::One, fieldform_scene::Corners::Round).is_ok());
+        assert!(build(60.0, Sides::One, fieldform_scene::Corners::Round).is_err());
+    }

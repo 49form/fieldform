@@ -119,8 +119,7 @@ fn cases() -> Vec<(&'static str, Build)> {
                 let b = bar(&mut g);
                 g.add(Node::Blend {
                     op: fieldform_scene::BooleanOp::Union,
-                    a: a.into(),
-                    b: b.into(),
+                    inputs: vec![a.into(), b.into()],
                     fillet: fieldform_scene::Fillet {
                         radius: lit(10.0 * v),
                         continuity: fieldform_scene::Continuity::G1,
@@ -506,8 +505,7 @@ fn cases() -> Vec<(&'static str, Build)> {
                 };
                 g.add(Node::Blend {
                     op,
-                    a: a.into(),
-                    b: b.into(),
+                    inputs: vec![a.into(), b.into()],
                     fillet: fieldform_scene::Fillet {
                         radius: lit(10.0),
                         continuity: fieldform_scene::Continuity::G1,

@@ -36,10 +36,17 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::graph::Axis;
+use crate::graph::{Axis, ParamRef};
 use crate::id::NodeId;
 
 /// Where an axis stands on a body, and how long it is.
+///
+/// **Its numbers may be named parameters** (2026-10-25): `u`, `v`, `length` and the seed's three
+/// are [`ParamRef`]s, so a variable can drive where an axis stands and how far it reaches, as it
+/// can any block's numbers. A literal is still written as a bare number ([`number_or_ref`]), so
+/// a document that names no parameter here is byte-for-byte what it was and an older build reads
+/// it; one that does writes `{"named": …}` there, which an older build refuses rather than reads
+/// as nought.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SurfaceAxis {
     /// The body it stands on — a block of the active part's graph, referred to by id as every
@@ -51,11 +58,14 @@ pub struct SurfaceAxis {
     /// you look down at the top of something.
     pub flipped: bool,
     /// 0 to 1 across the body's box, along the first of the two axes across the ray.
-    pub u: f64,
+    #[serde(with = "number_or_ref")]
+    pub u: ParamRef,
     /// The same along the second.
-    pub v: f64,
+    #[serde(with = "number_or_ref")]
+    pub v: ParamRef,
     /// How far the line reaches from the surface, in millimetres, along the field's direction.
-    pub length: f64,
+    #[serde(with = "number_or_ref")]
+    pub length: ParamRef,
     /// Where to look from, 0 to 1 across the body's box in each axis — and then the surface point
     /// *nearest* it is where the axis stands.
     ///
@@ -63,8 +73,81 @@ pub struct SurfaceAxis {
     /// an older document opens unchanged and a reader that does not know the field still gets the
     /// two stored points. Written only when it is there, which is the rule every side entry here
     /// follows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "seed_numbers")]
+    pub seed: Option<[ParamRef; 3]>,
+}
+
+/// A literal written as the bare number it is, and anything else as the [`ParamRef`] it is --
+/// so a surface axis with no parameter in it writes what it always wrote.
+pub(crate) mod number_or_ref {
+    use super::ParamRef;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    pub(super) enum Either {
+        Number(f64),
+        Ref(ParamRef),
+    }
+
+    impl From<Either> for ParamRef {
+        fn from(e: Either) -> Self {
+            match e {
+                Either::Number(v) => ParamRef::Literal(v),
+                Either::Ref(r) => r,
+            }
+        }
+    }
+
+    pub fn serialize<S: Serializer>(r: &ParamRef, s: S) -> Result<S::Ok, S::Error> {
+        match r {
+            ParamRef::Literal(v) => v.serialize(s),
+            other => other.serialize(s),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<ParamRef, D::Error> {
+        Either::deserialize(d).map(Into::into)
+    }
+}
+
+/// The seed's three, each [`number_or_ref`].
+pub(crate) mod seed_numbers {
+    use super::number_or_ref::Either;
+    use super::ParamRef;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(seed: &Option<[ParamRef; 3]>, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let Some(seed) = seed else { return s.serialize_none() };
+        let mut seq = s.serialize_seq(Some(3))?;
+        for r in seed {
+            match r {
+                ParamRef::Literal(v) => seq.serialize_element(v)?,
+                other => seq.serialize_element(other)?,
+            }
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<[ParamRef; 3]>, D::Error> {
+        let read: Option<[Either; 3]> = Option::deserialize(d)?;
+        Ok(read.map(|[a, b, c]| [a.into(), b.into(), c.into()]))
+    }
+
+    /// The same three where there is always a seed.
+    pub(crate) mod required {
+        use super::ParamRef;
+        use serde::{Deserializer, Serializer};
+
+        pub fn serialize<S: Serializer>(seed: &[ParamRef; 3], s: S) -> Result<S::Ok, S::Error> {
+            super::serialize(&Some(*seed), s)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[ParamRef; 3], D::Error> {
+            super::deserialize(d)?.ok_or_else(|| serde::de::Error::custom("a seed needs its three numbers"))
+        }
+    }
 }
 
 impl SurfaceAxis {
@@ -83,17 +166,50 @@ impl SurfaceAxis {
         ((d + 1) % 3, (d + 2) % 3)
     }
 
+    /// The numbers this record carries, so a parameter it names counts as read.
+    pub fn params(&self) -> impl Iterator<Item = &ParamRef> {
+        [&self.u, &self.v, &self.length].into_iter().chain(self.seed.iter().flatten())
+    }
+
+    /// The record with every number resolved, or `None` if one cannot be -- a parameter gone or
+    /// failed. What every reader of the place asks for first.
+    pub fn resolved(&self, resolve: &dyn Fn(&ParamRef) -> Option<f64>) -> Option<ResolvedSurfaceAxis> {
+        let seed = match &self.seed {
+            Some([a, b, c]) => Some([resolve(a)?, resolve(b)?, resolve(c)?]),
+            None => None,
+        };
+        Some(ResolvedSurfaceAxis {
+            axis: *self,
+            u: resolve(&self.u)?,
+            v: resolve(&self.v)?,
+            length: resolve(&self.length)?,
+            seed,
+        })
+    }
+}
+
+/// A [`SurfaceAxis`] with its numbers read: what the ray and the seed are worked out from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResolvedSurfaceAxis {
+    pub axis: SurfaceAxis,
+    pub u: f64,
+    pub v: f64,
+    pub length: f64,
+    pub seed: Option<[f64; 3]>,
+}
+
+impl ResolvedSurfaceAxis {
     /// The ray that finds this axis's place on a body whose box is `lo..hi`: where it starts and
     /// which way it runs (a unit vector). It starts `margin` clear of the box on the side it comes
     /// from, so it begins outside whatever the body is.
     pub fn ray(&self, lo: [f64; 3], hi: [f64; 3], margin: f64) -> ([f64; 3], [f64; 3]) {
-        let d = self.direction_index();
-        let (a, b) = self.across();
+        let d = self.axis.direction_index();
+        let (a, b) = self.axis.across();
         let mut origin = [0.0; 3];
         origin[a] = lo[a] + self.u * (hi[a] - lo[a]);
         origin[b] = lo[b] + self.v * (hi[b] - lo[b]);
         let mut dir = [0.0; 3];
-        if self.flipped {
+        if self.axis.flipped {
             origin[d] = lo[d] - margin;
             dir[d] = 1.0;
         } else {
@@ -103,6 +219,21 @@ impl SurfaceAxis {
         (origin, dir)
     }
 
+    /// Where the seed is in space, for a body whose box is `lo..hi`.
+    ///
+    /// Across the box rather than in world coordinates, so a body that moves carries its axis with
+    /// it — the same bargain `u` and `v` make, in three axes instead of two.
+    pub fn seed_point(&self, lo: [f64; 3], hi: [f64; 3]) -> Option<[f64; 3]> {
+        let seed = self.seed?;
+        let mut out = [0.0; 3];
+        for i in 0..3 {
+            out[i] = lo[i] + seed[i] * (hi[i] - lo[i]);
+        }
+        Some(out)
+    }
+}
+
+impl SurfaceAxis {
     /// The `u` and `v` that put the ray through `point`, for a box `lo..hi` and this direction. The
     /// inverse of [`Self::ray`]'s across-coordinates, so an axis made from a clicked point can be
     /// reproduced from its numbers.
@@ -119,9 +250,9 @@ impl SurfaceAxis {
             body: NodeId::from_raw(0),
             direction,
             flipped: false,
-            u: 0.0,
-            v: 0.0,
-            length: 0.0,
+            u: ParamRef::Literal(0.0),
+            v: ParamRef::Literal(0.0),
+            length: ParamRef::Literal(0.0),
             seed: None,
         };
         let (a, b) = probe.across();
@@ -134,20 +265,7 @@ impl SurfaceAxis {
 }
 
 impl SurfaceAxis {
-    /// Where the seed is in space, for a body whose box is `lo..hi`.
-    ///
-    /// Across the box rather than in world coordinates, so a body that moves carries its axis with
-    /// it — the same bargain `u` and `v` make, in three axes instead of two.
-    pub fn seed_point(&self, lo: [f64; 3], hi: [f64; 3]) -> Option<[f64; 3]> {
-        let seed = self.seed?;
-        let mut out = [0.0; 3];
-        for i in 0..3 {
-            out[i] = lo[i] + seed[i] * (hi[i] - lo[i]);
-        }
-        Some(out)
-    }
-
-    /// The seed that puts [`Self::seed_point`] back at `point`. The inverse of it, so an axis made
+    /// The seed that puts [`ResolvedSurfaceAxis::seed_point`] back at `point`. The inverse of it, so an axis made
     /// from a clicked point can be reproduced from its numbers.
     ///
     /// A box with no width along an axis reads as the middle there, which is `place_of`'s rule for
@@ -175,16 +293,26 @@ pub(crate) fn axis_index(axis: Axis) -> usize {
 mod tests {
     use super::*;
 
-    fn at(direction: Axis, flipped: bool, u: f64, v: f64) -> SurfaceAxis {
-        SurfaceAxis {
+    fn at(direction: Axis, flipped: bool, u: f64, v: f64) -> ResolvedSurfaceAxis {
+        let lit = ParamRef::Literal;
+        let axis = SurfaceAxis {
             body: NodeId::from_raw(1),
             direction,
             flipped,
-            u,
-            v,
-            length: 50.0,
+            u: lit(u),
+            v: lit(v),
+            length: lit(50.0),
             seed: None,
-        }
+        };
+        literal(axis)
+    }
+
+    fn literal(axis: SurfaceAxis) -> ResolvedSurfaceAxis {
+        axis.resolved(&|r| match r {
+            ParamRef::Literal(v) => Some(*v),
+            _ => None,
+        })
+        .expect("literals")
     }
 
     const LO: [f64; 3] = [-10.0, -20.0, -30.0];
@@ -223,7 +351,7 @@ mod tests {
         let point = [12.5, 3.0, -7.0];
         for direction in Axis::ALL {
             let (u, v) = SurfaceAxis::place_of(direction, point, LO, HI);
-            let (origin, _) = SurfaceAxis { u, v, ..at(direction, false, 0.0, 0.0) }.ray(LO, HI, 1.0);
+            let (origin, _) = at(direction, false, u, v).ray(LO, HI, 1.0);
             let d = axis_index(direction);
             for i in 0..3 {
                 if i != d {
@@ -248,7 +376,7 @@ mod tests {
     fn a_seed_is_held_across_the_box_so_it_moves_with_the_body() {
         let point = [12.5, 3.0, -7.0];
         let seed = SurfaceAxis::seed_of(point, LO, HI);
-        let axis = SurfaceAxis { seed: Some(seed), ..at(Axis::Z, false, 0.0, 0.0) };
+        let axis = literal(SurfaceAxis { seed: Some(seed.map(ParamRef::Literal)), ..at(Axis::Z, false, 0.0, 0.0).axis });
         let back = axis.seed_point(LO, HI).expect("a seed");
         for i in 0..3 {
             assert!((back[i] - point[i]).abs() < 1e-9, "axis {i}");
@@ -275,7 +403,7 @@ mod tests {
     /// so a document that never used one is byte-for-byte what it was.
     #[test]
     fn a_file_without_a_seed_reads_as_the_ray_and_writes_no_field_for_it() {
-        let axis = at(Axis::Y, true, 0.125, 0.875);
+        let axis = at(Axis::Y, true, 0.125, 0.875).axis;
         let json = serde_json::to_string(&axis).unwrap();
         assert!(!json.contains("seed"), "nothing written for a seed that is not there: {json}");
 
@@ -284,14 +412,34 @@ mod tests {
         // handwritten, so the case cannot pass against a spelling the format does not use.
         let read: SurfaceAxis = serde_json::from_str(&json).unwrap();
         assert_eq!(read.seed, None, "an older file means the ray");
-        assert_eq!(read.u, 0.125);
+        assert_eq!(read.u, ParamRef::Literal(0.125));
     }
 
     #[test]
     fn a_surface_axis_round_trips_through_json() {
-        let axis = at(Axis::Y, true, 0.125, 0.875);
+        let axis = at(Axis::Y, true, 0.125, 0.875).axis;
         let json = serde_json::to_string(&axis).unwrap();
         assert_eq!(serde_json::from_str::<SurfaceAxis>(&json).unwrap(), axis);
         assert!(json.contains("\"direction\":\"y\""), "an axis is written in the vocabulary a pattern's is: {json}");
+    }
+
+    /// **A literal is written as the bare number it was**, so a file that names no parameter
+    /// reads and writes as before; a named one round-trips as a reference, seed included, and a
+    /// record with a parameter that does not resolve has no place to resolve to.
+    #[test]
+    fn literals_are_bare_numbers_and_a_named_number_round_trips_as_a_reference() {
+        let old = r#"{"body":"0000000000000001","direction":"z","flipped":false,"u":0.25,"v":0.5,"length":30.0,"seed":[0.1,0.2,0.3]}"#;
+        let read: SurfaceAxis = serde_json::from_str(old).expect("an older file");
+        assert_eq!(read.u, ParamRef::Literal(0.25));
+        assert_eq!(read.seed, Some([0.1, 0.2, 0.3].map(ParamRef::Literal)));
+        assert_eq!(serde_json::to_string(&read).unwrap(), old, "byte for byte");
+
+        let p = crate::id::ParamId::new();
+        let named = SurfaceAxis { length: ParamRef::Named(p), seed: Some([ParamRef::Named(p), ParamRef::Literal(0.5), ParamRef::Literal(0.5)]), ..read };
+        let json = serde_json::to_string(&named).unwrap();
+        assert!(json.contains("\"length\":{\"named\""), "{json}");
+        assert_eq!(serde_json::from_str::<SurfaceAxis>(&json).unwrap(), named);
+        assert_eq!(named.params().filter(|r| **r == ParamRef::Named(p)).count(), 2);
+        assert!(named.resolved(&|r| match r { ParamRef::Literal(v) => Some(*v), _ => None }).is_none());
     }
 }

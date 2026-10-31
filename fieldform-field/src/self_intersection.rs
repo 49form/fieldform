@@ -17,7 +17,7 @@
 
 use crate::bvh::Bvh;
 use fieldform_cage::{Cage, FaceId, VertexId};
-use fieldform_subd::{LimitSurface, Tessellation};
+use fieldform_subd::Tessellation;
 use nalgebra::{Point3, Vector3};
 use std::collections::HashSet;
 
@@ -41,7 +41,9 @@ impl SelfIntersections {
 /// model that is deliberately near-touching does not turn red. The caller passes the cage's
 /// `epsilon_length`.
 pub fn find(cage: &Cage, levels: usize, epsilon: f64) -> SelfIntersections {
-    let tessellation = LimitSurface::new(cage).tessellate(levels);
+    // The field's own tessellation where it is being built at the same time: one surface, built
+    // once, judged and drawn.
+    let tessellation = crate::shared_tessellation(cage, levels);
     find_in(cage, &tessellation, epsilon)
 }
 
@@ -170,6 +172,7 @@ mod tests {
     use super::*;
     use fieldform_cage::validate::epsilon_length;
     use fieldform_cage::Cage;
+    use fieldform_subd::LimitSurface;
 
     fn cube_with(move_vertex: Option<(usize, Point3<f64>)>) -> Cage {
         let cube = Cage::cube_of(10.0);

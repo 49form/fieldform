@@ -1395,6 +1395,7 @@ impl App {
         let planes: Vec<(NodeId, String)> = self.sources_for(id);
 
         let mut out = ends;
+        let mut pick_surface = false;
         ui.horizontal(|ui| {
             // **"Axis", because that is what these two points are for.** A cylinder, a cone and
             // a capsule are each a shape about a line, and "Ends" named the storage rather than
@@ -1481,8 +1482,29 @@ impl App {
                                  — to follow a curve, sweep a pipe along it.",
                             );
                     }
+
+                    // **Picked, not followed.** The click is stored as two typed points, as a
+                    // hole's first click is: following a face would be the topological naming
+                    // a parametric block must never do, so the block stays where it was put
+                    // when the body under it changes.
+                    ui.separator();
+                    ui.label(egui::RichText::new("on a surface").weak());
+                    if ui
+                        .selectable_label(false, "Pick a surface\u{2026}")
+                        .on_hover_text(
+                            "Click a body and this stands there, square to its surface: a hole \
+                             goes in, anything else stands out. It keeps its length, and the \
+                             place is kept as two points rather than as the face.",
+                        )
+                        .clicked()
+                    {
+                        pick_surface = true;
+                    }
                 });
         });
+        if pick_surface {
+            self.begin_axis_placement_for(crate::split_axis::AxisKind::Stand(id), None);
+        }
         ui.separator();
 
         match out {
@@ -1549,6 +1571,59 @@ impl App {
                 Ends::From { curve }
             }
         }
+    }
+
+    /// The click of the Axis menu's *Pick a surface*: the block stands where it lands. A click
+    /// on nothing keeps waiting, as every surface click does.
+    pub(crate) fn stand_ends_click(&mut self, id: NodeId, aspect: f32, rect: egui::Rect, pos: egui::Pos2) {
+        let Some(at) = self.normal_axis_landing(aspect, rect, pos) else {
+            self.warn("No surface under the cursor — click on the body itself");
+            return;
+        };
+        let Some(into) = self.pick_field.as_ref().and_then(|f| fieldform_field::into_material(f, at)) else {
+            self.warn("The surface there has no direction to stand along — click somewhere else on it");
+            return;
+        };
+        self.pending_curve = None;
+        if let Err(why) = self.stand_ends_at(id, at, into) {
+            self.warn(why);
+        }
+    }
+
+    /// Lays `id`'s ends at `at`, along `into` for a hole and against it for anything else, as
+    /// long as they were; one undo step.
+    ///
+    /// **Refused under a placement**, because the click is where the block is *drawn* and the
+    /// ends are in its own coordinates: under a move or a pattern the two differ, and writing one
+    /// as the other would put it somewhere nobody clicked.
+    pub(crate) fn stand_ends_at(&mut self, id: NodeId, at: Point3<f64>, into: Vector3<f64>) -> Result<(), String> {
+        let graph = self.part_graph();
+        let Some(mut node) = graph.node(id).cloned() else { return Err("That block is gone".to_string()) };
+        if !crate::drawn_where_it_is(graph, id) {
+            return Err(format!(
+                "{} is placed by a block above it, so a click is not where its own numbers are — \
+                 type its axis instead",
+                self.body_label(id)
+            ));
+        }
+        let way = if matches!(node, Node::Hole { .. }) { into } else { -into };
+        let label = self.body_label(id);
+        let Some(ends) = node.ends_mut().into_iter().next() else {
+            return Err(format!("{label} has no axis to stand on a surface"));
+        };
+        let (a, b) = self.resolved_ends(ends);
+        let span = (b - a).norm();
+        let length = if span > 1e-9 { span } else { DEFAULT_BODY_MM };
+        *ends = Ends::between(
+            fieldform_scene::Place::At(Self::as_literals(at)),
+            fieldform_scene::Place::At(Self::as_literals(at + way * length)),
+        );
+        // A click is one act, not the next instant of a drag: its own undo step on either side.
+        self.gesture = None;
+        self.replace_node(id, node);
+        self.gesture = None;
+        self.say(format!("{label} stands on the surface at ({:.2}, {:.2}, {:.2})", at.x, at.y, at.z));
+        Ok(())
     }
 
     /// Where a pair of ends actually is, with parameters and curves resolved.

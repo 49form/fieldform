@@ -39,6 +39,6 @@ pub use keymap::{Keymap, Modifiers, Shortcut};
 pub use ops::{
     Batch, Named, OwnershipSnapshot, SetControlPoints, SetControlWeights, SetCurve, SetName,
     SetOutputs, SetOwnership, SetParameter, SetPartGraph, SetPartMaterial, SetRelation, SetShown,
-    SetSource, SetSurface, SetSurfaceAxis, SetSurfacePositions, SetVertexPositions, SetVisible,
+    SetSource, SetSurface, SetSurfaceAxis, SetSurfacePoint, SetSurfacePositions, SetVertexPositions, SetVisible,
 };
 pub use registry::{Args, OpRegistry, Value};

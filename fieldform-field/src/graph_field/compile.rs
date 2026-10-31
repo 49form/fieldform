@@ -68,6 +68,35 @@ pub enum CompileError {
          the wall runs along instead"
     )]
     SharpCornersOnAWall,
+    /// A draft that moves the section's walls further than the section has room for before
+    /// the end of the solid: inward past its depth, where it closes to nothing, or -- with its
+    /// corners mitred -- past where the displaced outline first crosses itself, which the walk
+    /// would read as a different solid with no message. `SweepError::TaperClosesTheSection` is
+    /// the sweep's half of the first; this one says the numbers, since each of them is a fix.
+    #[error(
+        "the draft ({degrees:.1}\u{b0} {way}) {what} before the end of the solid \u{2014} the \
+         walls have moved {room:.2} mm by {along:.2} mm along a side of {length:.2} mm; ease the \
+         draft under {fits:.1}\u{b0}, shorten the side{or_round}"
+    )]
+    DraftCrossesTheSection {
+        /// The block, so the panel can say it beside the draft that was typed.
+        node: fieldform_scene::NodeId,
+        /// The draft asked for, in degrees, and which way it leans the walls.
+        degrees: f64,
+        way: &'static str,
+        /// What happens to the section: it closes, or its mitred outline crosses itself.
+        what: &'static str,
+        /// How far the walls may move before it does, in millimetres.
+        room: f64,
+        /// How far from the start plane that is reached, along the side.
+        along: f64,
+        /// The side's whole length.
+        length: f64,
+        /// The steepest draft that keeps the section whole over that length, in degrees.
+        fits: f64,
+        /// The third fix, where there is one.
+        or_round: &'static str,
+    },
     #[error("{1}")]
     BadLoop(fieldform_scene::CurveId, crate::LoopError),
     #[error(
@@ -255,6 +284,58 @@ pub enum CompileError {
     ShellNeedsBounds,
     #[error("a mirror's plane names a node that is not a plane")]
     MirrorNeedsAPlane,
+    #[error(
+        "a scale factor of {0} is not a scale \u{2014} a negative one is a mirror, which has its \
+         own block, and nought leaves nothing to read the body through"
+    )]
+    ScaleNeedsAPositiveFactor(f64),
+    #[error("a {0}'s pitch of {1} is not a pitch \u{2014} it must be above nought")]
+    HelixNeedsAPositivePitch(&'static str, f64),
+    #[error(
+        "the {0}'s section crosses the axis \u{2014} its innermost radius is {1}, and a helix is \
+         read about an axis it cannot reach. Make the diameter larger or the section smaller."
+    )]
+    HelixSectionCrossesTheAxis(&'static str, f64),
+    #[error(
+        "the coil's wire is {0} across along the axis and the pitch is {1}, so the turns would \
+         fuse \u{2014} make the pitch at least the wire, or the wire thinner"
+    )]
+    CoilTurnsWouldFuse(f64, f64),
+    #[error("a coil of {0} turns has no wire \u{2014} it must be above nought")]
+    CoilNeedsTurns(f64),
+    #[error("a coil's wire of {0} is not a wire \u{2014} it must be above nought")]
+    CoilNeedsAWire(f64),
+    #[error("a thread's length of {0} is not a length \u{2014} it must be above nought")]
+    ThreadNeedsALength(f64),
+    #[error(
+        "{0:?} is not a thread this build knows \u{2014} it reads the metric coarse series, M2 to \
+         M24; clear the designation to type the major diameter and pitch"
+    )]
+    UnknownThreadDesignation(String),
+    #[error(
+        "the hole's two points are in one place, so it has no direction to go into the material \
+         \u{2014} move the second along the axis it should follow"
+    )]
+    HoleNeedsADirection,
+    #[error("a hole's {0} of {1} is not a size \u{2014} it must be above nought")]
+    HoleSizeNotPositive(&'static str, f64),
+    #[error(
+        "the {0} is {1} across and the hole {2}, so there is no step \u{2014} make the {0} wider \
+         than the hole"
+    )]
+    HoleStepNotWider(&'static str, f64, f64),
+    #[error(
+        "the {0} goes {1:.2} deep and the hole only {2:.2}, so nothing of the hole is left below \
+         it \u{2014} make the hole deeper or the {0} shallower"
+    )]
+    HoleStepTooDeep(&'static str, f64, f64),
+    #[error("a {0} of {1} degrees is not an angle a tool cuts \u{2014} between nought and 180")]
+    HoleAngle(&'static str, f64),
+    #[error(
+        "the thread goes {0} deep and the hole only {1} \u{2014} a tap cannot cut below the bottom \
+         of its hole; make the hole deeper or the thread shorter"
+    )]
+    ThreadDeeperThanHole(f64, f64),
     #[error(
         "a parameter is driven by a node that is not a ramp — only a ramp may drive a \
          parameter, because only a ramp states how fast it can change, and that number is \
@@ -788,6 +869,24 @@ pub(crate) enum Op {
         translation: Vector3<f64>,
         scale: f64,
     },
+    /// Another op, stretched by a different factor along each world axis about the origin, its
+    /// value multiplied by the smallest of them. See [`Node::Scale`].
+    ///
+    /// About the world's own axes and origin only: a scale aimed by a frame is built as the
+    /// sandwich a twist is — the body wrapped in the frame's inverse placement, this, and the
+    /// placement — so one piece of arithmetic serves every centre and direction, and a uniform
+    /// scale never reaches here at all (it compiles to the exact [`Op::Transform`]).
+    Scale {
+        input: usize,
+        /// All above nought, refused otherwise before this is built.
+        factors: Vector3<f64>,
+        /// The least of the three, which is what the value is multiplied by. Dividing the
+        /// argument by the factors makes the inner field change at up to `1 / s_min` per
+        /// millimetre; multiplying by `s_min` brings that back to one, so the result never
+        /// overstates and keeps a Lipschitz constant of one. Along the other two axes it reads
+        /// short by their ratio to this, which is why it is a lower bound and not a distance.
+        s_min: f64,
+    },
 }
 
 impl Op {
@@ -823,6 +922,7 @@ impl Op {
             | Op::Attract { input, .. }
             | Op::Pattern { input, .. }
             | Op::Mirror { input, .. }
+            | Op::Scale { input, .. }
             | Op::Transform { input, .. } => vec![input],
         }
     }
@@ -1413,6 +1513,46 @@ impl GraphField {
                         end_radius: resolve(end_radius).ok_or(CompileError::UnresolvedRadius)?,
                     }))
                 }
+                // **Aimed by wrapping, as a lattice is**: the solid is built about the world's
+                // `+Z` from the origin, and the frame's placement puts the query into it. A frame
+                // that says nothing is the leaf alone.
+                Node::Coil { frame, diameter, size, section, hand } => {
+                    let coil = super::coil_of(diameter, size, section, *hand, &resolve)?;
+                    let leaf = Op::Leaf(std::sync::Arc::new(coil));
+                    if frame.is_default() {
+                        leaf
+                    } else {
+                        let at = ops.len();
+                        ops.push(leaf);
+                        let (translation, rotation) = resolve_frame(document, graph, frame, &resolve)?;
+                        Op::Transform { input: at, rotation, translation, scale: 1.0 }
+                    }
+                }
+                // Placed by its own two points, so no frame wraps it: the leaf reads the query in
+                // the hole's frame itself.
+                Node::Hole { ends, kind, depth, tip } => Op::Leaf(std::sync::Arc::new(
+                    super::hole_of(document, graph, ends, kind, depth, tip, &resolve)?,
+                )),
+                Node::Thread { frame, major, pitch, length, hand, clearance, designation } => {
+                    let thread = super::thread_of(
+                        major,
+                        pitch,
+                        length,
+                        *hand,
+                        clearance,
+                        designation.as_deref(),
+                        &resolve,
+                    )?;
+                    let leaf = Op::Leaf(std::sync::Arc::new(thread));
+                    if frame.is_default() {
+                        leaf
+                    } else {
+                        let at = ops.len();
+                        ops.push(leaf);
+                        let (translation, rotation) = resolve_frame(document, graph, frame, &resolve)?;
+                        Op::Transform { input: at, rotation, translation, scale: 1.0 }
+                    }
+                }
                 Node::Pipe { curve, radius } => {
                     let c = document
                         .curves
@@ -1730,6 +1870,25 @@ impl GraphField {
                             draft_tangent: slope(draft)?,
                         },
                     };
+                    // **Not further than the section has room for.** A draft moves the walls
+                    // furthest at the far end of each side; past the section's depth it has
+                    // closed, and a mitred outline can cross itself before that. Either way the
+                    // walk would read a different solid from the one asked for and say nothing.
+                    let drafted = match depth {
+                        crate::Depth::One => [
+                            crate::draft_crossing::DraftedSide { length: h, tangent: draft_tangent },
+                            crate::draft_crossing::DraftedSide { length: 0.0, tangent: 0.0 },
+                        ],
+                        crate::Depth::Symmetric => [
+                            crate::draft_crossing::DraftedSide { length: h * 0.5, tangent: draft_tangent },
+                            crate::draft_crossing::DraftedSide { length: 0.0, tangent: 0.0 },
+                        ],
+                        crate::Depth::Two { height: other, draft_tangent: other_tangent } => [
+                            crate::draft_crossing::DraftedSide { length: h, tangent: draft_tangent },
+                            crate::draft_crossing::DraftedSide { length: other, tangent: other_tangent },
+                        ],
+                    };
+                    crate::draft_crossing::check_draft_room(*id, &built, &drafted, *corners)?;
 
                     let mut rims = resolved_rim(rims, &resolve)?;
                     if !rims.is_hard() {
@@ -1921,7 +2080,13 @@ impl GraphField {
                         inputs: inputs.iter().map(|i| slot[i]).collect(),
                     }
                 }
-                Node::Blend { op, a, b, fillet } => {
+                Node::Blend { op, inputs, fillet } => {
+                    let [first, rest @ ..] = &inputs[..] else {
+                        return Err(CompileError::NothingToCombine);
+                    };
+                    if rest.is_empty() {
+                        return Err(CompileError::NothingToCombine);
+                    }
                     // Allowed, and *reported* rather than refused — see
                     // [`approximate_blends`]. The short version: a blend against a
                     // lower-bound operand is inaccurate by a bounded, one-directional amount,
@@ -1962,16 +2127,27 @@ impl GraphField {
                             Some(resolve(s).ok_or(CompileError::UnresolvedBlend)?.max(0.0))
                         }
                     };
-                    Op::Blend {
+                    // **The chain a nest of pairs would have made**: the first two joined, then
+                    // that with the third, and on. Every step is the same join -- one radius,
+                    // one divisor, one taper -- so a list of two compiles to exactly the one op
+                    // it always did, and a longer one to what nesting it by hand gave.
+                    let join = |a: usize, b: usize| Op::Blend {
                         op: *op,
-                        a: slot[a],
-                        b: slot[b],
+                        a,
+                        b,
                         radius,
                         exponent: fillet.exponent(),
                         taper: taper_ratio(document, graph, *id),
                         divisor,
                         second,
+                    };
+                    let mut joined = slot[first];
+                    let (last, middle) = rest.split_last().expect("checked above");
+                    for next in middle {
+                        ops.push(join(joined, slot[next]));
+                        joined = ops.len() - 1;
                     }
+                    join(joined, slot[last])
                 }
                 Node::Twist {
                     input,
@@ -2054,6 +2230,53 @@ impl GraphField {
                         });
                         Op::Transform {
                             input: wound,
+                            rotation,
+                            translation,
+                            scale: 1.0,
+                        }
+                    }
+                }
+                Node::Scale { input, factors, frame } => {
+                    let mut s = [0.0; 3];
+                    for (slot, factor) in s.iter_mut().zip(factors) {
+                        *slot = resolve(factor).ok_or(CompileError::UnresolvedRadius)?;
+                        // `!(> 0)` rather than `<= 0`, so a NaN is refused with the rest.
+                        if !(*slot > 0.0) {
+                            return Err(CompileError::ScaleNeedsAPositiveFactor(*slot));
+                        }
+                    }
+                    let (translation, rotation) = resolve_frame(document, graph, frame, &resolve)?;
+                    if fieldform_scene::uniform_factor(factors).is_some() {
+                        // **Exact, and through the placement's own arithmetic.** Scaling about
+                        // `t` by `s` reads the body at `(p − t)/s + t`, which is the placement
+                        // with no turn, scale `s` and translation `t(1 − s)` — so the value
+                        // comes back multiplied by `s`, the normal untouched, and the claim is
+                        // the input's own. The direction of the frame does not enter: a
+                        // uniform scale is the same along every axis.
+                        Op::Transform {
+                            input: slot[input],
+                            rotation: Rotation3::identity(),
+                            translation: translation * (1.0 - s[0]),
+                            scale: s[0],
+                        }
+                    } else {
+                        let factors = Vector3::new(s[0], s[1], s[2]);
+                        let s_min = s[0].min(s[1]).min(s[2]);
+                        // The sandwich a twist takes, for the reason given there: the stretch
+                        // happens along the frame's axes about its origin, and the body lives in
+                        // world space, so it is read through the frame's inverse placement and
+                        // the whole is put back through the placement.
+                        let back = ops.len();
+                        ops.push(Op::Transform {
+                            input: slot[input],
+                            rotation: rotation.inverse(),
+                            translation: -(rotation.inverse() * translation),
+                            scale: 1.0,
+                        });
+                        let stretched = ops.len();
+                        ops.push(Op::Scale { input: back, factors, s_min });
+                        Op::Transform {
+                            input: stretched,
                             rotation,
                             translation,
                             scale: 1.0,
@@ -2794,6 +3017,12 @@ impl GraphField {
                 translation,
                 scale,
             } => *scale * self.eval_in(*input, to_local(p, rotation, translation, *scale), gap),
+            // Squeezed, then measured, then multiplied by the least factor: the argument is
+            // divided axis by axis, so the value is brought back by the one factor that keeps
+            // the result from overstating along any of the three.
+            Op::Scale { input, factors, s_min } => {
+                *s_min * self.eval_in(*input, squeeze(p, factors), gap)
+            }
         }
     }
 
@@ -2971,6 +3200,14 @@ impl GraphField {
             } => self
                 .normal_at(*input, to_local(p, rotation, translation, *scale))
                 .map(|n| rotation * n),
+            // The gradient of `F(p / s)` is `∇F / s` component by component, and the surface's
+            // normal is its direction — so the inner normal is divided by the factors and made
+            // unit again. Exact, where a twist has to give up and difference: the Jacobian here
+            // is diagonal and constant, so there is nothing plausible-but-wrong to be had by
+            // applying it.
+            Op::Scale { input, factors, .. } => self
+                .normal_at(*input, squeeze(p, factors))
+                .and_then(|n| n.component_div(factors).try_normalize(1e-12)),
         }
     }
 
@@ -3424,6 +3661,14 @@ impl GraphField {
                 let (inner_lo, inner_hi) = self.interval_at(*input, l, h);
                 (*scale * inner_lo, *scale * inner_hi)
             }
+            // Dividing by positive factors keeps every axis in order, so the squeezed box is the
+            // squeezed corners exactly, and multiplying by a positive `s_min` keeps the ends in
+            // order too.
+            Op::Scale { input, factors, s_min } => {
+                let (inner_lo, inner_hi) =
+                    self.interval_at(*input, squeeze(lo, factors), squeeze(hi, factors));
+                (*s_min * inner_lo, *s_min * inner_hi)
+            }
         }
     }
 
@@ -3547,6 +3792,14 @@ fn unwind(p: Point3<f64>, radians_per_mm: f64, axis: usize, at: Point3<f64>) -> 
 /// between them puts the surface and its shading in different places.
 fn reflect(p: Point3<f64>, at: Point3<f64>, normal: Vector3<f64>) -> Point3<f64> {
     p - normal * (2.0 * (p - at).dot(&normal))
+}
+
+/// Where a scaled body's field reads its input: the point divided axis by axis by the factors.
+///
+/// One function for the same reason [`reflect`] is one: the value, the normal and the interval
+/// have to squeeze the same way, and the shader's `scale_point` is written to match it.
+fn squeeze(p: Point3<f64>, factors: &Vector3<f64>) -> Point3<f64> {
+    Point3::from(p.coords.component_div(factors))
 }
 
 /// A block's rims, resolved: the reach as a number and the shape as its exponent. A reach that

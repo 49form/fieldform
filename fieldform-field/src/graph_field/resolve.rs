@@ -196,6 +196,76 @@ pub fn placement_above(
     placement_above_at(document, graph, target, without, resolve, 0)
 }
 
+/// The frame a point on `body` is measured in: where the body stands and which way it faces,
+/// **and nothing about how big it is.**
+///
+/// Built in three steps, so a body moved or turned as a whole carries its points with it:
+///
+/// 1. the placements above the body ([`placement_above`]);
+/// 2. the placements directly below it, while the node is a `Transform` -- a turned block is
+///    one, once its turn is flattened, so a cuboid's own turn lands here;
+/// 3. the first node that is not a placement contributes its own centre, ends or frame, when it
+///    has one (sphere, cuboid, skewed box, torus; cylinder, cone, capsule; lattice). A boolean,
+///    a blend, an extrude or a cage adds nothing, so a union of several blocks is measured in
+///    the frame of the placements above it.
+///
+/// **Nothing here reads an extent.** A frame that was a fraction of the body's bounding box moved
+/// every point on it whenever any part of the body grew, which is the failure this exists to end.
+///
+/// The graph is flattened here, so a caller may pass the document's own; flattening a graph that
+/// is already flat changes nothing. A two-ended block stands at the midpoint of its ends with
+/// `+Z` along them, so lengthening a bar about its middle leaves a point at the same distance
+/// from the middle.
+pub fn body_frame(
+    document: &Document,
+    graph: &Graph,
+    body: NodeId,
+    resolve: &dyn Fn(&fieldform_scene::ParamRef) -> Option<f64>,
+) -> Result<nalgebra::Similarity3<f64>, CompileError> {
+    use fieldform_scene::Node;
+    let flat = with_turns_flattened(document, graph, resolve);
+    let mut frame = placement_above(document, &flat, body, None, resolve);
+    // A body that is itself a placement has had its own composed by the walk above, so the
+    // descent starts at what it holds. Composing it again would be the double turn.
+    let mut at = match flat.node(body) {
+        Some(Node::Transform { input, .. }) => input.source(),
+        Some(_) => Some(body),
+        None => None,
+    };
+    for _ in 0..4096 {
+        let Some(id) = at else { return Ok(frame) };
+        let Some(node) = flat.node(id) else { return Ok(frame) };
+        let stand_at = |origin: Vector3<f64>, turn: nalgebra::UnitQuaternion<f64>| {
+            nalgebra::Similarity3::from_parts(nalgebra::Translation3::from(origin), turn, 1.0)
+        };
+        match node {
+            Node::Transform { input, .. } => {
+                frame *= placement_similarity(document, &flat, id, node, resolve);
+                at = input.source();
+            }
+            Node::Sphere { centre, .. }
+            | Node::Cuboid { centre, .. }
+            | Node::SkewedBox { centre, .. }
+            | Node::Torus { centre, .. } => {
+                let c = resolve_place_for(document, &flat, id, centre, resolve)?;
+                return Ok(frame * stand_at(c.coords, nalgebra::UnitQuaternion::identity()));
+            }
+            Node::Cylinder { ends, .. } | Node::Cone { ends, .. } | Node::Capsule { ends, .. } => {
+                let (a, b) = resolve_ends(ends, document, &flat, resolve)?;
+                let turn = nalgebra::UnitQuaternion::from_rotation_matrix(&rotation_from_z(b - a));
+                return Ok(frame * stand_at((a.coords + b.coords) * 0.5, turn));
+            }
+            Node::Lattice { frame: lattice_frame, .. } => {
+                let (origin, rotation) = resolve_frame(document, &flat, lattice_frame, resolve)?;
+                let turn = nalgebra::UnitQuaternion::from_rotation_matrix(&rotation);
+                return Ok(frame * stand_at(origin, turn));
+            }
+            _ => return Ok(frame),
+        }
+    }
+    Ok(frame)
+}
+
 /// Where a placement walk starts: every block that is not an *ingredient* of another.
 ///
 /// **Not [`Graph::roots`].** Roots are the bodies, and a plane a cuboid is aimed at is not one --
@@ -233,11 +303,22 @@ fn placement_above_at(
     // Down from each body, composing on the right as it descends: the outermost placement is
     // met first and applies last, which is the order the field itself evaluates them in.
     for seed in placement_seeds(graph) {
+        // **Only down a branch the target is on.** Composing a placement means resolving its
+        // pivot, and a pivot taken from a point asks where that point is, which is this walk
+        // again from the top. Two placements pivoting on points therefore asked each other for
+        // ever: the walk for the first met the second among the seeds, composed it, resolved
+        // its pivot, and that walk met the first. Neither held the target, so neither needed
+        // composing at all, and the depth guard that should have ended it was reading the
+        // wrong number (below). Measured as a stack overflow with two planes standing on two
+        // points on a surface, which is the first scene to have had two.
+        if !holds(graph, seed, target) {
+            continue;
+        }
         let mut stack = vec![(seed, identity)];
-        let mut depth = 0usize;
+        let mut visited = 0usize;
         while let Some((id, above)) = stack.pop() {
-            depth += 1;
-            if depth > 4096 {
+            visited += 1;
+            if visited > 4096 {
                 break;
             }
             // **Not through the block that is standing on it.** A place edge makes the source
@@ -250,6 +331,9 @@ fn placement_above_at(
                 continue;
             }
             let Some(node) = graph.node(id) else { continue };
+            // `depth` is the recursion's, not the walk's. A counter of nodes visited shadowed it
+            // here and was what the pivot's walk was handed, so every level started again from a
+            // handful and `REFERENCE_DEPTH` never came.
             let here = match node {
                 fieldform_scene::Node::Transform { .. } => {
                     above * placement_similarity_at(document, graph, id, node, resolve, depth + 1)
@@ -263,6 +347,25 @@ fn placement_above_at(
         }
     }
     identity
+}
+
+/// Whether `target` is `from` or is built into it, through operands only: what the placement
+/// walk above can reach from `from`, so a branch that does not hold the target is not composed.
+fn holds(graph: &Graph, from: NodeId, target: NodeId) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![from];
+    while let Some(id) = stack.pop() {
+        if id == target {
+            return true;
+        }
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(node) = graph.node(id) {
+            stack.extend(node.operands());
+        }
+    }
+    false
 }
 
 /// The frame a placement's own numbers are written in, which is the one **outside** it.
@@ -679,10 +782,32 @@ fn resolve_frame_at(
             // direction too. A revolve aimed at a point spins about the world's up through it,
             // which is a real frame and may not be the one that was meant; the block's own axis
             // controls are still there to say otherwise.
-            Some(fieldform_scene::Node::Point { at }) => Ok((
-                resolve_point(at, resolve)?.coords,
-                rotation_from_z(Vector3::z()),
-            )),
+            //
+            // **Unless the point stands on a surface**, in which case it has a direction: the
+            // surface's own, which its last solve left in the document (`SurfacePoint::solved`).
+            // `+Z` is the normal and `+X` the roll the solve chose, so a plane aimed at the point
+            // lies on the surface and anything aimed at the plane stands square to it. This is
+            // the whole of how "a plane on a surface" is a plane: it names the point twice, as
+            // its place and as its facing, and is otherwise an ordinary plane. A point still
+            // waiting for its first solve answers `+Z`, as any point does.
+            Some(fieldform_scene::Node::Point { at }) => {
+                let facing = document
+                    .surface_points
+                    .get(node)
+                    .and_then(|record| record.solved)
+                    .and_then(|solved| {
+                        let z = Vector3::from(solved.normal).try_normalize(1e-9)?;
+                        let x = Vector3::from(solved.x);
+                        let x = (x - z * x.dot(&z)).try_normalize(1e-9)?;
+                        Some(Rotation3::from_matrix_unchecked(nalgebra::Matrix3::from_columns(&[
+                            x,
+                            z.cross(&x),
+                            z,
+                        ])))
+                    })
+                    .unwrap_or_else(|| rotation_from_z(Vector3::z()));
+                Ok((resolve_point(at, resolve)?.coords, facing))
+            }
             _ => Err(CompileError::NotAFrameSource(*node)),
         },
         // Taken from a curve: it begins where the curve begins and points the way the curve

@@ -228,6 +228,11 @@ fn main() {
         Scene::Mirrored,
         Scene::MirroredAboutAPlane,
         Scene::Twisted,
+        Scene::Scaled,
+        Scene::ScaledUniform,
+        Scene::Coiled,
+        Scene::Threaded,
+        Scene::Holes,
         Scene::Attracted,
         Scene::Patterned,
         Scene::PatternedRow,
@@ -255,6 +260,8 @@ fn main() {
         Scene::RimmedBlendedToChamferedBox,
         Scene::ManyWayDifference,
         Scene::ManyWayUnion,
+        Scene::RoundedManyWayDifference,
+        Scene::ChamferedManyWayUnion,
         Scene::RoundSolids,
         Scene::SkewedBoxes,
         Scene::Morphed,
@@ -295,6 +302,11 @@ fn main() {
         Scene::Swept,
         Scene::SweptFlush,
         Scene::SweptParallel,
+        Scene::LeaningLens,
+        Scene::LeaningLensParallel,
+        Scene::CoiledFlush,
+        Scene::CoiledScaled,
+        Scene::SweptHexagon,
         Scene::SharpDraft,
         Scene::DraftedWallSweep,
         Scene::SweptScaled,
@@ -873,6 +885,11 @@ enum Scene {
     /// the nearest changes hands mid-surface.
     ManyWayDifference,
     ManyWayUnion,
+    /// The same two, rounded: a blend over a list, which both paths read as the chain of joins a
+    /// nest of pairs was -- the first two joined, then that with the third, and on. G1 on the
+    /// difference and a chamfer on the union, so the chain is met at both exponents' forms.
+    RoundedManyWayDifference,
+    ChamferedManyWayUnion,
     /// A cube infilled with a lattice — one scene per cell, because the three surfaces are
     /// three separate hand-transcriptions into WGSL and a wrong sign in any one of them makes
     /// a pattern that still looks like a lattice.
@@ -1146,6 +1163,27 @@ enum Scene {
     /// thing that would say so: the profile's plane is square to nothing here.
     SweptFlush,
     SweptParallel,
+    /// **A lens held flush at sixty degrees to a straight path, tipped and off the origin** --
+    /// the owner's wing, where the end cap read a quarter of a millimetre as half of one. The cap
+    /// is the section's own plane, the slab was read in millimetres along the path, and a march
+    /// trusting it stepped through the cap: each view's rays through the cap face are where the
+    /// two sides would disagree, by up to half the step a ray took there. And the same lens held
+    /// parallel, whose cap is the same plane and whose slab was read the same way.
+    LeaningLens,
+    LeaningLensParallel,
+    /// **A section on an arm round a coil, held flush, and held square but scaled** -- the two
+    /// readings that are divided whole and were never held to the tube, so between the turns,
+    /// where the nearest place jumps, they read the arm facing away rather than the turn beside
+    /// the point: 7 mm past the surface at a quarter of this size. Both are held to it now, the
+    /// shader through a negated tube slot (`sweep_held_to_tube`), and this is where the two sides
+    /// have to agree about it.
+    CoiledFlush,
+    CoiledScaled,
+    /// **A square carried round a closed hexagon**, which starts and ends at a corner: the frame
+    /// has to turn through that corner as through the other five, on both sides, or the section
+    /// is read across a plane leaning the whole sixty degrees there and the two disagree about
+    /// where the corner's solid is.
+    SweptHexagon,
     /// **The section law, which the shader reads through six slots of its own.** Scaled down
     /// the whole way, drafted outward, and turned through a right angle over a window that is
     /// neither end of the path -- the three things `SweepLaw` does, on the sweep's own spine so
@@ -1420,6 +1458,29 @@ enum Scene {
     /// place while scaling the field around it, so the tracer stops short on one path and not
     /// the other. Nothing but a residual against the CPU would catch that.
     Twisted,
+    /// A box and a sphere, unioned, stretched by (1.5, 0.7, 1.0) about a frame turned off every
+    /// axis -- item 69.
+    ///
+    /// The scale goes through the point assignment as a twist does, and its value and normal
+    /// are the one node whose normal is carried out through a non-orthonormal Jacobian rather
+    /// than differenced. The shader divides the gradient by the factors and the CPU does the
+    /// same, and only a residual between them says whether both read the same three numbers
+    /// in the same order.
+    Scaled,
+    /// The same union scaled by one factor about the same frame, which the shader draws as a
+    /// placement with a pivot -- the uniform rewrite, which is exact and has to agree with the
+    /// kernel's own exact arithmetic.
+    ScaledUniform,
+    /// **The helical coordinate**: a coil, whose ends are the partial revolve's caps, and a
+    /// thread, whose profile is a periodic polyline -- each read through the core's handover,
+    /// where a shader that wrapped `ζ` with `%` or took the wrong copy would part from the CPU.
+    Coiled,
+    Threaded,
+    /// **Two holes cut from one block**: a counterbore going through, whose open bottom is the
+    /// shader's ray rather than a segment, and a tapped M8 with a drill point, whose thread is read
+    /// in the hole's own across pair -- where a basis made differently on the two sides would turn
+    /// the thread and show as a residual of half a pitch.
+    Holes,
     /// A bar drawn toward the same curve the pipe scenes sweep.
     ///
     /// The second domain warp, and the one whose divisor is a *parameter* rather than a
@@ -1560,6 +1621,8 @@ impl Scene {
             Scene::RimmedBlendedToChamferedBox => "a rimmed two-sided extrude blended G2 to a chamfered box",
             Scene::ManyWayDifference => "a block minus three cutters, in one subtraction",
             Scene::ManyWayUnion => "four solids in one union",
+            Scene::RoundedManyWayDifference => "a block minus three cutters, in one rounded subtraction",
+            Scene::ChamferedManyWayUnion => "four solids in one chamfered union",
             Scene::RoundSolids => "round solids, sliced by a half-space",
             Scene::SkewedBoxes => "two skewed boxes and a sphere, one box blended and one turned",
             Scene::Morphed => "a sphere and a cuboid, morphed half way",
@@ -1599,6 +1662,11 @@ impl Scene {
             Scene::Mirrored => "a body beside its own reflection",
             Scene::MirroredAboutAPlane => "a body reflected in a plane block that has been turned",
             Scene::Twisted => "a bar wound about its axis",
+            Scene::Scaled => "a box and a sphere stretched by three factors about a turned frame",
+            Scene::ScaledUniform => "the same, scaled by one factor about the same frame",
+            Scene::Coiled => "a left-handed square-wire coil of two and a half turns, aimed",
+            Scene::Threaded => "an M8 thread twenty long, opened by a clearance of 0.1",
+            Scene::Holes => "a block with a counterbored hole through it and a tapped M8 hole",
             Scene::Attracted => "a bar drawn toward a curve",
             Scene::Patterned => "one body patterned six times around Z",
             Scene::PatternedRow => "one body patterned five times along X",
@@ -1644,6 +1712,11 @@ impl Scene {
             Scene::Swept => "a square profile swept along a curve bending in two planes",
             Scene::SweptFlush => "the same sweep, started flush with its profile's plane",
             Scene::SweptParallel => "the same sweep, its section held parallel throughout",
+            Scene::LeaningLens => "a lens held flush at sixty degrees to a tipped straight path",
+            Scene::LeaningLensParallel => "the same lens held parallel along the same path",
+            Scene::CoiledFlush => "a section on an arm round a coil, held flush with a tipped plane",
+            Scene::CoiledScaled => "a section on an arm round a coil, held square and scaled",
+            Scene::SweptHexagon => "a square carried round a closed hexagon",
             Scene::SharpDraft => "an L drafted twelve degrees, its corners mitred",
             Scene::DraftedWallSweep => "a wall round a loop, drafted and carried along a path",
             Scene::SweptScaled => "the same sweep, its section scaled to a third on the way",
@@ -1843,8 +1916,7 @@ impl Scene {
                 });
                 graph.add(Node::Blend {
                     op: BooleanOp::Union,
-                    a: extrude.into(),
-                    b: block.into(),
+                    inputs: vec![extrude.into(), block.into()],
                     fillet: edge(0.03, Continuity::G2),
                 });
                 return (doc, graph, curves);
@@ -1891,7 +1963,34 @@ impl Scene {
 
         // A pipe on its own is a graph with no cage node in it at all, not a graph whose cage
         // is merely unused: an unconsumed node is a body now and would be drawn.
-        if matches!(self, Scene::ManyWayDifference | Scene::ManyWayUnion) {
+        if matches!(
+            self,
+            Scene::ManyWayDifference
+                | Scene::ManyWayUnion
+                | Scene::RoundedManyWayDifference
+                | Scene::ChamferedManyWayUnion
+        ) {
+            let join = |op: BooleanOp, inputs: Vec<fieldform_scene::Operand>| match self {
+                Scene::RoundedManyWayDifference => Node::Blend {
+                    op,
+                    inputs,
+                    fillet: fieldform_scene::Fillet {
+                        radius: ParamRef::Literal(0.04 * CAGE_MM),
+                        continuity: fieldform_scene::Continuity::G1,
+                        second: None,
+                    },
+                },
+                Scene::ChamferedManyWayUnion => Node::Blend {
+                    op,
+                    inputs,
+                    fillet: fieldform_scene::Fillet {
+                        radius: ParamRef::Literal(0.03 * CAGE_MM),
+                        continuity: fieldform_scene::Continuity::Chamfer,
+                        second: None,
+                    },
+                },
+                _ => Node::Boolean { op, inputs },
+            };
             let mut graph = Graph::empty();
             let at = |x: f64, y: f64, z: f64| {
                 [
@@ -1900,7 +1999,7 @@ impl Scene {
                     ParamRef::Literal(z * CAGE_MM),
                 ]
             };
-            if matches!(self, Scene::ManyWayDifference) {
+            if matches!(self, Scene::ManyWayDifference | Scene::RoundedManyWayDifference) {
                 let block = graph.add(Node::Cuboid { edge: Default::default(),
                     centre: fieldform_scene::Place::At(at(0.0, 0.0, 0.0)),
                     size: [
@@ -1916,10 +2015,10 @@ impl Scene {
                     graph.add(Node::Sphere { centre: fieldform_scene::Place::At(at(-0.3, 0.15, -0.1)), radius: ParamRef::Literal(0.25 * CAGE_MM) }),
                     graph.add(Node::Sphere { centre: fieldform_scene::Place::At(at(0.05, -0.05, 0.0)), radius: ParamRef::Literal(0.18 * CAGE_MM) }),
                 ];
-                graph.add(Node::Boolean {
-                    op: BooleanOp::Difference,
-                    inputs: vec![block.into(), cutters[0].into(), cutters[1].into(), cutters[2].into()],
-                });
+                graph.add(join(
+                    BooleanOp::Difference,
+                    vec![block.into(), cutters[0].into(), cutters[1].into(), cutters[2].into()],
+                ));
             } else {
                 let solids = [
                     graph.add(Node::Sphere { centre: fieldform_scene::Place::At(at(-0.3, 0.0, 0.0)), radius: ParamRef::Literal(0.22 * CAGE_MM) }),
@@ -1935,7 +2034,7 @@ impl Scene {
                     }),
                     graph.add(Node::Sphere { centre: fieldform_scene::Place::At(at(0.4, 0.15, 0.1)), radius: ParamRef::Literal(0.16 * CAGE_MM) }),
                 ];
-                graph.add(Node::Boolean { op: BooleanOp::Union, inputs: solids.iter().copied().map(Into::into).collect() });
+                graph.add(join(BooleanOp::Union, solids.iter().copied().map(Into::into).collect()));
             }
             return (doc, graph, Vec::new());
         }
@@ -2895,6 +2994,179 @@ impl Scene {
             return (doc, graph, vec![Vec::new(); 5]);
         }
 
+        // The owner's wing, rebuilt: a lens 400 across and 80 thick in a plane tipped about an
+        // axis on no plane of the world, carried along a straight path leaning sixty degrees off
+        // the plane's normal, the whole of it set off the origin so nothing is helped by an
+        // alignment. Handed back as the sweep above is: profile, spine, frame.
+        if matches!(self, Scene::LeaningLens | Scene::LeaningLensParallel) {
+            let turn = nalgebra::Rotation3::from_axis_angle(
+                &nalgebra::Unit::new_normalize(nalgebra::Vector3::new(0.3, -0.5, 0.8)),
+                0.9,
+            );
+            let lean = 60f64.to_radians();
+            let along = nalgebra::Vector3::new(lean.sin(), 0.0, lean.cos());
+            let length = 0.6 * CAGE_MM;
+            // The path's middle a little off the model's centre.
+            let origin = Point3::new(40.0, -30.0, 25.0) - turn * (along * (0.5 * length));
+            let at = |local: Point3<f64>| origin + turn * local.coords;
+            let (a, h, n) = (0.2 * CAGE_MM, 0.04 * CAGE_MM, 32);
+            let mut points = Vec::new();
+            for i in 0..n {
+                let x = -a + 2.0 * a * i as f64 / n as f64;
+                points.push(at(Point3::new(x, -h * (1.0 - (x / a).powi(2)), 0.0)));
+            }
+            for i in 0..n {
+                let x = a - 2.0 * a * i as f64 / n as f64;
+                points.push(at(Point3::new(x, h * (1.0 - (x / a).powi(2)), 0.0)));
+            }
+            let profile = CurveId::new();
+            doc.curves.insert(
+                profile,
+                Curve::polyline(profile, "Lens", points, true).expect("closed"),
+            );
+            let path = CurveId::new();
+            let line = Curve::polyline(
+                path,
+                "Path",
+                vec![at(Point3::origin()), at(Point3::from(along * length))],
+                false,
+            )
+            .expect("open");
+            let spine_points = line.tessellate(TOLERANCE_MM);
+            doc.curves.insert(path, line);
+            let mut graph = Graph::empty();
+            graph.add(Node::Sweep {
+                rims: Default::default(),
+                outline: fieldform_scene::Outline::closed(profile),
+                spine: path,
+                section: match self {
+                    Scene::LeaningLens => fieldform_scene::Section::Skewed,
+                    _ => fieldform_scene::Section::Parallel,
+                },
+                law: Default::default(),
+            });
+            let frame = fieldform_field::sweep_frame(
+                &doc,
+                &fieldform_scene::Outline::closed(profile),
+                path,
+                &spine_points,
+            )
+            .expect("a spine with a direction");
+            // The section is derived from the node by `main`, so what is handed back for it here
+            // only has to be there.
+            return (doc, graph, vec![Vec::new(), spine_points, frame]);
+        }
+
+        // A turn and a half of a coil of radius 240 climbing 60 a radian, centred on the model,
+        // with a 64 by 64 section held out on an arm 48 to 112 from the path toward the outside.
+        // The section's plane holds the path's start: square to it for the scaled scene, and
+        // tipped twenty degrees toward the coil's axis for the flush one.
+        if matches!(self, Scene::CoiledFlush | Scene::CoiledScaled) {
+            let (radius, climb, turns) = (240.0f64, 60.0f64, 1.5f64);
+            let span = std::f64::consts::TAU * turns;
+            let at = |a: f64| Point3::new(radius * a.cos(), radius * a.sin(), climb * (a - 0.5 * span));
+            let coil: Vec<Point3<f64>> = (0..=180).map(|i| at(span * i as f64 / 180.0)).collect();
+            let start = coil[0];
+            let along = (coil[1] - coil[0]).normalize();
+            let tip = match self {
+                Scene::CoiledFlush => 20f64.to_radians(),
+                _ => 0.0,
+            };
+            let normal = along * tip.cos() - nalgebra::Vector3::x() * tip.sin();
+            let u = (nalgebra::Vector3::x() - normal * normal.x).normalize();
+            let v = normal.cross(&u);
+            let corner = |a: f64, b: f64| start + u * a + v * b;
+            let profile = CurveId::new();
+            doc.curves.insert(
+                profile,
+                Curve::polyline(
+                    profile,
+                    "Arm",
+                    vec![corner(48.0, -32.0), corner(112.0, -32.0), corner(112.0, 32.0), corner(48.0, 32.0)],
+                    true,
+                )
+                .expect("closed"),
+            );
+            let path = CurveId::new();
+            let line = Curve::polyline(path, "Coil", coil, false).expect("open");
+            let spine_points = line.tessellate(TOLERANCE_MM);
+            doc.curves.insert(path, line);
+            let mut graph = Graph::empty();
+            graph.add(Node::Sweep {
+                rims: Default::default(),
+                outline: fieldform_scene::Outline::closed(profile),
+                spine: path,
+                section: match self {
+                    Scene::CoiledFlush => fieldform_scene::Section::Skewed,
+                    _ => fieldform_scene::Section::Square,
+                },
+                law: match self {
+                    Scene::CoiledScaled => fieldform_scene::SweepLaw {
+                        taper: fieldform_scene::Taper::Scale(ParamRef::Literal(0.7)),
+                        ..Default::default()
+                    },
+                    _ => Default::default(),
+                },
+            });
+            let frame = fieldform_field::sweep_frame(
+                &doc,
+                &fieldform_scene::Outline::closed(profile),
+                path,
+                &spine_points,
+            )
+            .expect("a spine with a direction");
+            return (doc, graph, vec![Vec::new(), spine_points, frame]);
+        }
+
+        // A hexagon of circumradius 400 about the Z axis, closed at its corner on +X, and a 120 mm
+        // square standing in the XZ plane at that corner.
+        if matches!(self, Scene::SweptHexagon) {
+            let ring: Vec<Point3<f64>> = (0..=6)
+                .map(|k| {
+                    let a = std::f64::consts::TAU * (k % 6) as f64 / 6.0;
+                    Point3::new(400.0 * a.cos(), 400.0 * a.sin(), 0.0)
+                })
+                .collect();
+            let profile = CurveId::new();
+            doc.curves.insert(
+                profile,
+                Curve::polyline(
+                    profile,
+                    "Square",
+                    vec![
+                        Point3::new(340.0, 0.0, -60.0),
+                        Point3::new(460.0, 0.0, -60.0),
+                        Point3::new(460.0, 0.0, 60.0),
+                        Point3::new(340.0, 0.0, 60.0),
+                    ],
+                    true,
+                )
+                .expect("closed"),
+            );
+            let path = CurveId::new();
+            // The start repeated at the end, as a loop is drawn: the shader walks the polyline the
+            // curve tessellates to, and only that closes the walk.
+            let line = Curve::polyline(path, "Hexagon", ring, true).expect("closed");
+            let spine_points = line.tessellate(TOLERANCE_MM);
+            doc.curves.insert(path, line);
+            let mut graph = Graph::empty();
+            graph.add(Node::Sweep {
+                rims: Default::default(),
+                outline: fieldform_scene::Outline::closed(profile),
+                spine: path,
+                section: fieldform_scene::Section::Square,
+                law: Default::default(),
+            });
+            let frame = fieldform_field::sweep_frame(
+                &doc,
+                &fieldform_scene::Outline::closed(profile),
+                path,
+                &spine_points,
+            )
+            .expect("a spine with a direction");
+            return (doc, graph, vec![Vec::new(), spine_points, frame]);
+        }
+
         // A profile carried along a curve, handed back in the shader's binding order --
         // profile, spine, frame -- with the profile flattened as an extrude's is and the frame
         // computed from the very points the spine goes up as, which is what `sweep_frame` asks
@@ -3501,15 +3773,14 @@ impl Scene {
                 })
             };
             let (a, b) = (slab(&mut graph, -0.15), slab(&mut graph, 0.15));
-            let body = graph.add(Node::Blend { op: BooleanOp::Union, a: a.into(), b: b.into(), fillet: fillet(0.04) });
+            let body = graph.add(Node::Blend { op: BooleanOp::Union, inputs: vec![a.into(), b.into()], fillet: fillet(0.04) });
             let boss = graph.add(Node::Sphere {
                 centre: fieldform_scene::Place::At([lit(0.12 * mm), lit(0.03 * mm), lit(0.0)]),
                 radius: lit(0.09 * mm),
             });
             let bossed = graph.add(Node::Blend {
                 op: BooleanOp::Union,
-                a: body.into(),
-                b: boss.into(),
+                inputs: vec![body.into(), boss.into()],
                 fillet: fillet(0.05),
             });
             // Turned on two axes, so nothing under it is aligned with the world the gap is
@@ -3530,8 +3801,7 @@ impl Scene {
             });
             graph.add(Node::Blend {
                 op: BooleanOp::Difference,
-                a: placed.into(),
-                b: bore.into(),
+                inputs: vec![placed.into(), bore.into()],
                 fillet: fillet(0.035),
             });
             graph.mark_critical(fieldform_scene::Critical {
@@ -3600,6 +3870,125 @@ impl Scene {
                     ParamRef::Literal(0.0),
                     ParamRef::Literal(-CAGE_MM * 0.07),
                 ]),
+            });
+            return (doc, graph, Vec::new());
+        }
+
+        // The two helical solids, as the design note names them: a left-handed square-section
+        // coil of two and a half turns on a turned, moved frame, and an M8 thread of length 20
+        // opened by a clearance of 0.1. Built at their own size and then placed at twenty-five
+        // times it, since the views frame the cage's metre: a uniform placement is exact, so
+        // what is compared is still the M8, read through its designation on both sides.
+        if matches!(self, Scene::Coiled | Scene::Threaded) {
+            let mut graph = Graph::empty();
+            let lit = ParamRef::Literal;
+            let solid = graph.add(match self {
+                Scene::Coiled => Node::Coil {
+                    frame: fieldform_scene::Frame::At {
+                        origin: [lit(3.0), lit(-2.0), lit(1.0)],
+                        axis: [lit(0.2), lit(-0.3), lit(1.0)],
+                    },
+                    diameter: lit(20.0),
+                    size: fieldform_scene::CoilSize::TurnsPitch { turns: lit(2.5), pitch: lit(6.0) },
+                    section: fieldform_scene::CoilSection::Square { wire: lit(2.0) },
+                    hand: fieldform_scene::Hand::Left,
+                },
+                _ => Node::Thread {
+                    frame: fieldform_scene::Frame::default(),
+                    major: lit(8.0),
+                    pitch: lit(1.25),
+                    length: lit(20.0),
+                    hand: fieldform_scene::Hand::Right,
+                    clearance: lit(0.1),
+                    designation: Some("M8".into()),
+                },
+            });
+            graph.add(Node::Transform {
+                input: solid.into(),
+                translation: [lit(0.0), lit(0.0), lit(-200.0)],
+                rotation: [lit(0.0); 3],
+                scale: lit(25.0),
+                about: fieldform_scene::Place::origin(),
+            });
+            return (doc, graph, Vec::new());
+        }
+
+        // A block with a counterbored hole through it and a tapped M8, blind with a drill
+        // point, in one difference -- the design note's scene. At its own size, placed at twenty-
+        // five times it as the helical scenes are, and turned so neither axis is the view's.
+        if matches!(self, Scene::Holes) {
+            use fieldform_scene::{HoleDepth, HoleKind, HoleTip};
+            let mut graph = Graph::empty();
+            let lit = ParamRef::Literal;
+            let block = graph.add(Node::Cuboid {
+                edge: Default::default(),
+                centre: fieldform_scene::Place::at(0.0, 0.0, -10.0),
+                size: [lit(40.0), lit(26.0), lit(20.0)],
+                turn: fieldform_scene::no_turn(),
+            });
+            let down = |x: f64| fieldform_scene::Ends::between(
+                fieldform_scene::Place::at(x, 0.0, 0.0),
+                fieldform_scene::Place::at(x, 0.0, -1.0),
+            );
+            let bored = graph.add(Node::Hole {
+                ends: down(-9.0),
+                kind: HoleKind::Counterbore { diameter: lit(6.6), bore_diameter: lit(11.0), bore_depth: lit(6.5) },
+                depth: HoleDepth::Through,
+                tip: HoleTip::Flat,
+            });
+            let tapped = graph.add(Node::Hole {
+                ends: down(9.0),
+                kind: HoleKind::Tapped { designation: "M8".into(), thread_depth: lit(12.0), clearance: lit(0.0) },
+                depth: HoleDepth::Blind(lit(16.0)),
+                tip: HoleTip::Drill(lit(118.0)),
+            });
+            let cut = graph.add(Node::Boolean {
+                op: BooleanOp::Difference,
+                inputs: vec![block.into(), bored.into(), tapped.into()],
+            });
+            graph.add(Node::Transform {
+                input: cut.into(),
+                translation: [lit(0.0); 3],
+                rotation: [lit(20.0), lit(-15.0), lit(10.0)],
+                scale: lit(25.0),
+                about: fieldform_scene::Place::origin(),
+            });
+            return (doc, graph, Vec::new());
+        }
+
+        if matches!(self, Scene::Scaled | Scene::ScaledUniform) {
+            let mut graph = Graph::empty();
+            let mm = |f: f64| ParamRef::Literal(f * CAGE_MM);
+            // A box with a sphere standing out of it, so the surface has flats, a curve and a
+            // crease between them: a normal divided by the wrong factors shows on the flats, a
+            // point squeezed about the wrong centre shows everywhere.
+            let block = graph.add(Node::Cuboid {
+                edge: Default::default(),
+                centre: fieldform_scene::Place::At([mm(0.05), mm(-0.02), mm(0.0)]),
+                size: [mm(0.5), mm(0.3), mm(0.2)],
+                turn: fieldform_scene::no_turn(),
+            });
+            let ball = graph.add(Node::Sphere {
+                centre: fieldform_scene::Place::At([mm(0.2), mm(0.08), mm(0.1)]),
+                radius: mm(0.12),
+            });
+            let both = graph.add(Node::Boolean {
+                op: BooleanOp::Union,
+                inputs: vec![block.into(), ball.into()],
+            });
+            let factors = match self {
+                Scene::Scaled => [ParamRef::Literal(1.5), ParamRef::Literal(0.7), ParamRef::Literal(1.0)],
+                _ => [ParamRef::Literal(1.4); 3],
+            };
+            graph.add(Node::Scale {
+                input: both.into(),
+                factors,
+                // Off the origin and off every axis, as the twist's frame is and for the same
+                // reason: a shader that lost the centre or the turn would still look plausible.
+                frame: fieldform_scene::Frame::At {
+                    origin: [mm(0.1), mm(-0.05), mm(0.03)],
+                    axis: [ParamRef::Literal(0.3), ParamRef::Literal(1.0), ParamRef::Literal(0.5)],
+                },
             });
             return (doc, graph, Vec::new());
         }
@@ -3889,8 +4278,7 @@ impl Scene {
             });
             graph.add(Node::Blend {
                 op: BooleanOp::Union,
-                a: ball.into(),
-                b: block.into(),
+                inputs: vec![ball.into(), block.into()],
                 fillet: Fillet {
                     radius: mm(0.05),
                     continuity: Continuity::Chamfer,
@@ -3930,8 +4318,7 @@ impl Scene {
             });
             graph.add(Node::Blend {
                 op: BooleanOp::Union,
-                a: ball.into(),
-                b: block.into(),
+                inputs: vec![ball.into(), block.into()],
                 fillet: Fillet { radius: ParamRef::Field(ramp), continuity: Continuity::G1, second: None },
             });
             return (doc, graph, Vec::new());
@@ -4018,8 +4405,7 @@ impl Scene {
             });
             let rounded = graph.add(Node::Blend {
                 op: BooleanOp::Union,
-                a: leaning.into(),
-                b: ball.into(),
+                inputs: vec![leaning.into(), ball.into()],
                 fillet: Fillet::of(ParamRef::Literal(40.0)),
             });
             graph.add(Node::Boolean { op: BooleanOp::Union, inputs: vec![rounded.into(), placed.into()] });
@@ -4145,6 +4531,8 @@ impl Scene {
             | Scene::RimmedBlendedToChamferedBox
             | Scene::ManyWayDifference
             | Scene::ManyWayUnion
+            | Scene::RoundedManyWayDifference
+            | Scene::ChamferedManyWayUnion
             | Scene::RoundSolids
             | Scene::SkewedBoxes
             | Scene::Morphed
@@ -4193,6 +4581,11 @@ impl Scene {
             | Scene::Swept
             | Scene::SweptFlush
             | Scene::SweptParallel
+            | Scene::LeaningLens
+            | Scene::LeaningLensParallel
+            | Scene::CoiledFlush
+            | Scene::CoiledScaled
+            | Scene::SweptHexagon
             | Scene::SweptScaled
             | Scene::SweptDrafted
             | Scene::SweptTwistedWindow
@@ -4216,6 +4609,11 @@ impl Scene {
             | Scene::Mirrored
             | Scene::MirroredAboutAPlane
             | Scene::Twisted
+            | Scene::Scaled
+            | Scene::ScaledUniform
+            | Scene::Coiled
+            | Scene::Threaded
+            | Scene::Holes
             | Scene::Attracted
             | Scene::Patterned
             | Scene::PatternedRow
@@ -4240,38 +4638,32 @@ impl Scene {
             }),
             Scene::Blend => graph.add(Node::Blend {
                 op: BooleanOp::Union,
-                a: cage_node.into(),
-                b: pipe.into(),
+                inputs: vec![cage_node.into(), pipe.into()],
                 fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::G1, second: None },
             }),
             Scene::BlendedDifference => graph.add(Node::Blend {
                 op: BooleanOp::Difference,
-                a: cage_node.into(),
-                b: pipe.into(),
+                inputs: vec![cage_node.into(), pipe.into()],
                 fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::G1, second: None },
             }),
             Scene::G2Blend => graph.add(Node::Blend {
                 op: BooleanOp::Union,
-                a: cage_node.into(),
-                b: pipe.into(),
+                inputs: vec![cage_node.into(), pipe.into()],
                 fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::G2, second: None },
             }),
             Scene::G2BlendedDifference => graph.add(Node::Blend {
                 op: BooleanOp::Difference,
-                a: cage_node.into(),
-                b: pipe.into(),
+                inputs: vec![cage_node.into(), pipe.into()],
                 fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::G2, second: None },
             }),
             Scene::ChamferBlend => graph.add(Node::Blend {
                 op: BooleanOp::Union,
-                a: cage_node.into(),
-                b: pipe.into(),
+                inputs: vec![cage_node.into(), pipe.into()],
                 fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::Chamfer, second: None },
             }),
             Scene::ChamferedDifference => graph.add(Node::Blend {
                 op: BooleanOp::Difference,
-                a: cage_node.into(),
-                b: pipe.into(),
+                inputs: vec![cage_node.into(), pipe.into()],
                 fillet: Fillet { radius: ParamRef::Literal(BLEND_RADIUS_MM), continuity: Continuity::Chamfer, second: None },
             }),
         };

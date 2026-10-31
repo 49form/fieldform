@@ -121,3 +121,57 @@
             }
         }
     }
+
+    /// **A blend over a list is the nest of pairs it replaces, read for read**: the field, the box
+    /// and the step budget of four operands in one block equal those of three blocks each holding
+    /// the last -- for each operation and each shape of join, since the list is evaluated as that
+    /// chain and promises nothing else.
+    #[test]
+    fn a_blend_over_a_list_reads_exactly_as_the_nest_of_pairs_it_replaces() {
+        use fieldform_scene::{Continuity, Fillet, Operand};
+        let fillet = |continuity| Fillet { radius: ParamRef::Literal(3.0), continuity, second: None };
+        for (op, continuity) in [
+            (BooleanOp::Difference, Continuity::G1),
+            (BooleanOp::Union, Continuity::G2),
+            (BooleanOp::Intersection, Continuity::Chamfer),
+        ] {
+            let operands = |g: &mut Graph| -> Vec<Operand> {
+                vec![
+                    sphere(g, 0.0, 16.0).into(),
+                    sphere(g, 12.0, 7.0).into(),
+                    sphere(g, -11.0, 8.0).into(),
+                    sphere(g, 2.0, 9.0).into(),
+                ]
+            };
+            let mut listed = Graph::empty();
+            let inputs = operands(&mut listed);
+            let list = listed.add(Node::Blend { op, inputs, fillet: fillet(continuity) });
+
+            let mut nested = Graph::empty();
+            let inputs = operands(&mut nested);
+            let mut joined = inputs[0];
+            for next in &inputs[1..] {
+                joined = nested.add(Node::Blend { op, inputs: vec![joined, *next], fillet: fillet(continuity) }).into();
+            }
+            let top = joined.source().expect("a block");
+
+            let (a, b) = (compiled(&listed), compiled(&nested));
+            for i in 0..=24 {
+                for j in 0..=6 {
+                    let p = Point3::new(-30.0 + 2.5 * i as f64, -9.0 + 3.0 * j as f64, 2.0);
+                    assert_eq!(a.distance(p), b.distance(p), "{op:?} {continuity:?} at {p:?}");
+                }
+            }
+            let doc = Document::new();
+            assert_eq!(
+                crate::graph_extent(&doc, &listed, list).as_box(),
+                crate::graph_extent(&doc, &nested, top).as_box(),
+                "{op:?} {continuity:?}: the same box"
+            );
+            assert_eq!(
+                crate::step_multiplier(&doc, &listed),
+                crate::step_multiplier(&doc, &nested),
+                "{op:?} {continuity:?}: the same steps"
+            );
+        }
+    }

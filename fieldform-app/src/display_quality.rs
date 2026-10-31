@@ -57,6 +57,9 @@ pub(crate) const SLOW_FRAME_MS: f32 = 150.0;
 /// and 2.4 times the memory of 192 for a third more resolution. Recorded rather than merely
 /// omitted, so the next person weighing it has the number instead of the question.
 ///
+/// **These cells are the rung's ask, and a big cage is held below it** -- see [`cell_cap`], which
+/// carries the measured cost of a bake by cage size and the ceiling that follows from it.
+///
 /// **Still size.** The part of this setting a body without a cage or a pipe can feel: an
 /// analytic solid is neither baked nor tessellated, so the image's own size is the only
 /// sharpness on offer to it. Per frame by `traced_cost.rs` when the image was still read back:
@@ -217,6 +220,56 @@ impl DisplayQuality {
             spine_degrees: self.spine_degrees(),
             profile_degrees: self.profile_degrees(),
         }
+    }
+
+    /// [`Self::fineness`] for a part whose largest cage has `cage_faces` faces: the rung's cells,
+    /// held to [`cell_cap`] where the cage is big enough that the rung would cost minutes.
+    pub(crate) fn fineness_for(self, cage_faces: usize) -> traced::Fineness {
+        let mut fineness = self.fineness();
+        fineness.resolution = fineness.resolution.min(cell_cap(cage_faces));
+        fineness
+    }
+}
+
+/// The most cells across a settled bake of a cage of `cage_faces` faces -- a ceiling on a rung's
+/// cells, never a floor: a small cage keeps the rung it was asked for, and a rung that asks for
+/// less asks for less.
+///
+/// **Chosen from measurements, and why the cage's size matters at all.** How far the bake strays
+/// from the surface depends on the cell's size and on nothing else -- the same 0.14, 0.065, 0.044
+/// and 0.02 mm at 64, 96, 128 and 192 cells across a metre, whatever the cage -- but what a bake
+/// costs depends heavily on the cage: its distance field is read at every cell near the surface,
+/// and each read is dearer the more triangles the surface has. Measured by
+/// `fieldform-gpu/examples/bake_vs_cage.rs`, dev profile, the settled bake alone (the field's own
+/// build, 1.3 s at 1.5k faces to 24 s at 24k, is on top and does not depend on the cells):
+///
+/// | cage faces | 64 cells | 96 | 128 | 192 |
+/// |---|---|---|---|---|
+/// | 96 | 0.3 s | | 1.8 s | 7.8 s |
+/// | 1 536 | 2.1 s | | 10.4 s | 30.7 s |
+/// | 6 144 | 4.4 s | 10.9 s | 23.7 s | 128 s |
+/// | 24 576 | 12.3 s | 27.3 s | 58.1 s | not run |
+///
+/// So 192 cells, 1.6 s on the starting cube, is half a minute on a cage of 1 500 faces and over
+/// two minutes on one of 6 000, for 0.02 mm instead of 0.14 -- well under a pixel on a metre at
+/// the sharpest still. The cap holds the settled bake to roughly ten seconds, whatever the cage:
+///
+/// | cage faces | cap | settled bake |
+/// |---|---|---|
+/// | up to 1 000 | none (the rung) | up to 192 cells |
+/// | up to 4 000 | 128 | ~10 s at 1.5k |
+/// | up to 12 000 | 96 | ~11 s at 6k |
+/// | more | 64 | ~12 s at 24k |
+///
+/// A drag never pays any of this; it bakes 32 cells whatever the cage, and the draft stays on
+/// screen until the settled bake lands. The thresholds are a fit to those rows, not a law --
+/// re-run the example before moving one.
+pub(crate) fn cell_cap(cage_faces: usize) -> usize {
+    match cage_faces {
+        0..=1_000 => usize::MAX,
+        1_001..=4_000 => 128,
+        4_001..=12_000 => 96,
+        _ => 64,
     }
 }
 

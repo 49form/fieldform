@@ -341,7 +341,7 @@ fn structural_edit(
         2 => {
             let (a, b) = (rng.pick(&nodes)?, rng.pick(&nodes)?);
             let fillet = Fillet { radius: lit(1.0), ..Fillet::hard() };
-            born.node(graph.add(Node::Blend { op: BooleanOp::Union, a: a.into(), b: b.into(), fillet }));
+            born.node(graph.add(Node::Blend { op: BooleanOp::Union, inputs: vec![a.into(), b.into()], fillet }));
             Some("a blend added")
         }
         3 => {
@@ -947,7 +947,7 @@ fn undoing_a_gesture_that_followed_a_new_block_leaves_no_orphaned_ownership() {
 
         let mut g = started.clone();
         let fillet = Fillet { radius: lit(0.5), ..Fillet::hard() };
-        let blend = g.add(Node::Blend { op: BooleanOp::Union, a: a.into(), b: b.into(), fillet });
+        let blend = g.add(Node::Blend { op: BooleanOp::Union, inputs: vec![a.into(), b.into()], fillet });
         let first = SetPartGraph::with_ownership(part, started.clone(), g.clone(), given());
         stack.execute(&mut doc, Box::new(first)).expect("adds the blend");
         assert_eq!(doc.ownership_nodes.get(&a), Some(&Ownership::Nested), "adopted");

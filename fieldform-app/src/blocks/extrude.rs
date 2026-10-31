@@ -168,6 +168,18 @@ impl App {
             || matches!(&new_sides, fieldform_scene::Sides::Two { draft, .. }
                 if self.resolve(draft.clone()) != 0.0);
         let new_corners = self.corner_controls(ui, corners, leaning);
+        // **A draft the section has no room for is said here**, under the number that asked
+        // for it, as well as on the line above the blocks: past the section's depth it closes,
+        // and a mitred outline can cross itself before that. The text is the compile's own, so
+        // it names how far the walls may move and the steepest draft that fits.
+        if self.draft_refused == Some(id)
+            && let Some(why) = self.compile_error()
+        {
+            ui.horizontal(|ui| {
+                row_label(ui, "");
+                ui.add(egui::Label::new(egui::RichText::new(why).color(ui.visuals().warn_fg_color)).wrap());
+            });
+        }
         // Side two's own two numbers, shown where there is a side two.
         if let fieldform_scene::Sides::Two { height: other_height, draft: other_draft } =
             new_sides.clone()

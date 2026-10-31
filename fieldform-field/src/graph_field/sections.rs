@@ -276,7 +276,19 @@ pub fn outline_miters(
         Point3::from(rotation.inverse_transform_vector(&(p.coords - translation)))
     };
     let profile = crate::Profile::in_plane(&laid.points, into, f64::INFINITY).ok()?;
-    Some(profile.miters().iter().map(|m| Point3::new(m.x, m.y, 0.0)).collect())
+    // **And one entry after them: the longest**, which is how fast a mitred corner moves for each
+    // millimetre a wall does, and so what a sharp draft's divisor is multiplied by in the shader
+    // (`mitre_rate`) as `Footprint::mitre_rate` multiplies the leaf's. One entry rather than a
+    // slot, because it is a property of the very polygon this hands across.
+    let longest = profile.miters().iter().map(|m| m.norm()).fold(1.0f64, f64::max);
+    Some(
+        profile
+            .miters()
+            .iter()
+            .map(|m| Point3::new(m.x, m.y, 0.0))
+            .chain(std::iter::once(Point3::new(longest, 0.0, 0.0)))
+            .collect(),
+    )
 }
 
 /// [`outline_wall`], for a block that need not be in the graph: the wall `block` would be built

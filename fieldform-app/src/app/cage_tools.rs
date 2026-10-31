@@ -40,6 +40,9 @@ pub(crate) struct CageSession {
     pub(crate) cap_before: Vec<Point3<f64>>,
     /// The cap's average normal in the cage's space: an extrude's default direction.
     pub(crate) normal: Vector3<f64>,
+    /// With the direction `vertex_normals`: where each cap vertex goes per millimetre of distance,
+    /// aligned with `cap`; empty in every other direction.
+    pub(crate) cap_dirs: Vec<Vector3<f64>>,
     /// The floating panel's state (`cage_panel.rs`).
     pub(crate) panel: super::tool_panel::Panel,
 }
@@ -60,6 +63,51 @@ pub(crate) struct CageTool {
     second: Vec<Selection>,
     /// The knife's path and preview, read only while the knife is the tool (`knife_tool.rs`).
     pub(crate) knife: super::knife_tool::Knife,
+    /// The settings window's state (`click_panel.rs`), shared by every click tool that has rows.
+    pub(crate) panel: super::tool_panel::Panel,
+    /// Insert Edge: how many evenly spaced rings one click makes.
+    pub(crate) count: u32,
+    /// Bridge: how many rows of faces the bridge is made of.
+    pub(crate) divisions: u32,
+    /// Weld: whether the two vertices meet halfway rather than at the second.
+    pub(crate) weld_midpoint: bool,
+    /// Weld: whether the second click zips the whole open rim, rather than welding the one pair.
+    pub(crate) weld_zip: bool,
+    /// Insert Edge: how a typed offset is read, and the offset itself while one is set -- it then
+    /// overrides the pointer on whichever edge is hovered, from the end nearer the pointer.
+    pub(crate) offset_mode: super::knife_tool::OffsetMode,
+    pub(crate) offset: Option<f64>,
+    /// Insert Edge: the end of the hovered edge an offset is read from, nearer the pointer, drawn
+    /// as a tick so the number is unambiguous.
+    pub(crate) ref_end: Option<VertexId>,
+    /// Insert Edge: the edge a press landed on, held while the pointer drags `t` along it. A drag
+    /// is read against this edge wherever the pointer goes, and a release commits it.
+    pub(crate) drag: Option<(VertexId, VertexId)>,
+    pub(crate) dragged: bool,
+}
+
+impl CageTool {
+    pub(crate) fn new(command: &'static commands::Command) -> Self {
+        CageTool {
+            command,
+            t: 0.5,
+            preview: Vec::new(),
+            refused: None,
+            first: Vec::new(),
+            second: Vec::new(),
+            knife: Default::default(),
+            panel: Default::default(),
+            count: 1,
+            divisions: 1,
+            weld_midpoint: false,
+            weld_zip: false,
+            offset_mode: Default::default(),
+            offset: None,
+            ref_end: None,
+            drag: None,
+            dragged: false,
+        }
+    }
 }
 
 impl App {
@@ -93,7 +141,7 @@ impl App {
             self.dispatch(command.op, &Args::new());
             return;
         }
-        self.cage_tool = Some(CageTool { command, t: 0.5, preview: Vec::new(), refused: None, first: Vec::new(), second: Vec::new(), knife: Default::default() });
+        self.cage_tool = Some(CageTool::new(command));
         // Field mode draws no cage to aim at: said, rather than left to a hover that never lands.
         if !self.view_mode.cage_is_editable() {
             self.view_mode = ViewMode::Overlay;
@@ -158,6 +206,7 @@ impl App {
             cap: Vec::new(),
             cap_before: Vec::new(),
             normal: Vector3::z(),
+            cap_dirs: Vec::new(),
             panel: Default::default(),
         });
         // The lift, dispatched rather than typed: its line is written when the session is kept,
@@ -253,7 +302,7 @@ impl App {
 
     /// Reads the pointer against the hovered edge and refreshes the preview. Once a frame while a
     /// tool is armed.
-    pub(crate) fn cage_tool_hover(&mut self, aspect: f32, rect: egui::Rect, pointer: Option<egui::Pos2>, snap_half: bool) {
+    pub(crate) fn cage_tool_hover(&mut self, aspect: f32, rect: egui::Rect, pointer: Option<egui::Pos2>, snap_half: bool, ctrl: bool, alt: bool) {
         let Some(op) = self.cage_tool.as_ref().map(|t| t.command.op) else { return };
         if let Some(tool) = self.cage_tool.as_mut() {
             tool.preview.clear();
@@ -261,13 +310,25 @@ impl App {
         }
         // The knife reads faces and vertices as well as edges, and finds its own point.
         if op == "cage.cut" {
-            self.knife_hover(aspect, rect, pointer, snap_half);
+            self.knife_hover(aspect, rect, pointer, snap_half, ctrl, alt);
             return;
         }
-        let Selection::Edge(a, b) = self.hover else { return };
+        // A press on an edge holds it while the pointer drags `t` along it, wherever the pointer goes.
+        let dragged_edge = self.cage_tool.as_ref().and_then(|t| t.drag);
+        let (a, b) = match (dragged_edge, self.hover) {
+            (Some(edge), _) => edge,
+            (None, Selection::Edge(a, b)) => (a, b),
+            _ => {
+                if let Some(tool) = self.cage_tool.as_mut() {
+                    tool.ref_end = None;
+                }
+                return;
+            }
+        };
         let Some(pos) = pointer else { return };
+        let (count, mode, offset) = self.cage_tool.as_ref().map_or((1, Default::default(), None), |t| (t.count, t.offset_mode, t.offset));
         // Everything read from the mesh first, so the tool can then be written to.
-        let (t, preview, refused) = {
+        let (t, preview, refused, ref_end) = {
             let mesh = self.cage();
             let placement = self.control_placement();
             let pa = self.camera.project_to_screen(aspect, rect, vertex_pos(mesh, &placement, a));
@@ -279,38 +340,53 @@ impl App {
                 }
                 _ => 0.5,
             };
+            // The end an offset is measured from: the one nearer the pointer.
+            let ref_end = match (pa, pb) {
+                (Some(pa), Some(pb)) if (pb - pos).length() < (pa - pos).length() => b,
+                _ => a,
+            };
             let t = if snap_half { 0.5 } else { t };
+            // A typed offset overrides the pointer; several rings are evenly spaced and ignore it.
+            let t = match offset {
+                Some(value) if count == 1 && !snap_half => super::knife_tool::t_from_offset(mesh, (a, b), ref_end, mode, value),
+                _ => t,
+            };
             let mut preview = Vec::new();
             let mut refused = None;
             if op == "cage.insert_ring" {
-                match edit::insert_ring(mesh, (a, b), t) {
-                    Ok(result) => {
-                        let new: std::collections::HashSet<VertexId> = result.new_vertices.iter().copied().collect();
-                        let m = &result.mesh;
-                        for (p, q) in m.edges() {
-                            if new.contains(&p) && new.contains(&q) {
-                                preview.push((m.vertex_position(p), m.vertex_position(q)));
-                            }
-                        }
-                    }
+                match edit::insert_rings(mesh, (a, b), t, count as usize) {
+                    Ok(result) => preview = result.ring_edges,
                     Err(e) => refused = Some(e.reason),
                 }
             }
-            (t, preview, refused)
+            (t, preview, refused, ref_end)
         };
         if let Some(tool) = self.cage_tool.as_mut() {
             tool.t = t;
             tool.preview = preview;
             tool.refused = refused;
+            tool.ref_end = Some(ref_end);
         }
+    }
+
+    /// The hovered edge's `t` as the line says it: a fraction from its first vertex.
+    pub(crate) fn ring_line(&self) -> Option<String> {
+        let tool = self.cage_tool.as_ref()?;
+        let (a, b) = match (tool.drag, self.hover) {
+            (Some(edge), _) => edge,
+            (None, Selection::Edge(a, b)) => (a, b),
+            _ => return None,
+        };
+        let count = if tool.count > 1 { format!(" count={}", tool.count) } else { String::new() };
+        Some(format!("insertring edge={}-{} t={}{count}", a.index(), b.index(), echo::number(tool.t)))
     }
 
     /// A click on the cage while a tool is armed: the tool's commit, as its own console line.
     /// `true` when the click was the tool's and not a selection.
-    pub(crate) fn cage_tool_click(&mut self, shift: bool, pos: Option<egui::Pos2>) -> bool {
+    pub(crate) fn cage_tool_click(&mut self, shift: bool, pos: Option<egui::Pos2>, aspect: f32, rect: egui::Rect) -> bool {
         let Some(tool) = self.cage_tool.as_ref() else { return false };
         if tool.command.op == "cage.cut" {
-            return self.knife_click(shift, pos);
+            return self.knife_click(shift, pos, aspect, rect);
         }
         if tool.refused.is_some() {
             let why = tool.refused.clone().unwrap_or_default();
@@ -320,9 +396,10 @@ impl App {
         let op = tool.command.op;
         let edge_text = |a: VertexId, b: VertexId| format!("{}-{}", a.index(), b.index());
         let line = match (op, self.hover) {
-            ("cage.insert_ring", Selection::Edge(a, b)) => {
-                format!("insertring edge={} t={}", edge_text(a, b), echo::number(tool.t))
-            }
+            ("cage.insert_ring", Selection::Edge(..)) => match self.ring_line() {
+                Some(line) => line,
+                None => return false,
+            },
             // **Weld: the vertex to move, then the vertex it moves onto.** Shift on the second
             // meets halfway.
             ("cage.weld", Selection::Vertex(v)) => match tool.first.first() {
@@ -333,8 +410,9 @@ impl App {
                 }
                 Some(&Selection::Vertex(from)) if from == v => return true,
                 Some(&Selection::Vertex(from)) => {
-                    let at = if shift { " at=midpoint" } else { "" };
-                    format!("weld pairs={}{at}", edge_text(from, v))
+                    let at = if shift || tool.weld_midpoint { " at=midpoint" } else { "" };
+                    let how = if tool.weld_zip { "zip" } else { "pairs" };
+                    format!("weld {how}={}{at}", edge_text(from, v))
                 }
                 _ => return true,
             },
@@ -374,7 +452,8 @@ impl App {
                     side.iter().filter_map(|s| if let Selection::Edge(p, q) = s { Some((*p, *q)) } else { None }).collect()
                 };
                 let text = |c: &[(VertexId, VertexId)]| c.iter().map(|&(p, q)| edge_text(p, q)).collect::<Vec<_>>().join(",");
-                format!("bridge a={} b={}", text(&edges_of(&tool.first)), text(&edges_of(&tool.second)))
+                let divisions = if tool.divisions > 1 { format!(" divisions={}", tool.divisions) } else { String::new() };
+                format!("bridge a={} b={}{divisions}", text(&edges_of(&tool.first)), text(&edges_of(&tool.second)))
             }
             _ => return false,
         };
@@ -398,6 +477,23 @@ impl App {
         }
         let placement = self.control_placement();
         let stroke = egui::Stroke::new(2.0_f32, PROPAGATED_COLOR);
+        // Insert Edge: a tick across the end a typed offset is measured from, so the number is
+        // unambiguous (`cage-knife-spec.md` §3, the same mark the knife draws).
+        if tool.command.op == "cage.insert_ring"
+            && let Some(end) = tool.ref_end
+            && let Some((a, b)) = tool.drag.or(if let Selection::Edge(a, b) = self.hover { Some((a, b)) } else { None })
+        {
+            let mesh = self.cage();
+            let other = if end == a { b } else { a };
+            if let (Some(s), Some(o)) = (
+                self.camera.project_to_screen(aspect, rect, vertex_pos(mesh, &placement, end)),
+                self.camera.project_to_screen(aspect, rect, vertex_pos(mesh, &placement, other)),
+            ) {
+                let dir = (o - s).normalized();
+                let perp = egui::vec2(-dir.y, dir.x) * 6.0;
+                painter.line_segment([s - perp, s + perp], egui::Stroke::new(2.0_f32, crate::overlay_draw::PREVIEW_COLOR));
+            }
+        }
         for (p, q) in &tool.preview {
             let to_screen = |p: &Point3<f64>| {
                 let w = placement.transform_point(p);
@@ -415,6 +511,225 @@ impl App {
             if let Some(at) = self.camera.project_to_screen(aspect, rect, vertex_pos(mesh, &placement, a)) {
                 painter.text(at + egui::vec2(8.0, -8.0), egui::Align2::LEFT_BOTTOM, why, egui::FontId::proportional(12.0), ERROR_COLOR);
             }
+        }
+    }
+
+    /// Whether the armed tool has a settings window: the knife, Insert Edge, Bridge and Weld.
+    pub(crate) fn cage_tool_has_panel(&self) -> bool {
+        self.cage_tool.as_ref().is_some_and(|t| matches!(t.command.op, "cage.cut" | "cage.insert_ring" | "cage.bridge" | "cage.weld"))
+    }
+
+    /// The armed tool's rows, in order.
+    pub(crate) fn cage_tool_panel_rows(&self) -> Vec<super::tool_panel::Row> {
+        use super::tool_panel::Row;
+        let Some(tool) = self.cage_tool.as_ref() else { return Vec::new() };
+        match tool.command.op {
+            "cage.cut" => self.knife_panel_rows(),
+            "cage.insert_ring" => vec![
+                Row { key: "count", text: tool.count.to_string(), unit: commands::Unit::Count },
+                Row { key: "offset_mode", text: tool.offset_mode.word().to_string(), unit: commands::Unit::Word },
+                Row {
+                    key: "offset",
+                    text: tool.offset.map_or_else(|| "\u{2014}".to_string(), echo::number),
+                    unit: if tool.offset_mode == super::knife_tool::OffsetMode::Mm { commands::Unit::Mm } else { commands::Unit::Plain },
+                },
+            ],
+            "cage.bridge" => vec![Row { key: "divisions", text: tool.divisions.to_string(), unit: commands::Unit::Count }],
+            "cage.weld" => vec![
+                Row { key: "position", text: if tool.weld_midpoint { "midpoint" } else { "target" }.to_string(), unit: commands::Unit::Word },
+                Row { key: "boundary", text: if tool.weld_zip { "zip" } else { "off" }.to_string(), unit: commands::Unit::Word },
+            ],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Rows that mean nothing just now, greyed in the window: the knife's, while a Cut Through
+    /// line is placed; Insert Edge's offset, when several evenly spaced rings are asked for.
+    pub(crate) fn cage_tool_row_disabled(&self, key: &str) -> bool {
+        let Some(tool) = self.cage_tool.as_ref() else { return false };
+        match tool.command.op {
+            "cage.cut" => tool.knife.through.is_some() && key != "cut_through_faces",
+            "cage.insert_ring" => tool.count > 1 && matches!(key, "offset_mode" | "offset"),
+            _ => false,
+        }
+    }
+
+    /// Confirms a row of the armed tool's window.
+    pub(crate) fn cage_tool_panel_set(&mut self, key: &'static str, text: &str) -> Result<(), String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(());
+        }
+        let whole = |max: f64| -> Result<u32, String> {
+            let v: f64 = text.parse().map_err(|_| format!("{text:?} is not a number"))?;
+            if !v.is_finite() || v < 1.0 || v > max {
+                return Err(format!("a whole number from 1 to {max}"));
+            }
+            Ok(v.round() as u32)
+        };
+        let op = self.cage_tool.as_ref().map(|t| t.command.op).unwrap_or("");
+        if op == "cage.cut" {
+            return self.knife_panel_set(key, text);
+        }
+        match (op, key) {
+            ("cage.insert_ring", "count") => {
+                let n = whole(64.0)?;
+                if let Some(tool) = self.cage_tool.as_mut() {
+                    tool.count = n;
+                }
+            }
+            ("cage.insert_ring", "offset_mode") => {
+                let Some(mode) = super::knife_tool::OffsetMode::from_word(&text.to_ascii_lowercase()) else {
+                    return Err("offset mode is one of mm, fraction".to_string());
+                };
+                if let Some(tool) = self.cage_tool.as_mut() {
+                    tool.offset_mode = mode;
+                }
+            }
+            ("cage.insert_ring", "offset") => {
+                let value = if matches!(text.to_ascii_lowercase().as_str(), "off" | "none" | "auto") {
+                    None
+                } else {
+                    let v: f64 = text.parse().map_err(|_| format!("{text:?} is not a number (or `off`)"))?;
+                    if !v.is_finite() || v <= 0.0 {
+                        return Err("an offset is more than nought".to_string());
+                    }
+                    Some(v)
+                };
+                if let Some(tool) = self.cage_tool.as_mut() {
+                    tool.offset = value;
+                }
+            }
+            ("cage.bridge", "divisions") => {
+                let n = whole(256.0)?;
+                if let Some(tool) = self.cage_tool.as_mut() {
+                    tool.divisions = n;
+                }
+            }
+            ("cage.weld", "position") => {
+                let midpoint = match text.to_ascii_lowercase().as_str() {
+                    "target" => false,
+                    "midpoint" => true,
+                    _ => return Err("position is one of target, midpoint".to_string()),
+                };
+                if let Some(tool) = self.cage_tool.as_mut() {
+                    tool.weld_midpoint = midpoint;
+                }
+            }
+            ("cage.weld", "boundary") => {
+                let zip = match text.to_ascii_lowercase().as_str() {
+                    "off" => false,
+                    "zip" => true,
+                    _ => return Err("boundary is one of off, zip".to_string()),
+                };
+                if let Some(tool) = self.cage_tool.as_mut() {
+                    tool.weld_zip = zip;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Typing with no click while a tool with a window is armed.
+    pub(crate) fn cage_tool_panel_typed(&mut self, ctx: &egui::Context) -> bool {
+        if !self.cage_tool_has_panel() {
+            return false;
+        }
+        let rows = self.cage_tool_panel_rows();
+        let Some(tool) = self.cage_tool.as_mut() else { return false };
+        super::click_panel::typed(ctx, &mut tool.panel, &rows)
+    }
+
+    /// Tab and Shift+Tab with a tool window up.
+    pub(crate) fn cage_tool_panel_tab(&mut self, back: bool) {
+        let rows = self.cage_tool_panel_rows();
+        let ctx = self.egui_ctx.clone();
+        let Some(tool) = self.cage_tool.as_mut() else { return };
+        let confirmed = super::click_panel::tab(&ctx, &mut tool.panel, &rows, back);
+        if let Some((key, text)) = confirmed {
+            let result = self.cage_tool_panel_set(key, &text);
+            if let Some(tool) = self.cage_tool.as_mut() {
+                tool.panel.error = result.err();
+            }
+        }
+    }
+
+    /// Draws the armed tool's window.
+    pub(crate) fn cage_tool_panel(&mut self, ctx: &egui::Context) {
+        if !self.cage_tool_has_panel() {
+            return;
+        }
+        let rows = self.cage_tool_panel_rows();
+        let off: Vec<&'static str> = rows.iter().map(|r| r.key).filter(|k| self.cage_tool_row_disabled(k)).collect();
+        let Some(tool) = self.cage_tool.as_mut() else { return };
+        let title = tool.command.display_name;
+        let footer = match tool.command.op {
+            "cage.cut" => "Enter cuts \u{b7} Esc discards \u{b7} Tab next",
+            "cage.insert_ring" => "click inserts \u{b7} drag slides \u{b7} type an offset \u{b7} Esc stops",
+            _ => "Tab next \u{b7} Esc stops",
+        };
+        let mut panel = std::mem::take(&mut tool.panel);
+        let change = super::click_panel::window(ctx, title, &rows, &|k| off.contains(&k), &mut panel, footer);
+        if let Some(tool) = self.cage_tool.as_mut() {
+            tool.panel = panel;
+        }
+        if let Some((key, text)) = change {
+            let result = self.cage_tool_panel_set(key, &text);
+            if let Some(tool) = self.cage_tool.as_mut() {
+                tool.panel.error = result.err();
+            }
+        }
+    }
+
+    /// A press while a tool is armed: `true` when it landed on something the tool drags -- the
+    /// knife's active point, or the edge Insert Edge would slide a ring along -- so the camera
+    /// does not take the drag.
+    pub(crate) fn cage_tool_press(&mut self, aspect: f32, rect: egui::Rect, pos: egui::Pos2) -> bool {
+        let Some(op) = self.cage_tool.as_ref().map(|t| t.command.op) else { return false };
+        match op {
+            "cage.cut" => self.knife_active_point_near(aspect, rect, pos),
+            "cage.insert_ring" => {
+                let Selection::Edge(a, b) = self.hover else { return false };
+                if let Some(tool) = self.cage_tool.as_mut() {
+                    tool.drag = Some((a, b));
+                    tool.dragged = false;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The pointer moved with that press still down.
+    pub(crate) fn cage_tool_drag(&mut self, aspect: f32, rect: egui::Rect, pos: egui::Pos2) {
+        match self.cage_tool.as_ref().map(|t| t.command.op) {
+            Some("cage.cut") => self.knife_drag_active(aspect, rect, pos),
+            Some("cage.insert_ring") => {
+                if let Some(tool) = self.cage_tool.as_mut() {
+                    tool.dragged = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The button came up: a ring dragged into place is inserted where it was left; a press that
+    /// never became a drag was a click, which has already inserted it.
+    pub(crate) fn cage_tool_release(&mut self) {
+        let Some(tool) = self.cage_tool.as_ref() else { return };
+        if tool.command.op != "cage.insert_ring" || tool.drag.is_none() {
+            return;
+        }
+        let dragged = tool.dragged;
+        let line = if dragged && tool.refused.is_none() { self.ring_line() } else { None };
+        if let Some(tool) = self.cage_tool.as_mut() {
+            tool.drag = None;
+            tool.dragged = false;
+        }
+        if let Some(line) = line {
+            self.run_command(&line);
+            self.selection.clear();
         }
     }
 

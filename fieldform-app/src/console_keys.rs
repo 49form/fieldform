@@ -116,12 +116,40 @@ const TARGET: Key = key("target", &["input"]);
 pub const VERBS: &[Verb] = &[
     Verb {
         op: "create.point",
-        keys: Keys::Declared { reads: &[key("at", &["at"])], not_read: &[] },
+        keys: Keys::Declared {
+            reads: &[
+                key("at", &["at"]),
+                key("on", &[]),
+                key("from", &[]),
+                key("u", &[]),
+                key("v", &[]),
+                key("dir", &[]),
+                switch("flip"),
+                switch("back"),
+                key("near", &[]),
+                key("facing", &[]),
+                switch("fixed"),
+            ],
+            not_read: &[],
+        },
     },
+    Verb { op: "create.surfacepoint", keys: Keys::Declared { reads: &[], not_read: &[] } },
+    Verb { op: "create.surfaceplane", keys: Keys::Declared { reads: &[], not_read: &[] } },
+    Verb { op: "point.fix", keys: Keys::Declared { reads: &[switch("target")], not_read: &[] } },
+    Verb { op: "point.live", keys: Keys::Declared { reads: &[switch("target")], not_read: &[] } },
     Verb {
         op: "create.plane",
         keys: Keys::Declared {
-            reads: &[key("origin", &["origin"]), key("turn", &["turn"]), key("flipped", &["flipped"])],
+            reads: &[
+                key("origin", &["origin"]),
+                key("turn", &["turn"]),
+                key("flipped", &["flipped"]),
+                // A plane on a surface: `on=` a point to stand on, or a body with `at=` saying where
+                // on it, and the surface's facing unless `facing=` says (`surface_point.rs`).
+                key("on", &[]),
+                key("at", &[]),
+                key("facing", &[]),
+            ],
             not_read: &[],
         },
     },
@@ -199,6 +227,78 @@ pub const VERBS: &[Verb] = &[
                 key("end_radius", &["end_radius"]),
                 key("from", &["from"]),
                 key("to", &["to"]),
+            ],
+            not_read: &[],
+        },
+    },
+    // A coil's size is two of turns, pitch and height, and the two typed say which pair it is:
+    // each covers the pair's tag beside its own number. `circle=` and `square=` set the section
+    // and its wire in one word, the design note's spelling; `section=` and `wire=` separately.
+    Verb {
+        op: "create.coil",
+        keys: Keys::Declared {
+            reads: &[
+                key("diameter", &["diameter"]),
+                key("turns", &["turns", "size"]),
+                key("pitch", &["pitch", "size"]),
+                key("height", &["height", "size"]),
+                key("section", &["section"]),
+                key("wire", &["wire"]),
+                key("circle", &["section", "wire"]),
+                key("square", &["section", "wire"]),
+                key("hand", &["hand"]),
+                key("origin", &["origin"]),
+                key("axis", &["axis"]),
+            ],
+            not_read: &[],
+        },
+    },
+    // `designation=M8` names the size from the table, `designation=none` clears it so `major=`
+    // and `pitch=` are the thread.
+    Verb {
+        op: "create.thread",
+        keys: Keys::Declared {
+            reads: &[
+                key("designation", &["designation"]),
+                key("major", &["major"]),
+                key("pitch", &["pitch"]),
+                key("length", &["length"]),
+                key("clearance", &["clearance"]),
+                key("hand", &["hand"]),
+                key("origin", &["origin"]),
+                key("axis", &["axis"]),
+            ],
+            not_read: &[],
+        },
+    },
+    // A hole is cut from `target` (else the body clicked, or the selection); placed by `at=` and
+    // `dir=` -- the entry and the way in -- or by `from=` and `to=`, its two points. With neither,
+    // the viewport waits for the click. `depth=through` or a number; `designation=` makes it
+    // tapped.
+    Verb {
+        op: "create.hole",
+        keys: Keys::Declared {
+            reads: &[
+                switch("target"),
+                key("at", &["from"]),
+                key("dir", &["to"]),
+                key("from", &["from"]),
+                key("to", &["to"]),
+                key("hole", &["hole"]),
+                key("diameter", &["diameter"]),
+                // The diameter from the clearance-hole table, for a thread and a series.
+                key("clearance_for", &["diameter"]),
+                switch("fit"),
+                key("bore_diameter", &["bore_diameter"]),
+                key("bore_depth", &["bore_depth"]),
+                key("sink_diameter", &["sink_diameter"]),
+                key("sink_angle", &["sink_angle"]),
+                key("designation", &["designation"]),
+                key("thread_depth", &["thread_depth"]),
+                key("clearance", &["clearance"]),
+                key("depth", &["depth", "through"]),
+                key("tip", &["tip"]),
+                key("tip_angle", &["tip_angle", "tip"]),
             ],
             not_read: &[],
         },
@@ -350,10 +450,19 @@ pub const VERBS: &[Verb] = &[
             not_read: &[],
         },
     },
+    // One number folds into the target's placement, which is the exact uniform scale; three,
+    // `by=sx,sy,sz`, make a `Node::Scale` of their own (item 69), whose centre is `about=` and
+    // whose third factor runs along `axis=`.
     Verb {
         op: "modify.scale",
         keys: Keys::Declared {
-            reads: &[TARGET, key("by", &["scale"]), key("about", &["about"]), switch("wrap")],
+            reads: &[
+                TARGET,
+                key("by", &["scale", "factors"]),
+                key("about", &["about", "origin"]),
+                key("axis", &["axis"]),
+                switch("wrap"),
+            ],
             not_read: &[],
         },
     },
@@ -378,7 +487,7 @@ pub const VERBS: &[Verb] = &[
     Verb { op: "cage.fill_hole", keys: Keys::Declared { reads: &[switch("cage"), switch("edge")], not_read: &[] } },
     Verb { op: "cage.bridge", keys: Keys::Declared { reads: &[switch("cage"), switch("a"), switch("b"), switch("divisions")], not_read: &[] } },
     Verb { op: "cage.bridge_faces", keys: Keys::Declared { reads: &[switch("cage"), switch("a"), switch("b"), switch("divisions")], not_read: &[] } },
-    Verb { op: "cage.weld", keys: Keys::Declared { reads: &[switch("cage"), switch("pairs"), switch("at")], not_read: &[] } },
+    Verb { op: "cage.weld", keys: Keys::Declared { reads: &[switch("cage"), switch("pairs"), switch("zip"), switch("at")], not_read: &[] } },
     Verb { op: "cage.cut", keys: Keys::Declared { reads: &[switch("cage"), switch("points")], not_read: &[] } },
     Verb { op: "cage.dissolve_edges", keys: Keys::Declared { reads: &[switch("cage"), switch("edges")], not_read: &[] } },
     Verb { op: "cage.extrude", keys: Keys::Declared { reads: &[switch("cage"), switch("faces"), switch("mode"), switch("direction"), switch("distance")], not_read: &[] } },
@@ -595,6 +704,9 @@ pub fn reach_of(node: &Node) -> Reach {
         Node::Point { .. } => Reach::Ops(&["create.point"]),
         Node::Torus { .. } => Reach::Ops(&["create.torus"]),
         Node::Capsule { .. } => Reach::Ops(&["create.capsule"]),
+        Node::Coil { .. } => Reach::Ops(&["create.coil"]),
+        Node::Thread { .. } => Reach::Ops(&["create.thread"]),
+        Node::Hole { .. } => Reach::Ops(&["create.hole"]),
         Node::Pipe { .. } => Reach::Ops(&["create.pipe"]),
         Node::Sweep { .. } => Reach::Ops(&["create.sweep"]),
         Node::Loft { .. } => Reach::Ops(&["create.loft"]),
@@ -609,6 +721,7 @@ pub fn reach_of(node: &Node) -> Reach {
         Node::Ramp { .. } => Reach::Ops(&["create.ramp"]),
         Node::Offset { .. } => Reach::Ops(&["modify.offset"]),
         Node::Transform { .. } => Reach::Ops(&["modify.move", "modify.turn", "modify.scale"]),
+        Node::Scale { .. } => Reach::Ops(&["modify.scale"]),
         Node::Unknown(_) => Reach::NotFromTheConsole("a block this build cannot read is kept as it was written, never made"),
     }
 }
@@ -1041,10 +1154,311 @@ pub fn primitive_with_keys(
                 *at = p;
             }
         }
+        Node::Coil { .. } => return coil_with_keys(node, word, args, lookup),
+        Node::Thread { .. } => return thread_with_keys(node, word, args, lookup),
         other => {
             return Err(format!("`{word}` does not make a {}", kind_word(other)));
         }
     }
+    Ok(node)
+}
+
+/// A hole with its keys applied -- everything but `target`, which the tool reads.
+///
+/// **`at=` and `dir=` are the entry and the way in**, which is what the click stores; they are
+/// numbers, since the second point is worked out from them. `from=` and `to=` set the two
+/// points as any two-ended block's are, and take a parameter's name. A size the type does not
+/// have is refused by name, and `designation=` makes the hole tapped.
+pub fn hole_with_keys(mut node: Node, args: &Args, lookup: &dyn Fn(&str) -> Lookup) -> Result<Node, String> {
+    use fieldform_scene::{HoleDepth, HoleKind, HoleTip};
+    let word = "hole";
+    let one = |k: &str| -> Result<Option<ParamRef>, String> {
+        args.get(k).map(|v| param_one(word, k, v, Slot::Number, lookup)).transpose()
+    };
+    let numbers = |k: &str| -> Result<Option<[f64; 3]>, String> {
+        let Some(v) = args.get(k) else { return Ok(None) };
+        match param_triple(word, k, v, Slot::Number, lookup)? {
+            [ParamRef::Literal(x), ParamRef::Literal(y), ParamRef::Literal(z)] => Ok(Some([x, y, z])),
+            _ => Err(format!(
+                "`{word} {k}=` takes three numbers, since the second point is worked out from it \
+                 — name parameters with `from=` and `to=` instead"
+            )),
+        }
+    };
+    let Node::Hole { ends, kind, depth, tip } = &mut node else { return Err("`hole` makes a hole".to_string()) };
+
+    // Where: the entry and the way in, or the two points.
+    let (at, dir) = (numbers("at")?, numbers("dir")?);
+    if at.is_some() || dir.is_some() {
+        let (was_from, was_dir) = match ends {
+            Ends::At { from: Place::At([ParamRef::Literal(x), ParamRef::Literal(y), ParamRef::Literal(z)]), to: Place::At([ParamRef::Literal(a), ParamRef::Literal(b), ParamRef::Literal(c)]) } => {
+                ([*x, *y, *z], [*a - *x, *b - *y, *c - *z])
+            }
+            _ => ([0.0; 3], [0.0, 0.0, -1.0]),
+        };
+        let f = at.unwrap_or(was_from);
+        let d = dir.unwrap_or(was_dir);
+        let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if !(len > 0.0) {
+            return Err(format!("`{word} dir=` has no length, so it says no way in"));
+        }
+        *ends = Ends::between(
+            Place::at(f[0], f[1], f[2]),
+            Place::at(f[0] + d[0] / len, f[1] + d[1] / len, f[2] + d[2] / len),
+        );
+    }
+    let place = |k: &str| -> Result<Option<Place>, String> {
+        args.get(k).map(|v| param_triple(word, k, v, Slot::Number, lookup).map(Place::At)).transpose()
+    };
+    let (from, to) = (place("from")?, place("to")?);
+    if from.is_some() || to.is_some() {
+        let (was_from, was_to) = match ends {
+            Ends::At { from, to } => (from.clone(), to.clone()),
+            _ => (Place::origin(), Place::at(0.0, 0.0, -1.0)),
+        };
+        *ends = Ends::At { from: from.unwrap_or(was_from), to: to.unwrap_or(was_to) };
+    }
+
+    // What: the type, then its own sizes.
+    if let Some(v) = args.get("hole") {
+        *kind = kind.with_name(&v.text().to_lowercase()).ok_or_else(|| {
+            format!("`{word} hole=` is simple, counterbore, countersink or tapped, not {:?}", v.text())
+        })?;
+    }
+    if let Some(v) = args.get("designation") {
+        let name = v.text();
+        let Some((_, _)) = fieldform_scene::thread_designation(&name) else {
+            let known: Vec<&str> = fieldform_scene::THREAD_TABLE.iter().map(|(n, _, _)| *n).collect();
+            return Err(format!("`{word} designation=` is one of {} — not {name:?}", known.join(", ")));
+        };
+        let spelt = fieldform_scene::THREAD_TABLE
+            .iter()
+            .find(|(n, _, _)| n.eq_ignore_ascii_case(name.trim()))
+            .map_or(name.clone(), |(n, _, _)| n.to_string());
+        *kind = match kind.clone() {
+            HoleKind::Tapped { thread_depth, clearance, .. } => HoleKind::Tapped { designation: spelt, thread_depth, clearance },
+            _ => HoleKind::Tapped { designation: spelt, thread_depth: ParamRef::Literal(12.0), clearance: ParamRef::Literal(0.0) },
+        };
+    }
+    // `clearance_for=M8` reads the diameter from the clearance-hole table, in the series `fit=`
+    // names (medium unless it says), and is the diameter's other spelling -- so both is refused.
+    if let Some(v) = args.get("fit")
+        && args.get("clearance_for").is_none()
+    {
+        return Err(format!("`{word} fit={}` chooses a series for `clearance_for=`, which the line does not give", v.text()));
+    }
+    if let Some(v) = args.get("clearance_for") {
+        if args.get("diameter").is_some() {
+            return Err(format!("`{word}` takes `diameter=` or `clearance_for=`, not both — they are one number"));
+        }
+        let fit = match args.get("fit") {
+            Some(f) => fieldform_scene::Fit::parse(&f.text().to_lowercase())
+                .ok_or_else(|| format!("`{word} fit=` is fine, medium or coarse, not {:?}", f.text()))?,
+            None => fieldform_scene::Fit::Medium,
+        };
+        let d = fieldform_scene::clearance_hole(&v.text(), fit).ok_or_else(|| {
+            format!("`{word} clearance_for=` is a thread from M1 to M150 the clearance table has, not {:?}", v.text())
+        })?;
+        // The head too, from the standard's tables, where the type has one: a socket cap
+        // screw's counterbore, a countersunk screw's 90° sink. A size key on the same line is
+        // applied after, so it still wins.
+        let thread = v.text();
+        match kind {
+            HoleKind::Simple { diameter } => *diameter = ParamRef::Literal(d),
+            HoleKind::Counterbore { diameter, bore_diameter, bore_depth } => {
+                *diameter = ParamRef::Literal(d);
+                if let Some((bore, depth)) = fieldform_scene::counterbore_for(&thread) {
+                    *bore_diameter = ParamRef::Literal(bore);
+                    *bore_depth = ParamRef::Literal(depth);
+                }
+            }
+            HoleKind::Countersink { diameter, sink_diameter, sink_angle } => {
+                *diameter = ParamRef::Literal(d);
+                if let Some(sink) = fieldform_scene::countersink_for(&thread) {
+                    *sink_diameter = ParamRef::Literal(sink);
+                    *sink_angle = ParamRef::Literal(90.0);
+                }
+            }
+            HoleKind::Tapped { .. } => {
+                return Err(format!("a tapped hole is drilled for its own thread — `clearance_for=` is for a hole a bolt passes through"));
+            }
+        }
+    }
+    let type_word = kind.name();
+    let wrong = |k: &str| format!("a {type_word} hole has no `{k}` — `hole={}` first", match k {
+        "bore_diameter" | "bore_depth" => "counterbore",
+        "sink_diameter" | "sink_angle" => "countersink",
+        "thread_depth" | "clearance" => "tapped",
+        _ => "simple",
+    });
+    for k in ["diameter", "bore_diameter", "bore_depth", "sink_diameter", "sink_angle", "thread_depth", "clearance"] {
+        let Some(value) = one(k)? else { continue };
+        let slot: &mut ParamRef = match (k, &mut *kind) {
+            ("diameter", HoleKind::Simple { diameter } | HoleKind::Counterbore { diameter, .. } | HoleKind::Countersink { diameter, .. }) => diameter,
+            ("bore_diameter", HoleKind::Counterbore { bore_diameter, .. }) => bore_diameter,
+            ("bore_depth", HoleKind::Counterbore { bore_depth, .. }) => bore_depth,
+            ("sink_diameter", HoleKind::Countersink { sink_diameter, .. }) => sink_diameter,
+            ("sink_angle", HoleKind::Countersink { sink_angle, .. }) => sink_angle,
+            ("thread_depth", HoleKind::Tapped { thread_depth, .. }) => thread_depth,
+            ("clearance", HoleKind::Tapped { clearance, .. }) => clearance,
+            _ => return Err(wrong(k)),
+        };
+        *slot = value;
+    }
+
+    // How deep, and how it ends.
+    if let Some(v) = args.get("depth") {
+        *depth = if v.text().eq_ignore_ascii_case("through") {
+            HoleDepth::Through
+        } else {
+            HoleDepth::Blind(param_one(word, "depth", v, Slot::Number, lookup)?)
+        };
+    }
+    if let Some(v) = args.get("tip") {
+        *tip = match v.text().to_lowercase().as_str() {
+            "flat" => HoleTip::Flat,
+            "drill" => match tip {
+                HoleTip::Drill(a) => HoleTip::Drill(*a),
+                HoleTip::Flat => HoleTip::Drill(ParamRef::Literal(118.0)),
+            },
+            _ => return Err(format!("`{word} tip=` is flat or drill, not {:?}", v.text())),
+        };
+    }
+    if let Some(angle) = one("tip_angle")? {
+        *tip = HoleTip::Drill(angle);
+    }
+    Ok(node)
+}
+
+/// `hand=left|right`, read for a coil and a thread alike.
+fn hand_key(word: &str, args: &Args) -> Result<Option<fieldform_scene::Hand>, String> {
+    args.get("hand")
+        .map(|v| {
+            fieldform_scene::Hand::parse(&v.text().to_lowercase())
+                .ok_or_else(|| format!("`{word} hand=` is left or right, not {:?}", v.text()))
+        })
+        .transpose()
+}
+
+/// A coil with its keys applied.
+///
+/// **The size is the two of turns, pitch and height that were typed**, and they decide the
+/// pair; one typed alone changes that number in the pair the coil already has, or, when the
+/// pair does not hold it, takes the pitch's place if the pair has none to keep, and the turns'
+/// otherwise -- a pitch is what a coil is most often held to. All three at once is refused,
+/// since the third is derived and could disagree.
+pub fn coil_with_keys(mut node: Node, word: &str, args: &Args, lookup: &dyn Fn(&str) -> Lookup) -> Result<Node, String> {
+    use fieldform_scene::{CoilSection, CoilSize};
+    let one = |k: &str| -> Result<Option<ParamRef>, String> {
+        args.get(k).map(|v| param_one(word, k, v, Slot::Number, lookup)).transpose()
+    };
+    let Node::Coil { frame, diameter, size, section, hand } = &mut node else {
+        return Err(format!("`{word}` makes a coil"));
+    };
+    if let Some(d) = one("diameter")? {
+        *diameter = d;
+    }
+    let (turns, pitch, height) = (one("turns")?, one("pitch")?, one("height")?);
+    *size = match (turns, pitch, height) {
+        (Some(_), Some(_), Some(_)) => {
+            return Err(format!(
+                "`{word}` takes two of turns, pitch and height — the third follows from them, and \
+                 three could disagree"
+            ))
+        }
+        (Some(turns), Some(pitch), None) => CoilSize::TurnsPitch { turns, pitch },
+        (None, Some(pitch), Some(height)) => CoilSize::HeightPitch { height, pitch },
+        (Some(turns), None, Some(height)) => CoilSize::TurnsHeight { turns, height },
+        (Some(t), None, None) => match size.clone() {
+            CoilSize::TurnsPitch { pitch, .. } => CoilSize::TurnsPitch { turns: t, pitch },
+            CoilSize::TurnsHeight { height, .. } => CoilSize::TurnsHeight { turns: t, height },
+            CoilSize::HeightPitch { pitch, .. } => CoilSize::TurnsPitch { turns: t, pitch },
+        },
+        (None, Some(p), None) => match size.clone() {
+            CoilSize::TurnsPitch { turns, .. } => CoilSize::TurnsPitch { turns, pitch: p },
+            CoilSize::HeightPitch { height, .. } => CoilSize::HeightPitch { height, pitch: p },
+            CoilSize::TurnsHeight { turns, .. } => CoilSize::TurnsPitch { turns, pitch: p },
+        },
+        (None, None, Some(h)) => match size.clone() {
+            CoilSize::HeightPitch { pitch, .. } => CoilSize::HeightPitch { height: h, pitch },
+            CoilSize::TurnsHeight { turns, .. } => CoilSize::TurnsHeight { turns, height: h },
+            CoilSize::TurnsPitch { pitch, .. } => CoilSize::HeightPitch { height: h, pitch },
+        },
+        (None, None, None) => size.clone(),
+    };
+    // `circle=2` and `square=2` are a section and its wire in one word.
+    for shape in ["circle", "square"] {
+        if let Some(wire) = one(shape)? {
+            *section = match shape {
+                "circle" => CoilSection::Circle { wire },
+                _ => CoilSection::Square { wire },
+            };
+        }
+    }
+    if let Some(v) = args.get("section") {
+        *section = section
+            .with_name(&v.text().to_lowercase())
+            .ok_or_else(|| format!("`{word} section=` is circle or square, not {:?}", v.text()))?;
+    }
+    if let Some(w) = one("wire")? {
+        *section.wire_mut() = w;
+    }
+    if let Some(h) = hand_key(word, args)? {
+        *hand = h;
+    }
+    frame_with_keys(word, frame, args, lookup)?;
+    Ok(node)
+}
+
+/// A thread with its keys applied. A designation the table does not have is refused here, by
+/// name, rather than saved for the compile to refuse.
+pub fn thread_with_keys(mut node: Node, word: &str, args: &Args, lookup: &dyn Fn(&str) -> Lookup) -> Result<Node, String> {
+    let one = |k: &str| -> Result<Option<ParamRef>, String> {
+        args.get(k).map(|v| param_one(word, k, v, Slot::Number, lookup)).transpose()
+    };
+    let Node::Thread { frame, major, pitch, length, hand, clearance, designation } = &mut node else {
+        return Err(format!("`{word}` makes a thread"));
+    };
+    if let Some(v) = args.get("designation") {
+        let name = v.text();
+        *designation = match name.to_lowercase().as_str() {
+            "none" | "custom" => None,
+            _ => {
+                let (d, p) = fieldform_scene::thread_designation(&name).ok_or_else(|| {
+                    let known: Vec<&str> = fieldform_scene::THREAD_TABLE.iter().map(|(n, _, _)| *n).collect();
+                    format!("`{word} designation=` is one of {}, or none — not {name:?}", known.join(", "))
+                })?;
+                // The table's numbers written into the fields too, so clearing the name later
+                // leaves the thread it was rather than whatever was typed before it.
+                *major = ParamRef::Literal(d);
+                *pitch = ParamRef::Literal(p);
+                Some(
+                    fieldform_scene::THREAD_TABLE
+                        .iter()
+                        .find(|(n, _, _)| n.eq_ignore_ascii_case(name.trim()))
+                        .map(|(n, _, _)| n.to_string())
+                        .unwrap_or(name),
+                )
+            }
+        };
+    }
+    // A typed major or pitch is a custom thread: the name no longer describes it.
+    for (k, slot) in [("major", &mut *major), ("pitch", &mut *pitch)] {
+        if let Some(v) = one(k)? {
+            *slot = v;
+            *designation = None;
+        }
+    }
+    if let Some(l) = one("length")? {
+        *length = l;
+    }
+    if let Some(c) = one("clearance")? {
+        *clearance = c;
+    }
+    if let Some(h) = hand_key(word, args)? {
+        *hand = h;
+    }
+    frame_with_keys(word, frame, args, lookup)?;
     Ok(node)
 }
 
@@ -1614,12 +2028,9 @@ pub fn boolean_asked(args: &Args, lookup: &dyn Fn(&str) -> Lookup) -> Result<Boo
             None
         }
     };
-    if fillet.is_some()
-        && let Some(list) = &inputs
-        && list.len() > 2
-    {
-        return Err("a fillet joins two bodies; union the rest first".to_string());
-    }
+    // **Any number of operands with a radius** (the owner, 2026-10-28): a rounded boolean is a
+    // list read as the chain of joins a nest of pairs was, in one block -- which is what this
+    // used to refuse in favour of nesting by hand.
     Ok(BooleanAsked { op, inputs, fillet })
 }
 
@@ -1645,6 +2056,46 @@ pub fn mirror_with_keys(mut node: Node, args: &Args, lookup: &dyn Fn(&str) -> Lo
         *join = flag(args, "join");
     }
     Ok(node)
+}
+
+/// A scale as `placed` made it, with `by=` (one factor or three), `axis=` and `about=` (or
+/// `origin=`, the frame's own name for it) applied.
+pub fn scale_with_keys(mut node: Node, args: &Args, lookup: &dyn Fn(&str) -> Lookup) -> Result<Node, String> {
+    let word = "scale";
+    let Node::Scale { factors, frame, .. } = &mut node else { return Err("`scale` makes a scale".to_string()) };
+    if let Some(v) = args.get("by") {
+        *factors = scale_factors(word, v, lookup)?;
+    }
+    // `about=` is the word the placement verbs use for a centre, and a scale is one of them; the
+    // frame's own field is `origin`, which the echo of a twist or a mirror writes.
+    let mut args = args.clone();
+    if let Some(about) = args.get("about").cloned()
+        && args.get("origin").is_none()
+    {
+        args = args.with("origin", about);
+    }
+    frame_with_keys(word, frame, &args, lookup)?;
+    Ok(node)
+}
+
+/// `by=` as a scale's three factors: one number is the same `ParamRef` three times, which is
+/// what makes it uniform by structure; three are read in order. A literal at or below nought is
+/// refused here as the compile would refuse it, with the number named.
+fn scale_factors(word: &str, by: &Value, lookup: &dyn Fn(&str) -> Lookup) -> Result<[ParamRef; 3], String> {
+    let factors = if by.text().contains(',') {
+        param_triple(word, "by", by, Slot::Number, lookup)?
+    } else {
+        let one = param_one(word, "by", by, Slot::Number, lookup)?;
+        [one, one, one]
+    };
+    for factor in &factors {
+        if let ParamRef::Literal(b) = factor
+            && !(*b > 0.0)
+        {
+            return Err(format!("`{word} by=` must be above nought, not {b}"));
+        }
+    }
+    Ok(factors)
 }
 
 /// `axis=` and `origin=` onto a frame, keeping whichever was not given.
@@ -2009,8 +2460,13 @@ impl Placing {
 ///
 /// **A parameter cannot be added to a number without an expression**, which `by=` refuses (A9),
 /// so an amount that is a parameter folds in only where the slot is still the identity; a
-/// number already there is wrapped rather than overwritten. `scale by=1,2,1` is refused until a
-/// scale can be three numbers (item 69).
+/// number already there is wrapped rather than overwritten.
+///
+/// **`scale by=1,2,1` is a block of its own, never a fold.** A placement holds one factor
+/// because one factor keeps a distance exact; three make a lower bound, so they live on
+/// [`Node::Scale`] (item 69), which wraps the outermost placement over the target exactly as a
+/// fresh placement would -- so the body is drawn once, scaled, rather than once placed and once
+/// scaled. Its centre is `about=`, as the placement's pivot is, and `axis=` aims its third factor.
 pub fn placed(
     placing: Placing,
     target: NodeId,
@@ -2025,7 +2481,7 @@ pub fn placed(
             match placing {
                 Placing::Move => "`move target=box by=10,0,0`",
                 Placing::Turn => "`turn target=box by=0,0,45`",
-                Placing::Scale => "`scale target=box by=2`",
+                Placing::Scale => "`scale target=box by=2`, or `by=1.5,0.7,1` along three axes",
             }
         ));
     };
@@ -2033,21 +2489,30 @@ pub fn placed(
     if placing == Placing::Move && about.is_some() {
         return Err("`move about=` means nothing — a move is the same from anywhere".to_string());
     }
+    if placing == Placing::Scale && by.text().contains(',') {
+        let factors = scale_factors(word, by, lookup)?;
+        let origin = match about {
+            Some(Place::At(origin)) => origin,
+            _ => [ParamRef::Literal(0.0); 3],
+        };
+        let axis = match args.get("axis") {
+            Some(v) => axis_triple(word, "axis", v, lookup)?,
+            None => [ParamRef::Literal(0.0), ParamRef::Literal(0.0), ParamRef::Literal(1.0)],
+        };
+        let node = Node::Scale {
+            input: Operand::filled(existing.map(|(id, _)| id).unwrap_or(target)),
+            factors,
+            frame: Frame::At { origin, axis },
+        };
+        return Ok((node, None));
+    }
+    if args.get("axis").is_some() {
+        return Err(format!("`{word} axis=` aims a scale of three factors — `by=sx,sy,sz`"));
+    }
     // The amount first, so the choice between folding in and wrapping can see it.
     let amounts: Vec<ParamRef> = match placing {
         Placing::Move | Placing::Turn => param_triple(word, "by", by, Slot::Number, lookup)?.to_vec(),
-        Placing::Scale => {
-            if by.text().contains(',') {
-                return Err("`scale by=` is one number for now — a scale of three waits for item 69".to_string());
-            }
-            let factor = param_one(word, "by", by, Slot::Number, lookup)?;
-            if let ParamRef::Literal(b) = factor
-                && b <= 0.0
-            {
-                return Err(format!("`scale by=` must be above nought, not {b}"));
-            }
-            vec![factor]
-        }
+        Placing::Scale => vec![scale_factors(word, by, lookup)?[0]],
     };
 
     let is = |r: &ParamRef, v: f64| matches!(r, ParamRef::Literal(x) if *x == v);
@@ -2223,6 +2688,17 @@ pub(crate) mod tests {
             Node::Cone { edge: fieldform_scene::Fillet { radius: lit(0.5), continuity: fieldform_scene::Continuity::G2, second: None }, ends: Ends::between(Place::At(p(0.0, 0.0, 0.0)), Place::At(p(0.0, 0.0, 9.0))), base_radius: lit(3.0), top_radius: lit(1.0) },
             Node::Torus { centre: Place::At(p(1.0, 2.0, 3.0)), major_radius: lit(5.0), minor_radius: lit(1.0), turn: Turn::By(p(10.0, 20.0, 30.0)) },
             Node::Capsule { ends: Ends::between(Place::At(p(0.0, 0.0, 0.0)), Place::At(p(0.0, 0.0, 9.0))), start_radius: lit(3.0), end_radius: lit(2.0) },
+            // Each size pair, so `turns`, `pitch` and `height` are all held to a block that writes them.
+            Node::Coil { frame: frame.clone(), diameter: lit(20.0), size: fieldform_scene::CoilSize::TurnsPitch { turns: lit(5.0), pitch: lit(6.0) }, section: fieldform_scene::CoilSection::Circle { wire: lit(2.0) }, hand: fieldform_scene::Hand::Left },
+            Node::Coil { frame: frame.clone(), diameter: lit(20.0), size: fieldform_scene::CoilSize::HeightPitch { height: lit(30.0), pitch: lit(6.0) }, section: fieldform_scene::CoilSection::Square { wire: lit(2.0) }, hand: fieldform_scene::Hand::Right },
+            Node::Coil { frame: frame.clone(), diameter: lit(20.0), size: fieldform_scene::CoilSize::TurnsHeight { turns: lit(5.0), height: lit(30.0) }, section: fieldform_scene::CoilSection::Circle { wire: lit(2.0) }, hand: fieldform_scene::Hand::Right },
+            Node::Thread { frame: frame.clone(), major: lit(8.0), pitch: lit(1.25), length: lit(20.0), hand: fieldform_scene::Hand::Left, clearance: lit(0.1), designation: Some("M8".into()) },
+            // A hole of each type, so every size key is held to a block that writes it, and both
+            // depths and both tips.
+            Node::Hole { ends: Ends::between(Place::At(p(1.0, 2.0, 3.0)), Place::At(p(1.0, 2.0, 2.0))), kind: fieldform_scene::HoleKind::Simple { diameter: lit(6.0) }, depth: fieldform_scene::HoleDepth::Blind(lit(12.0)), tip: fieldform_scene::HoleTip::Drill(lit(118.0)) },
+            Node::Hole { ends: Ends::between(Place::At(p(1.0, 2.0, 3.0)), Place::At(p(1.0, 2.0, 2.0))), kind: fieldform_scene::HoleKind::Counterbore { diameter: lit(6.6), bore_diameter: lit(11.0), bore_depth: lit(6.5) }, depth: fieldform_scene::HoleDepth::Through, tip: fieldform_scene::HoleTip::Flat },
+            Node::Hole { ends: Ends::between(Place::At(p(1.0, 2.0, 3.0)), Place::At(p(1.0, 2.0, 2.0))), kind: fieldform_scene::HoleKind::Countersink { diameter: lit(6.6), sink_diameter: lit(13.0), sink_angle: lit(90.0) }, depth: fieldform_scene::HoleDepth::Blind(lit(20.0)), tip: fieldform_scene::HoleTip::Flat },
+            Node::Hole { ends: Ends::between(Place::At(p(1.0, 2.0, 3.0)), Place::At(p(1.0, 2.0, 2.0))), kind: fieldform_scene::HoleKind::Tapped { designation: "M8".into(), thread_depth: lit(12.0), clearance: lit(0.1) }, depth: fieldform_scene::HoleDepth::Blind(lit(16.0)), tip: fieldform_scene::HoleTip::Drill(lit(118.0)) },
             lattice(LatticeCell::Gyroid, CellMap::Rectangular { cell: lit(8.0) }, LatticePhase::Sheet { thickness: lit(1.0), offset: lit(0.3) }),
             lattice(LatticeCell::Gyroid, CellMap::Cylindrical { cell_radius: lit(5.0), cell_height: lit(6.0), arc_count: 12 }, LatticePhase::Solid { density: lit(0.4) }),
             lattice(LatticeCell::Bcc, CellMap::Spherical { cell_radius: lit(5.0), azimuth_count: 12, polar_count: 6 }, LatticePhase::Strut { radius: lit(0.5) }),
@@ -2233,12 +2709,13 @@ pub(crate) mod tests {
             ),
             Node::Ramp { input: Operand::filled(id), in_min: lit(0.0), in_max: lit(1.0), out_min: lit(2.0), out_max: lit(3.0), shape: RampShape::Smooth },
             Node::Boolean { op: BooleanOp::Union, inputs: vec![Operand::filled(id), Operand::filled(other)] },
-            Node::Blend { op: BooleanOp::Union, a: Operand::filled(id), b: Operand::filled(other), fillet: Fillet { radius: lit(2.0), continuity: Continuity::Chamfer, second: Some(lit(3.0)) } },
+            Node::Blend { op: BooleanOp::Union, inputs: vec![Operand::filled(id), Operand::filled(other)], fillet: Fillet { radius: lit(2.0), continuity: Continuity::Chamfer, second: Some(lit(3.0)) } },
             Node::Morph { a: Operand::filled(id), b: Operand::filled(other), t: lit(0.5) },
             Node::Offset { input: Operand::filled(id), distance: lit(2.0) },
             Node::Shell { input: Operand::filled(id), thickness: lit(1.0) },
             Node::Twist { input: Operand::filled(id), degrees_per_mm: lit(1.0), frame: frame.clone() },
             Node::Mirror { input: Operand::filled(id), frame: frame.clone(), join: true },
+            Node::Scale { input: Operand::filled(id), factors: p(1.5, 0.7, 1.0), frame: frame.clone() },
             Node::Attract { input: Operand::filled(id), toward: Attractor::Curve(curve), strength: lit(0.5), falloff: lit(10.0) },
             Node::Attract { input: Operand::filled(id), toward: Attractor::Point(other), strength: lit(0.5), falloff: lit(10.0) },
             Node::Pattern {
@@ -2630,6 +3107,123 @@ pub(crate) mod tests {
         assert_eq!(o[2], ParamRef::Literal(-30.0));
     }
 
+    // --------------------------------------------------------------------- coil and thread
+
+    fn a_coil() -> Node {
+        Node::Coil {
+            frame: Frame::default(),
+            diameter: ParamRef::Literal(20.0),
+            size: fieldform_scene::CoilSize::TurnsPitch { turns: ParamRef::Literal(5.0), pitch: ParamRef::Literal(6.0) },
+            section: fieldform_scene::CoilSection::Circle { wire: ParamRef::Literal(2.0) },
+            hand: fieldform_scene::Hand::Right,
+        }
+    }
+
+    /// The two of turns, pitch and height typed are the pair; one alone changes its number in
+    /// the pair the coil has, or trades places keeping the pitch; three are refused.
+    #[test]
+    fn a_coil_s_size_is_the_two_numbers_typed() {
+        use fieldform_scene::CoilSize;
+        let lit = ParamRef::Literal;
+        let size_of = |n: Node| match n {
+            Node::Coil { size, .. } => size,
+            _ => panic!("still a coil"),
+        };
+        let typed = |pairs: &[(&str, Value)]| primitive_with_keys(a_coil(), "coil", &args(pairs), &nobody);
+        assert_eq!(
+            size_of(typed(&[("height", Value::Int(30)), ("pitch", Value::Int(5))]).unwrap()),
+            CoilSize::HeightPitch { height: lit(30.0), pitch: lit(5.0) }
+        );
+        assert_eq!(
+            size_of(typed(&[("turns", Value::Int(3)), ("height", Value::Int(12))]).unwrap()),
+            CoilSize::TurnsHeight { turns: lit(3.0), height: lit(12.0) }
+        );
+        assert_eq!(size_of(typed(&[("turns", Value::Int(8))]).unwrap()), CoilSize::TurnsPitch { turns: lit(8.0), pitch: lit(6.0) });
+        assert_eq!(
+            size_of(typed(&[("height", Value::Int(40))]).unwrap()),
+            CoilSize::HeightPitch { height: lit(40.0), pitch: lit(6.0) },
+            "a height alone keeps the pitch"
+        );
+        let refused = typed(&[("turns", Value::Int(3)), ("pitch", Value::Int(4)), ("height", Value::Int(12))]).unwrap_err();
+        assert!(refused.contains("two of turns, pitch and height"), "{refused}");
+        // `circle=` and `square=` are a section and its wire in one word; the hand by name.
+        let node = typed(&[("square", Value::Int(3)), ("hand", s("left"))]).unwrap();
+        let Node::Coil { section, hand, .. } = node else { panic!("still a coil") };
+        assert_eq!(section, fieldform_scene::CoilSection::Square { wire: lit(3.0) });
+        assert_eq!(hand, fieldform_scene::Hand::Left);
+        assert!(typed(&[("hand", s("up"))]).is_err());
+        assert!(typed(&[("section", s("hexagon"))]).is_err());
+    }
+
+    /// A designation writes the table's numbers and stands for them; a typed major or pitch makes
+    /// the thread custom; a name the table does not have is refused with the names it has.
+    #[test]
+    fn a_thread_is_named_from_the_table_or_typed_and_never_both() {
+        let thread = Node::Thread {
+            frame: Frame::default(),
+            major: ParamRef::Literal(10.0),
+            pitch: ParamRef::Literal(1.0),
+            length: ParamRef::Literal(20.0),
+            hand: fieldform_scene::Hand::Right,
+            clearance: ParamRef::Literal(0.0),
+            designation: None,
+        };
+        let node = primitive_with_keys(thread.clone(), "thread", &args(&[("designation", s("m8")), ("clearance", s("0.1"))]), &nobody).unwrap();
+        let Node::Thread { major, pitch, designation, clearance, .. } = node.clone() else { panic!("a thread") };
+        assert_eq!((major, pitch), (ParamRef::Literal(8.0), ParamRef::Literal(1.25)));
+        assert_eq!(designation.as_deref(), Some("M8"), "written as the table spells it");
+        assert_eq!(clearance, ParamRef::Literal(0.1));
+        let node = primitive_with_keys(node, "thread", &args(&[("pitch", s("1.0"))]), &nobody).unwrap();
+        let Node::Thread { designation, pitch, .. } = node else { panic!("a thread") };
+        assert_eq!((designation, pitch), (None, ParamRef::Literal(1.0)), "a typed pitch is a custom thread");
+        let refused = primitive_with_keys(thread, "thread", &args(&[("designation", s("M7"))]), &nobody).unwrap_err();
+        assert!(refused.contains("M8") && refused.contains("\"M7\""), "{refused}");
+    }
+
+    /// `at=` and `dir=` are the entry and the way in, stored as two points a millimetre apart; a
+    /// size the type has not got is refused by name; `designation=` makes it tapped and
+    /// `depth=through` makes it go through.
+    #[test]
+    fn a_hole_is_placed_by_its_entry_and_its_way_in_and_sized_by_its_type() {
+        use fieldform_scene::{HoleDepth, HoleKind, HoleTip};
+        let seed = Node::Hole { ends: Ends::default(), kind: HoleKind::default(), depth: HoleDepth::default(), tip: HoleTip::Flat };
+        let node = hole_with_keys(
+            seed.clone(),
+            &args(&[("at", s("10,0,5")), ("dir", s("0,0,-3")), ("hole", s("counterbore")), ("bore_diameter", s("11")), ("depth", s("through"))]),
+            &nobody,
+        )
+        .unwrap();
+        let Node::Hole { ends: Ends::At { from: Place::At(f), to: Place::At(t) }, kind: HoleKind::Counterbore { bore_diameter, .. }, depth, .. } = node else {
+            panic!("a counterbored hole between two typed points")
+        };
+        assert_eq!(f, [ParamRef::Literal(10.0), ParamRef::Literal(0.0), ParamRef::Literal(5.0)]);
+        assert_eq!(t, [ParamRef::Literal(10.0), ParamRef::Literal(0.0), ParamRef::Literal(4.0)], "a millimetre in");
+        assert_eq!((bore_diameter, depth), (ParamRef::Literal(11.0), HoleDepth::Through));
+        let wrong = hole_with_keys(seed.clone(), &args(&[("sink_angle", s("90"))]), &nobody).unwrap_err();
+        assert!(wrong.contains("sink_angle") && wrong.contains("countersink"), "{wrong}");
+        let tapped = hole_with_keys(seed.clone(), &args(&[("designation", s("m6")), ("tip_angle", s("118"))]), &nobody).unwrap();
+        assert!(matches!(tapped, Node::Hole { kind: HoleKind::Tapped { ref designation, .. }, tip: HoleTip::Drill(_), .. } if designation == "M6"));
+        assert!(hole_with_keys(seed.clone(), &args(&[("dir", s("0,0,0"))]), &nobody).is_err());
+        // The clearance table, medium unless a fit is named.
+        let sized = |pairs: &[(&str, Value)]| match hole_with_keys(seed.clone(), &args(pairs), &nobody).unwrap() {
+            Node::Hole { kind, .. } => kind.diameter().copied(),
+            _ => None,
+        };
+        assert_eq!(sized(&[("clearance_for", s("M8"))]), Some(ParamRef::Literal(9.0)));
+        assert_eq!(sized(&[("clearance_for", s("M8")), ("fit", s("fine"))]), Some(ParamRef::Literal(8.4)));
+        assert!(hole_with_keys(seed.clone(), &args(&[("clearance_for", s("M9"))]), &nobody).is_err());
+        // On a counterbore and a countersink the head comes from the standard's tables too.
+        let headed = |hole: &str| match hole_with_keys(seed.clone(), &args(&[("hole", s(hole)), ("clearance_for", s("M8"))]), &nobody).unwrap() {
+            Node::Hole { kind, .. } => kind,
+            _ => unreachable!(),
+        };
+        assert_eq!(headed("counterbore"), HoleKind::Counterbore { diameter: ParamRef::Literal(9.0), bore_diameter: ParamRef::Literal(15.0), bore_depth: ParamRef::Literal(9.0) });
+        assert_eq!(headed("countersink"), HoleKind::Countersink { diameter: ParamRef::Literal(9.0), sink_diameter: ParamRef::Literal(16.4), sink_angle: ParamRef::Literal(90.0) });
+        assert!(hole_with_keys(seed.clone(), &args(&[("clearance_for", s("M8")), ("diameter", s("9"))]), &nobody).is_err());
+        assert!(hole_with_keys(seed.clone(), &args(&[("fit", s("fine"))]), &nobody).is_err());
+        assert!(hole_with_keys(seed, &args(&[("designation", s("M7"))]), &nobody).is_err());
+    }
+
     // --------------------------------------------------------------------- the lattice
 
     fn seed(b: fieldform_scene::Banding) -> LatticePhase {
@@ -2738,7 +3332,7 @@ pub(crate) mod tests {
     // ------------------------------------------------------------- operands and fillets
 
     #[test]
-    fn a_boolean_names_its_operands_and_a_fillet_joins_exactly_two() {
+    fn a_boolean_names_its_operands_and_a_fillet_joins_any_number_of_them() {
         let (a, b, c) = (NodeId::new(), NodeId::new(), NodeId::new());
         let lookup = |name: &str| match name {
             "box" => Lookup::Block(a),
@@ -2753,8 +3347,9 @@ pub(crate) mod tests {
         let asked = boolean_asked(&args(&[("s", Value::Bool(true)), ("in", s("box,ball,rod"))]), &lookup).unwrap();
         assert_eq!(asked.inputs.map(|i| i.len()), Some(3));
         assert_eq!(asked.fillet, None);
-        let refused = boolean_asked(&args(&[("in", s("box,ball,rod")), ("r", Value::Int(2))]), &lookup).unwrap_err();
-        assert_eq!(refused, "a fillet joins two bodies; union the rest first");
+        let rounded = boolean_asked(&args(&[("in", s("box,ball,rod")), ("r", Value::Int(2))]), &lookup).unwrap();
+        assert_eq!(rounded.inputs.map(|i| i.len()), Some(3), "three, rounded");
+        assert!(rounded.fillet.is_some());
         assert!(boolean_asked(&args(&[("in", s("box,nothing"))]), &lookup).unwrap_err().starts_with("no block is called"));
         assert!(boolean_asked(&args(&[("in", s("box"))]), &lookup).is_err(), "one operand is not a boolean");
         // `in=none` is both slots waiting -- the block a script makes before it has the bodies.
@@ -2827,6 +3422,16 @@ pub(crate) mod tests {
         let mirror = Node::Mirror { input: Operand::filled(id), frame: Frame::default(), join: false };
         let node = mirror_with_keys(mirror, &args(&[("axis", s("x")), ("join", Value::Bool(true))]), &nobody).unwrap();
         assert!(matches!(node, Node::Mirror { join: true, frame: Frame::At { .. }, .. }));
+
+        let scale = Node::Scale { input: Operand::filled(id), factors: [ParamRef::Literal(1.0); 3], frame: Frame::default() };
+        let node = scale_with_keys(scale.clone(), &args(&[("by", s("2,1,0.5")), ("about", s("0,0,5")), ("axis", s("x"))]), &nobody).unwrap();
+        let Node::Scale { factors, frame: Frame::At { origin, axis }, .. } = node else { panic!("a scale") };
+        assert_eq!(factors, [ParamRef::Literal(2.0), ParamRef::Literal(1.0), ParamRef::Literal(0.5)]);
+        assert_eq!(origin[2], ParamRef::Literal(5.0));
+        assert_eq!(axis, [ParamRef::Literal(1.0), ParamRef::Literal(0.0), ParamRef::Literal(0.0)]);
+        let node = scale_with_keys(scale.clone(), &args(&[("by", Value::Int(3))]), &nobody).unwrap();
+        assert!(matches!(node, Node::Scale { factors: [ParamRef::Literal(a), ParamRef::Literal(b), ParamRef::Literal(c)], .. } if a == 3.0 && b == 3.0 && c == 3.0), "one number is all three");
+        assert!(scale_with_keys(scale, &args(&[("by", s("1,-2,1"))]), &nobody).is_err(), "a negative factor is a mirror, refused by name");
 
         let shell = Node::Shell { input: Operand::filled(id), thickness: ParamRef::Literal(1.0) };
         let node = shell_with_keys(shell, &args(&[("thickness", Value::Int(-2))]), &nobody).unwrap();
@@ -2938,7 +3543,17 @@ pub(crate) mod tests {
         // A scale after a move wraps: scaling the moved body about the origin moves it further.
         let (_, edited) = place(Placing::Scale, body, Some((placement, &again)), &[("by", Value::Int(2))], &nobody);
         assert_eq!(edited, None);
-        assert!(placed(Placing::Scale, body, None, &args(&[("by", s("1,2,1"))]), &nobody).is_err(), "three numbers wait for item 69");
+        // Three factors are a scale block of their own, wrapping the outermost placement as a
+        // fresh placement would; one factor still folds.
+        let (stretched, edited) = placed(Placing::Scale, body, Some((placement, &again)), &args(&[("by", s("1,2,1")), ("about", s("1,1,1")), ("axis", s("y"))]), &nobody).unwrap();
+        assert_eq!(edited, None, "a scale of three never folds into a placement");
+        let Node::Scale { input, factors, frame: Frame::At { origin, axis } } = stretched else { panic!("a scale block") };
+        assert_eq!(input.source(), Some(placement));
+        assert_eq!(factors, [ParamRef::Literal(1.0), ParamRef::Literal(2.0), ParamRef::Literal(1.0)]);
+        assert_eq!(origin, [ParamRef::Literal(1.0); 3]);
+        assert_eq!(axis, [ParamRef::Literal(0.0), ParamRef::Literal(1.0), ParamRef::Literal(0.0)]);
+        assert!(placed(Placing::Scale, body, None, &args(&[("by", s("1,0,1"))]), &nobody).is_err(), "nought is refused by name");
+        assert!(placed(Placing::Scale, body, None, &args(&[("by", Value::Int(2)), ("axis", s("y"))]), &nobody).is_err(), "an axis means nothing to one factor");
         assert!(placed(Placing::Move, body, None, &Args::new(), &nobody).is_err(), "a move says by how much");
         assert!(placed(Placing::Move, body, None, &args(&[("about", s("0,0,0")), ("by", s("1,0,0"))]), &nobody).is_err());
     }

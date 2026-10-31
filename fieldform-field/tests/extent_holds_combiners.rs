@@ -64,8 +64,7 @@ fn blend_at(
 ) -> NodeId {
     g.add(Node::Blend {
         op,
-        a: a.into(),
-        b: b.into(),
+        inputs: vec![a.into(), b.into()],
         fillet: Fillet { radius: lit(radius), continuity, second: None },
     })
 }

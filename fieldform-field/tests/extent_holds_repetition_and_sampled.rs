@@ -450,7 +450,7 @@ fn a_gyroid_blended_into_a_cuboid_s_extent_holds_every_solid_point() {
         phase: LatticePhase::sheet(lit(1.5)),
     });
     let s = cuboid(&mut g, [0.0, 0.0, 0.0], [40.0, 30.0, 20.0]);
-    let b = g.add(Node::Blend { op: BooleanOp::Intersection, a: l.into(), b: s.into(), fillet: Fillet::of(lit(3.0)) });
+    let b = g.add(Node::Blend { op: BooleanOp::Intersection, inputs: vec![l.into(), s.into()], fillet: Fillet::of(lit(3.0)) });
     holds("gyroid sheet blend-intersect cuboid, fillet 3", check(&doc, &g, b, None));
 }
 

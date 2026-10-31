@@ -48,10 +48,12 @@ use nalgebra::{Point2, Point3, Vector2, Vector3};
 /// on the owner's three-section loft (`fieldform-gpu/examples/document_cost.rs`, draft frame at
 /// 720², still at 1600×900): 96 → 39.1 / 74.5 ms, **64 → 27.9 / 56.9 ms**, 48 → 23.1 / 47.7 ms.
 /// Sixty-four is where the shape is still the drawn shape to the eye and the frame is a third
-/// cheaper; a count that follows the boundary's turn rather than its length — a square needs
-/// four — is the next refinement, and would make this a ceiling rather than the figure.
-/// Corners are kept exactly whatever the count, and sections drawn with fewer points than this
-/// are resampled to no more than the most any of them has, so two squares stay eight vertices.
+/// cheaper. **Since 2026-10-25 it is a ceiling**: where every section has the same corners, the
+/// vertices follow the boundary's turn rather than its length ([`run_counts`]), so two squares
+/// are four vertices and a curved run gets what keeps its chords within [`LOFT_SAG_MM`]. Sections
+/// whose corner counts differ still spread this many evenly, since a square lofted into a
+/// circle needs its runs met by points at the same share of the way round. Corners are kept
+/// exactly whatever the count.
 pub(crate) const LOFT_SAMPLES: usize = 64;
 
 /// The turn at a vertex that makes it a corner the correspondence keeps and matches, in degrees.
@@ -365,36 +367,15 @@ fn by_corners(loops: &[Loop], corners: &[Vec<usize>], samples: usize) -> Vec<Vec
         };
         shifts[k] = (0..c).min_by(|a, b| cost(*a).total_cmp(&cost(*b))).unwrap_or(0);
     }
-    // Each run between two corners gets vertices in proportion to its share of the perimeter,
-    // averaged over the sections, and never fewer than its own corner.
     let run_length = |k: usize, j: usize| -> f64 {
         let (from, to) = (corners[k][(j + shifts[k]) % c], corners[k][(j + 1 + shifts[k]) % c]);
         let (a, b) = (loops[k].arc[from], loops[k].arc[to]);
         (b - a).rem_euclid(loops[k].perimeter().max(1e-12)).max(if c == 1 { loops[k].perimeter() } else { 0.0 })
     };
-    let shares: Vec<f64> = (0..c)
-        .map(|j| {
-            (0..loops.len())
-                .map(|k| run_length(k, j) / loops[k].perimeter().max(1e-12))
-                .sum::<f64>()
-                / loops.len() as f64
-        })
-        .collect();
-    let mut counts: Vec<usize> = shares.iter().map(|s| ((s * samples as f64).floor() as usize).max(1)).collect();
-    let mut remaining = samples.saturating_sub(counts.iter().sum());
-    while remaining > 0 {
-        // To the run whose share is least served by what it has.
-        let j = (0..c)
-            .max_by(|a, b| {
-                (shares[*a] / counts[*a] as f64).total_cmp(&(shares[*b] / counts[*b] as f64))
-            })
-            .unwrap_or(0);
-        counts[j] += 1;
-        remaining -= 1;
-    }
+    let counts = run_counts(loops, corners, &shifts, &run_length, samples);
     (0..loops.len())
         .map(|k| {
-            let mut out = Vec::with_capacity(samples);
+            let mut out = Vec::with_capacity(counts.iter().sum());
             for j in 0..c {
                 let from = loops[k].arc[corners[k][(j + shifts[k]) % c]];
                 let length = run_length(k, j);
@@ -405,6 +386,82 @@ fn by_corners(loops: &[Loop], corners: &[Vec<usize>], samples: usize) -> Vec<Vec
             out
         })
         .collect()
+}
+
+/// The chord sag a loft's resampling is held to where its sections turn, in millimetres: what
+/// [`LOFT_SAMPLES`] vertices round a 40 mm circle give, `40·(1 − cos(π/64))` = 0.048 mm.
+const LOFT_SAG_MM: f64 = 0.05;
+
+/// How many vertices each run between two corners gets: **by how much it turns, not by how
+/// long it is.** A run that is straight in every section needs only its corner -- the polygon
+/// through the matched corners is the drawn shape exactly, so two squares are four vertices --
+/// and a curved one needs enough that its chords sit within [`LOFT_SAG_MM`] of it: an arc of turn
+/// `θ` and length `L` has radius `L/θ`, and `N` chords sag `(L/θ)(1 − cos(θ/2N)) ≈ θL/(8N²)`, so
+/// `N = ⌈√(θL / 8·sag)⌉`, the most any section asks. A full circle of 40 mm radius asks 63, the
+/// figure [`LOFT_SAMPLES`] was measured at; a loft that asks more than the ceiling `samples` is
+/// scaled down to it, every run keeping at least its corner, and one under four is made up on
+/// its longest run so the polygon can be walked.
+fn run_counts(
+    loops: &[Loop],
+    corners: &[Vec<usize>],
+    shifts: &[usize],
+    run_length: &dyn Fn(usize, usize) -> f64,
+    samples: usize,
+) -> Vec<usize> {
+    let c = corners[0].len();
+    // The turn inside run `j` of section `k`: the absolute turn at every vertex strictly between
+    // its two corners.
+    let turn = |k: usize, j: usize| -> f64 {
+        let l = &loops[k];
+        let n = l.points.len();
+        let (from, to) = (corners[k][(j + shifts[k]) % c], corners[k][(j + 1 + shifts[k]) % c]);
+        let mut i = (from + 1) % n;
+        let mut total = 0.0;
+        let mut guard = 0;
+        while i != to && guard < n {
+            let before = l.points[i] - l.points[(i + n - 1) % n];
+            let after = l.points[(i + 1) % n] - l.points[i];
+            total += (before.x * after.y - before.y * after.x).atan2(before.dot(&after)).abs();
+            i = (i + 1) % n;
+            guard += 1;
+        }
+        total
+    };
+    let mut counts: Vec<usize> = (0..c)
+        .map(|j| {
+            (0..loops.len())
+                .map(|k| (turn(k, j) * run_length(k, j) / (8.0 * LOFT_SAG_MM)).sqrt().ceil() as usize)
+                .max()
+                .unwrap_or(0)
+                .max(1)
+        })
+        .collect();
+    let wanted: usize = counts.iter().sum();
+    if wanted > samples {
+        // Scaled to the ceiling, each run keeping its corner, the rest to the runs least served.
+        let extra: Vec<f64> = counts.iter().map(|&n| (n - 1) as f64).collect();
+        let spare = samples.saturating_sub(c) as f64;
+        let scale = spare / extra.iter().sum::<f64>().max(1.0);
+        counts = extra.iter().map(|e| 1 + (e * scale).floor() as usize).collect();
+        let mut left = samples.saturating_sub(counts.iter().sum());
+        while left > 0 {
+            let j = (0..c)
+                .max_by(|a, b| (extra[*a] / counts[*a] as f64).total_cmp(&(extra[*b] / counts[*b] as f64)))
+                .unwrap_or(0);
+            counts[j] += 1;
+            left -= 1;
+        }
+    }
+    while counts.iter().sum::<usize>() < 4 {
+        let longest = (0..c)
+            .max_by(|a, b| {
+                let len = |j: usize| (0..loops.len()).map(|k| run_length(k, j)).fold(0.0, f64::max);
+                len(*a).total_cmp(&len(*b))
+            })
+            .unwrap_or(0);
+        counts[longest] += 1;
+    }
+    counts
 }
 
 /// [`correspond`] where the corner counts differ: each section keeps its own corners and
@@ -868,6 +925,52 @@ mod tests {
             Point3::new(half, half, at),
             Point3::new(-half, half, at),
         ]
+    }
+
+    /// **Vertices follow the turn, not the length.** Two squares -- a big and a small, drawn with
+    /// extra points along their sides -- are four vertices, the corners alone. A D of radius 20
+    /// (a half circle closed by its diameter, two corners) gives its straight side one vertex and
+    /// its arc `⌈√(π·20π / 0.4)⌉` = 23, the count that keeps the chords within the sag; and the
+    /// resampled arc sits within that sag of the true one.
+    #[test]
+    fn a_loft_spends_its_vertices_where_the_sections_turn() {
+        let side = |half: f64| -> Vec<Point2<f64>> {
+            let mut out = Vec::new();
+            let corners = [(-half, -half), (half, -half), (half, half), (-half, half)];
+            for i in 0..4 {
+                let (a, b) = (corners[i], corners[(i + 1) % 4]);
+                for s in 0..5 {
+                    let t = s as f64 / 5.0;
+                    out.push(Point2::new(a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
+                }
+            }
+            out
+        };
+        let squares = correspond(&[side(20.0), side(8.0)]);
+        assert_eq!(squares[0].len(), 4, "{:?}", squares[0]);
+        assert_eq!(squares[1].len(), 4);
+
+        let d = |r: f64| -> Vec<Point2<f64>> {
+            let mut out: Vec<Point2<f64>> = (0..=180)
+                .map(|i| {
+                    let a = std::f64::consts::PI * i as f64 / 180.0;
+                    Point2::new(r * a.cos(), r * a.sin())
+                })
+                .collect();
+            out.push(Point2::new(0.0, 0.0));
+            out
+        };
+        let ds = correspond(&[d(20.0), d(20.0)]);
+        let wanted = ((std::f64::consts::PI * 20.0 * std::f64::consts::PI) / (8.0 * LOFT_SAG_MM)).sqrt().ceil() as usize;
+        assert_eq!(wanted, 23);
+        // The arc's vertices, the straight side's one corner, and the D's other corner.
+        assert_eq!(ds[0].len(), wanted + 1, "{}", ds[0].len());
+        for pair in ds[0].windows(2) {
+            let mid = (pair[0].coords + pair[1].coords) * 0.5;
+            if mid.y > 1e-6 {
+                assert!(20.0 - mid.norm() <= LOFT_SAG_MM + 1e-9, "sag {}", 20.0 - mid.norm());
+            }
+        }
     }
 
     /// **The fold test counts the bulge.** The bottle of radii 10, 30, 30, 10 bent round a

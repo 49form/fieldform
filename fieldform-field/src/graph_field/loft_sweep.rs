@@ -49,6 +49,8 @@ pub fn sweep_law(
         twist: resolve(&law.twist)?.to_radians(),
         shape: law.shape,
         window: (resolve(&law.extent[0])? / 100.0, resolve(&law.extent[1])? / 100.0),
+        // The section's, set by whoever reads the section too (`SweepSection::law`).
+        mitre: 1.0,
     })
 }
 
@@ -252,7 +254,7 @@ pub fn sweep_stretch(
 ) -> f64 {
     let Some(curve) = document.curves.get(&spine) else { return 1.0 };
     let Some(section) = sweep_section(document, outline, spine) else { return 1.0 };
-    let Ok(law) = sweep_law(document, law) else { return 1.0 };
+    let Ok(law) = sweep_law(document, law).map(|law| section.law(law)) else { return 1.0 };
     // **At the default tolerance whatever the compile's own is**, because the shader's divisor
     // is written by codegen, which has no tolerance to hand. A corner's curvature does not
     // depend on how finely its legs are flattened, and a smooth bend's converges as the square
@@ -293,6 +295,44 @@ pub fn sweep_tube(
     law: &fieldform_scene::SweepLaw,
 ) -> Option<(f64, f64)> {
     in_tube(document, outline, spine, section, law).map(|(reach, tube, _)| (reach, tube))
+}
+
+/// The tube a sweep's reading is held to where its section is *not* read as it is -- held at an
+/// angle, or moved by a law -- as the solid's reach under the law and the spine's tube, asked of
+/// the graph for the shader's slots, which go up with the tube negated so one slot says which
+/// reading it holds (`sweep_held_to_tube`). `None` where [`sweep_tube`] answers, where the tube
+/// is no wider than the solid reaches, and for a sweep that cannot be built.
+///
+/// **Why the tube holds a divided reading too**, the argument the sweep's design notes make for
+/// the reading in the tube: within it every point has one nearest place, and the divided reading
+/// rises no faster than one a millimetre wherever that is so -- the stretch is what makes it --
+/// so a reading whose straight way to the surface stays inside is no more than the distance, and
+/// one whose way leaves is answered by the tube: the surface is at least `tube − ρ` away, and at
+/// least `ρ − reach`. The reach is the solid's: a held section's points are no further from the
+/// spine than the section reaches under the law, over the cosine of the frame's lean off the
+/// segment the point is nearest, as a square section's are, which the shader applies with the
+/// frame. At the default tolerance whatever the compile's own, for [`sweep_stretch`]'s reason.
+pub fn sweep_cap_tube(
+    document: &Document,
+    outline: &fieldform_scene::Outline,
+    spine: fieldform_scene::CurveId,
+    section: &fieldform_scene::Section,
+    law: &fieldform_scene::SweepLaw,
+) -> Option<(f64, f64)> {
+    if sweep_tube(document, outline, spine, section, law).is_some() {
+        return None;
+    }
+    let curve = document.curves.get(&spine)?;
+    let section_read = sweep_section(document, outline, spine)?;
+    let law = section_read.law(sweep_law(document, law).ok()?);
+    let path = crate::Spine::of_curve(curve, crate::DEFAULT_TOLERANCE_MM);
+    let run = path.length() * (law.window.1 - law.window.0);
+    let reach = law.reach_under(section_read.reach, run);
+    if !(crate::max_curvature(path.points()) * reach < 1.0) {
+        return None;
+    }
+    let tube = crate::swept::tube_radius(path.points());
+    (tube > reach).then_some((reach, tube))
 }
 
 /// Whether a sweep reads its walls as they are: [`sweep_tube`]'s tube, round a spine whose frame
@@ -464,6 +504,17 @@ pub fn sweep_offset(
 pub(crate) struct SweepSection {
     pub(crate) reach: f64,
     seed: Vector3<f64>,
+    /// The longest mitre vector of the section, which a draft that mitres moves its corners by
+    /// per millimetre its walls move (`Footprint::mitre_rate`); one for a wall, which never
+    /// mitres. Handed to the law by [`SweepSection::law`].
+    mitre: f64,
+}
+
+impl SweepSection {
+    /// `law` for this section: the same law, told how fast this section's mitred corners move.
+    pub(crate) fn law(&self, law: crate::SectionLaw) -> crate::SectionLaw {
+        law.with_mitre(self.mitre)
+    }
 }
 
 pub(crate) fn sweep_section(
@@ -474,8 +525,18 @@ pub(crate) fn sweep_section(
     let laid =
         sweep_outline_section(document, outline, spine, crate::profile::PROFILE_TURN_DEGREES)
             .ok()?;
+    let mut mitre = 1.0f64;
     let reach = match outline {
         fieldform_scene::Outline::Closed { .. } => {
+            // Flattened as `outline_miters` flattens it for the shader, so the two agree.
+            let rotation = rotation_from_z(laid.normal);
+            let origin = laid.origin.coords;
+            let into = move |p: Point3<f64>| {
+                Point3::from(rotation.inverse_transform_vector(&(p.coords - origin)))
+            };
+            if let Ok(profile) = crate::Profile::in_plane(&laid.points, into, f64::INFINITY) {
+                mitre = profile.miters().iter().map(|m| m.norm()).fold(1.0, f64::max);
+            }
             laid.points.iter().map(|p| (p - laid.origin).norm()).fold(0.0f64, f64::max)
         }
         // A wall's curve is not its reach: the band goes a thickness past it. Asked of the
@@ -487,5 +548,5 @@ pub(crate) fn sweep_section(
             crate::Footprint::Wall(wall).reach_from_origin()
         }
     };
-    Some(SweepSection { reach, seed: rotation_from_z(laid.normal) * Vector3::x() })
+    Some(SweepSection { reach, seed: rotation_from_z(laid.normal) * Vector3::x(), mitre })
 }

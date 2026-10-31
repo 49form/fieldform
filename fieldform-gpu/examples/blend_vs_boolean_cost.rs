@@ -85,8 +85,7 @@ fn chain(n: usize, radius: Option<f64>) -> Graph {
             for next in &ids[1..] {
                 acc = g.add(Node::Blend {
                     op: BooleanOp::Union,
-                    a: acc.into(),
-                    b: (*next).into(),
+                    inputs: vec![acc.into(), (*next).into()],
                     fillet: Fillet { radius: lit(r), continuity: Continuity::G1, second: None },
                 });
             }

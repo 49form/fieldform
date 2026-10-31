@@ -101,8 +101,7 @@ fn one_deep_body(count: usize, salt: f64) -> (Document, Graph) {
         let next = ball(&mut graph, 15.0 * i as f64 + salt, 9.0);
         joined = graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: joined.into(),
-            b: next.into(),
+            inputs: vec![joined.into(), next.into()],
             fillet: Fillet { radius: lit(3.0), continuity: Continuity::G1, second: None },
         });
     }

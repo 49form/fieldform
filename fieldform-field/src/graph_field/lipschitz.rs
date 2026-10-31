@@ -63,8 +63,9 @@ fn lipschitz_of_node(document: &Document, graph: &Graph, node: NodeId, depth: us
     };
     let resolve = |r: &fieldform_scene::ParamRef| -> f64 { document.resolve(r).unwrap_or(0.0) };
     match node {
-        Node::Blend { a, b, .. } => recurse(a).max(recurse(b)),
-        Node::Boolean { inputs, .. } => inputs.iter().map(|i| recurse(i)).fold(0.0, f64::max),
+        Node::Boolean { inputs, .. } | Node::Blend { inputs, .. } => {
+            inputs.iter().map(|i| recurse(i)).fold(0.0, f64::max)
+        }
         // The larger of the two, which is what a convex combination can reach: at `t = 0` it is
         // exactly `a` and at `t = 1` exactly `b`, and in between it cannot rise faster than the
         // steeper of them.
@@ -101,7 +102,9 @@ fn lipschitz_of_node(document: &Document, graph: &Graph, node: NodeId, depth: us
         | Node::Attract { input, .. }
         | Node::Mirror { input, .. }
         | Node::Pattern { input, .. }
-        | Node::Transform { input, .. } => recurse(input),
+        | Node::Transform { input, .. }
+        // Multiplied by the least factor, which is exactly what undoes the squeeze's stretch.
+        | Node::Scale { input, .. } => recurse(input),
         // An exact distance field, or one that has already divided by its own bound.
         Node::Cage(_)
         | Node::Mesh(_)
@@ -116,6 +119,9 @@ fn lipschitz_of_node(document: &Document, graph: &Graph, node: NodeId, depth: us
         | Node::Point { .. }
         | Node::Pipe { .. }
         // Divided by its own stretch already, as a twist and an attractor are.
+        | Node::Coil { .. }
+        | Node::Thread { .. }
+        | Node::Hole { .. }
         | Node::Sweep { .. }
         | Node::Loft { .. }
         // Both are built from a true 2D distance and placed by a rigid motion, so neither
@@ -207,8 +213,7 @@ fn true_distance_at(document: &Document, graph: &Graph, node: NodeId, depth: usi
         Node::Blend { fillet, .. } if rounds(fillet) => false,
         // A radius of nought is a hard boolean: both operands, since min and max of a distance
         // and a bound is a bound.
-        Node::Blend { a, b, .. } => recurse(a) && recurse(b),
-        Node::Boolean { inputs, .. } => inputs.iter().all(|i| recurse(i)),
+        Node::Boolean { inputs, .. } | Node::Blend { inputs, .. } => inputs.iter().all(|i| recurse(i)),
         // Never, whatever it is made of: where the two gradients oppose the value rises more
         // slowly than one per millimetre, so the reading is short. The same answer
         // `normalization_of` gives over the compiled ops, and the two are held together by
@@ -248,6 +253,10 @@ fn true_distance_at(document: &Document, graph: &Graph, node: NodeId, depth: usi
         // Never: an interpolation of distances is not a distance, and a bent centerline
         // stretches the section planes besides. The leaf says `LowerBound` for both reasons.
         Node::Loft { .. } => false,
+        // A bound always: the helical map stretches, and the value is divided by that.
+        Node::Coil { .. } | Node::Thread { .. } => false,
+        // A plain hole is a revolved section, exact; a tapped one carries a thread, a bound.
+        Node::Hole { kind, .. } => !matches!(kind, fieldform_scene::HoleKind::Tapped { .. }),
         // A fixed distance subtracts a constant and leaves the gradient alone; a driven one
         // does not, which is the cost the Ramp decision accepted.
         Node::Offset { input, distance } => distance.driver().is_none() && recurse(input),
@@ -276,6 +285,13 @@ fn true_distance_at(document: &Document, graph: &Graph, node: NodeId, depth: usi
         }
         // Rigid motions and similarities map distances to distances, only rescaled.
         Node::Pattern { input, .. } | Node::Transform { input, .. } => recurse(input),
+        // The input's own claim when the three factors are one factor, which is the exact
+        // placement arithmetic; a bound otherwise, since the value reads short along every axis
+        // but the least-scaled one. Decided by structure (`uniform_factor`), as the compiler
+        // decides it, so the two cannot differ on a typed digit.
+        Node::Scale { input, factors, .. } => {
+            fieldform_scene::uniform_factor(factors).is_some() && recurse(input)
+        }
         // Nothing this build could read, so nothing it can promise. It is refused at compile
         // time anyway; saying so here keeps the two answers the same.
         Node::Unknown(_) => false,
@@ -385,9 +401,8 @@ pub fn approximate_blends(document: &Document, graph: &Graph) -> Vec<NodeId> {
         .nodes()
         .filter(|(id, _)| !holed.contains(id))
         .filter_map(|(id, n)| match n {
-            Node::Blend { a, b, .. }
-                if !operand_carries_true_distance(document, graph, a)
-                    || !operand_carries_true_distance(document, graph, b) =>
+            Node::Blend { inputs, .. }
+                if inputs.iter().any(|i| !operand_carries_true_distance(document, graph, i)) =>
             {
                 Some(id)
             }
@@ -460,6 +475,19 @@ pub fn driven_blend_divisor(document: &Document, graph: &Graph, blend: NodeId) -
     let tapers = taper_ratio(document, graph, blend) > 0.0;
     (1.0 + blend_radius_rate(fillet.exponent(), tapers) * graph_lipschitz(document, graph, driver))
         .max(1e-9)
+}
+
+/// What one join of a blend divides its value by: the rounding's own divisor at the largest
+/// radius it can take, and the driven divisor on top where a ramp sets that radius. A blend of
+/// `m` operands is `m − 1` such joins in a chain.
+pub(crate) fn blend_step_divisor(
+    document: &Document,
+    graph: &Graph,
+    id: NodeId,
+    fillet: &fieldform_scene::Fillet,
+) -> f64 {
+    let k = fillet_reach(document, graph, fillet);
+    blend_divisor(k, fillet.exponent(), taper_ratio(document, graph, id)) * driven_blend_divisor(document, graph, id)
 }
 
 /// The largest radius a fillet can have: its number, or the top of the ramp that drives it.
@@ -620,6 +648,9 @@ pub fn may_divide(graph: &Graph) -> bool {
         Node::Offset { distance, .. } => distance.driver().is_some(),
         Node::Pipe { radius, .. } => radius.driver().is_some(),
         Node::Lattice { phase, .. } => phase.param().driver().is_some(),
+        // Three factors read short by their ratio, which a drag of any one of them moves; one
+        // factor is the exact placement and divides by nothing.
+        Node::Scale { factors, .. } => fieldform_scene::uniform_factor(factors).is_none(),
         _ => false,
     })
 }
@@ -762,10 +793,12 @@ pub(crate) fn own_divisor(
             // At the largest radius a ramp can give, where one drives it, and by the driven
             // divisor on top: the two divisions compound in the step exactly as a morph of a
             // morph's do.
-            Node::Blend { fillet, .. } => {
-                let k = fillet_reach(document, graph, fillet);
-                blend_divisor(k, fillet.exponent(), taper_ratio(document, graph, id))
-                    * driven_blend_divisor(document, graph, id)
+            //
+            // **Once per join of the chain a list stands for**: the first operand is read through
+            // every one of them, so a list of `m` divides as `m − 1` nested pairs did.
+            Node::Blend { inputs, fillet, .. } => {
+                blend_step_divisor(document, graph, id, fillet)
+                    .powi(inputs.len().saturating_sub(1).max(1) as i32)
             }
             Node::Pattern { input, fillet, .. } => {
                 let k = document.resolve(&fillet.radius).unwrap_or(0.0);
@@ -807,6 +840,10 @@ pub(crate) fn own_divisor(
             // `extent_holds_combiners.rs`, which is the same arithmetic that lost the morph's
             // silhouette and darkened the pattern's shading, in a fifth place.
             Node::Twist { .. } => twist_stretch(document, graph, id),
+            // A scale reads short by the ratio of its largest factor to its least: the value is
+            // `s_min` times the input read at the squeezed point, and along the most-stretched
+            // axis the true distance is `s_max` times that reading. One where the three agree.
+            Node::Scale { factors, .. } => scale_stretch(document, factors),
             // **An extrude divides by the secant of its lean and the slope of its draft, and
             // this walk was not told** -- the sixth place for the one arithmetic. A leaning,
             // drafted extrude bought its steps against a value up to twice what the field
@@ -814,6 +851,17 @@ pub(crate) fn own_divisor(
             // took six per cent of a scene's hits away in `gpu_matches_cpu`, with the budget
             // still bought as if it divided by nothing.
             Node::Extrude { .. } => extrude_stretch(document, graph, id),
+            // A coil and a thread divide by the helical map's global stretch at the radius their
+            // bound is taken at, so they cost steps by it as a twist does.
+            Node::Coil { .. } | Node::Thread { .. } => super::helical_divisor(document, node),
+            // A tapped hole's thread reads short by the same stretch; a plain hole by nothing.
+            Node::Hole { kind, depth, tip, .. } => {
+                let numbers = |r: &fieldform_scene::ParamRef| document.resolve(r);
+                match super::hole_section(kind, depth, tip, &numbers) {
+                    Ok((_, Some(t))) => crate::helix_stretch(t.profile.pitch, t.inner_radius()),
+                    _ => 1.0,
+                }
+            }
             // Everything else either divides by nothing or has already paid for what it does,
             // which is the same list `graph_lipschitz` states arm by arm.
         _ => 1.0,
@@ -825,15 +873,45 @@ pub(crate) fn own_divisor(
 /// against the number the field divides by. One for anything that is not an extrude, and for
 /// an extrude whose numbers cannot be read, which the compile refuses by name.
 pub(crate) fn extrude_stretch(document: &Document, graph: &Graph, id: NodeId) -> f64 {
-    let Some(Node::Extrude { draft, sides, .. }) = graph.node(id) else { return 1.0 };
+    let Some(Node::Extrude { draft, sides, corners, .. }) = graph.node(id) else { return 1.0 };
     let resolve = |r: &fieldform_scene::ParamRef| document.resolve(r).unwrap_or(0.0);
     let slope = |draft: &fieldform_scene::ParamRef| resolve(draft).to_radians().tan().abs();
     let steepest = match sides {
         fieldform_scene::Sides::Two { draft: other, .. } => slope(draft).max(slope(other)),
         _ => slope(draft),
-    };
+    } * mitre_rate_of(document, graph, id, corners);
     let along = sweep_lean_degrees(document, graph, id).unwrap_or(0.0).to_radians().cos();
     crate::profile::extrude_divisor(along, steepest).max(1.0)
+}
+
+/// How far short a non-uniform scale's value reads of the true distance, at worst: the largest
+/// factor over the least. One for a uniform scale, which is exact, and for factors the compile
+/// would refuse, since nothing is drawn from those.
+pub(crate) fn scale_stretch(document: &Document, factors: &[fieldform_scene::ParamRef; 3]) -> f64 {
+    let s: Vec<f64> = factors.iter().filter_map(|f| document.resolve(f)).collect();
+    if s.len() != 3 || s.iter().any(|f| !(*f > 0.0)) {
+        return 1.0;
+    }
+    let least = s.iter().copied().fold(f64::INFINITY, f64::min);
+    let most = s.iter().copied().fold(0.0, f64::max);
+    (most / least).max(1.0)
+}
+
+/// How fast a block's mitred section moves its boundary per millimetre of draft: the longest
+/// mitre vector of the section the viewport is handed, or one where the corners are rounded
+/// (`Footprint::mitre_rate`, which the leaf asks of its own section). A draft's divisor is
+/// multiplied by it, here for the step budget and the shader's slots as in the leaf.
+pub(crate) fn mitre_rate_of(
+    document: &Document,
+    graph: &Graph,
+    id: NodeId,
+    corners: &fieldform_scene::Corners,
+) -> f64 {
+    if corners.is_default() {
+        return 1.0;
+    }
+    super::outline_miters(document, graph, id, crate::profile::PROFILE_TURN_DEGREES)
+        .map_or(1.0, |miters| miters.iter().map(|m| m.coords.norm()).fold(1.0f64, f64::max))
 }
 
 /// What a twist's value is divided by to stay a lower bound.
@@ -952,6 +1030,10 @@ pub(crate) fn driven_refusal(node: &Node) -> Option<CompileError> {
         Node::Cone { .. } => "a cone's ends or radii",
         Node::Torus { .. } => "a torus's centre or radii",
         Node::Capsule { .. } => "a capsule's ends or radii",
+        // A varying pitch or radius is a warp of its own, with a bound nobody has worked out.
+        Node::Coil { .. } => "a coil's diameter, size, wire or frame",
+        Node::Thread { .. } => "a thread's diameter, pitch, length, clearance or frame",
+        Node::Hole { .. } => "a hole's sizes, depth, point or ends",
         Node::Plane { .. } => "a plane's origin",
         Node::Extrude { .. } => "an extrude's height or sweep",
         Node::Revolve { .. } => "a revolve's frame",
@@ -980,6 +1062,9 @@ pub(crate) fn driven_refusal(node: &Node) -> Option<CompileError> {
         Node::Attract { .. } => "an attractor's strength or falloff radius",
         Node::Transform { .. } => "a placement's translation, rotation or scale",
         Node::Mirror { .. } => "a mirror's origin",
+        // A factor that varied with position would be a warp with a bound of its own, which
+        // this block does not have (item 69, deferred).
+        Node::Scale { .. } => "a scale's factors or origin",
         // **"or count", because the count is in `param_refs` now and this is what catches it.** The
         // blanket test below asks whether any of a node's parameters has a driver, so a ramp wired
         // into a copy count is already refused here — correctly, since a ramp's value varies with the
@@ -1064,6 +1149,9 @@ pub(crate) fn lipschitz_of(ops: &[Op], index: usize) -> f64 {
         // by it, so the two cancel in the gradient and the field moves at exactly the rate the
         // inner one does — which is the whole reason to restrict this node to a uniform scale.
         Op::Transform { input, .. } => lipschitz_of(ops, *input),
+        // The argument is divided by at least `s_min` along every axis and the value multiplied
+        // by exactly `s_min`, so the composed rate is at most the inner one.
+        Op::Scale { input, .. } => lipschitz_of(ops, *input),
     }
 }
 
@@ -1166,5 +1254,9 @@ pub(crate) fn normalization_of(ops: &[Op], index: usize) -> Normalization {
         // rescaled. This is what a per-axis scale would have forfeited, and why a transformed
         // body can still be blended.
         Op::Transform { input, .. } => normalization_of(ops, *input),
+        // Always a bound: this op is only built for three factors that differ, and the value
+        // then reads short along every axis but the least-scaled one. A uniform scale compiles
+        // to the placement above and carries its input's answer through that.
+        Op::Scale { .. } => Normalization::LowerBound,
     }
 }

@@ -57,8 +57,7 @@ fn composed_document() -> Document {
     let boss = part.graph.add(Node::Cage(blend_cage));
     part.graph.add(Node::Blend {
         op: BooleanOp::Union,
-        a: thinned.into(),
-        b: boss.into(),
+        inputs: vec![thinned.into(), boss.into()],
         fillet: Fillet { radius: ParamRef::Named(blend_radius), continuity: Continuity::G1, second: None },
     });
     part.material = fieldform_scene::Material::preset("Brushed aluminium");

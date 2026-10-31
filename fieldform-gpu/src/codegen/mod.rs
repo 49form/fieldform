@@ -359,7 +359,13 @@ fn expand_frames(document: &fieldform_scene::Document, graph: &Graph) -> Graph {
     let aimed: Vec<NodeId> = graph
         .nodes()
         .filter(|(_, n)| match n {
-            Node::Lattice { frame, .. } | Node::Twist { frame, .. } => !frame.is_default(),
+            Node::Lattice { frame, .. }
+            | Node::Twist { frame, .. }
+            | Node::Coil { frame, .. }
+            | Node::Thread { frame, .. } => !frame.is_default(),
+            // Every scale, aimed or not: a uniform one is rewritten into the placement it is,
+            // and a non-uniform one about the world's axes is left as it stands below.
+            Node::Scale { .. } => true,
             _ => false,
         })
         .map(|(id, _)| id)
@@ -386,6 +392,23 @@ fn expand_frames(document: &fieldform_scene::Document, graph: &Graph) -> Graph {
             Some(Node::Lattice { cell, map, phase, frame }) => (
                 frame,
                 Node::Lattice { cell, map, phase, frame: fieldform_scene::Frame::default() },
+            ),
+            // A coil and a thread are leaves built about `+Z`, aimed as a lattice is.
+            Some(Node::Coil { frame, diameter, size, section, hand }) => (
+                frame,
+                Node::Coil { frame: fieldform_scene::Frame::default(), diameter, size, section, hand },
+            ),
+            Some(Node::Thread { frame, major, pitch, length, hand, clearance, designation }) => (
+                frame,
+                Node::Thread {
+                    frame: fieldform_scene::Frame::default(),
+                    major,
+                    pitch,
+                    length,
+                    hand,
+                    clearance,
+                    designation,
+                },
             ),
             Some(Node::Twist { input, degrees_per_mm, frame }) => {
                 let numbers = |r: &ParamRef| -> Option<f64> { document.resolve(r) };
@@ -417,6 +440,72 @@ fn expand_frames(document: &fieldform_scene::Document, graph: &Graph) -> Graph {
                     Node::Twist {
                         input: undone.into(),
                         degrees_per_mm,
+                        frame: fieldform_scene::Frame::default(),
+                    },
+                )
+            }
+            Some(Node::Scale { input, factors, frame }) => {
+                let numbers = |r: &ParamRef| -> Option<f64> { document.resolve(r) };
+                let Ok((translation, rotation)) =
+                    fieldform_field::resolve_frame(document, &out, &frame, &numbers)
+                else {
+                    continue;
+                };
+                // **A uniform scale is the placement, and is drawn as one.** Three factors that
+                // are one `ParamRef` compile on the CPU to the exact `Op::Transform` about the
+                // frame's origin, so here they become `Node::Transform` with that origin as its
+                // pivot and the factor itself in the scale slot -- a drag of the factor is a
+                // buffer write, and the claim, the normal and the step budget are all the
+                // placement's. The same structural question the kernel asks (`uniform_factor`),
+                // so the two sides cannot disagree about which scales are exact.
+                if let Some(factor) = fieldform_scene::uniform_factor(&factors) {
+                    let factor = *factor;
+                    if let Some(slot) = out.node_mut(id) {
+                        *slot = Node::Transform {
+                            input,
+                            translation: [ParamRef::Literal(0.0); 3],
+                            rotation: [ParamRef::Literal(0.0); 3],
+                            scale: factor,
+                            about: fieldform_scene::Place::at(
+                                translation.x,
+                                translation.y,
+                                translation.z,
+                            ),
+                        };
+                    }
+                    continue;
+                }
+                // About the world's own axes and origin: nothing to aim, so nothing to wrap.
+                if frame.is_default() {
+                    continue;
+                }
+                // Otherwise the sandwich a twist takes, and for the same reason: the stretch
+                // happens along the frame's axes about its origin while the body lives in world
+                // space, so the body goes in through the inverse placement and the whole comes
+                // out through the placement.
+                let back = rotation.inverse();
+                let (bx, by, bz) = back.euler_angles();
+                let shift = -(back * translation);
+                let undone = out.add(Node::Transform {
+                    input,
+                    translation: [
+                        ParamRef::Literal(shift.x),
+                        ParamRef::Literal(shift.y),
+                        ParamRef::Literal(shift.z),
+                    ],
+                    rotation: [
+                        ParamRef::Literal(bx.to_degrees()),
+                        ParamRef::Literal(by.to_degrees()),
+                        ParamRef::Literal(bz.to_degrees()),
+                    ],
+                    scale: ParamRef::Literal(1.0),
+                    about: fieldform_scene::Place::origin(),
+                });
+                (
+                    frame,
+                    Node::Scale {
+                        input: undone.into(),
+                        factors,
                         frame: fieldform_scene::Frame::default(),
                     },
                 )
@@ -1205,6 +1294,10 @@ fn generate_inner(
     // has to be the *same* slot the point pass warped with -- warping by one number and
     // dividing by another is a field that overstates its distance.
     let mut attract_slots: HashMap<usize, (usize, usize)> = HashMap::new();
+    // A scale's three factors, per declared point, as the `vec3` that names their slots. The
+    // value pass multiplies by the least of them and the normal pass divides the gradient by
+    // them, and both have to be the same three the point was squeezed by.
+    let mut scale_slots: HashMap<usize, String> = HashMap::new();
     // One frame per pattern occurrence, shared by every step of its window -- see the radial
     // arm of `PointEmitter::pattern` for why that matters to the shader compiler rather than
     // only to tidiness.
@@ -1226,6 +1319,7 @@ fn generate_inner(
             placement_slots: &mut placement_slots,
             mirror_normals: &mut mirror_normals,
             attract_slots: &mut attract_slots,
+            scale_slots: &mut scale_slots,
             shared_frame: &mut shared_frame,
             pattern_loops: &mut pattern_loops,
             mask_taken: &mut mask_taken,
@@ -1243,6 +1337,7 @@ fn generate_inner(
                 point.attract(toward, strength, falloff)
             }
             Some(Node::Mirror { frame, .. }) => point.mirror(frame),
+            Some(Node::Scale { factors, .. }) => point.scale(factors),
             Some(Node::Pattern { input, kind, fillet, .. }) => point.pattern(input, kind, fillet),
             _ => unreachable!("point_assignment records the nodes that move a point"),
         }
@@ -1272,6 +1367,7 @@ fn generate_inner(
             blocks_before: &mut blocks_before,
             placement_slots: &placement_slots,
             attract_slots: &attract_slots,
+            scale_slots: &scale_slots,
             pattern_loops: &pattern_loops,
             operand_masks: &mut operand_masks,
             node,
@@ -1293,6 +1389,9 @@ fn generate_inner(
             | Node::Torus { .. }
             | Node::Plane { .. }
             | Node::Point { .. }
+            | Node::Coil { .. }
+            | Node::Thread { .. }
+            | Node::Hole { .. }
             | Node::Capsule { .. } => emit.leaf(),
             Node::Lattice { cell, map, phase, frame: _ } => emit.lattice(cell, map, phase)?,
             Node::Extrude { outline, sweep, start, height, sides, draft, corners, rims } => {
@@ -1304,7 +1403,7 @@ fn generate_inner(
             Node::Pipe { curve, radius } => emit.pipe(curve, radius)?,
             Node::Morph { a, b, t } => emit.morph(a, b, t)?,
             Node::Boolean { op, inputs } => emit.boolean(op, inputs)?,
-            Node::Blend { op, a, b, fillet } => emit.blend(op, a, b, fillet)?,
+            Node::Blend { op, inputs, fillet } => emit.blend(op, inputs, fillet)?,
             Node::Offset { input, distance } => emit.offset(input, distance)?,
             Node::Ramp { input, .. } => emit.ramp(input)?,
             Node::Pattern { input, .. } => emit.pattern(input)?,
@@ -1312,6 +1411,7 @@ fn generate_inner(
             Node::Twist { input, .. } => emit.twist(input)?,
             Node::Attract { input, .. } => emit.attract(input)?,
             Node::Transform { input, .. } => emit.transform(input)?,
+            Node::Scale { input, .. } => emit.scale(input)?,
             Node::Shell { .. } => {
                 unreachable!("lowered into a difference before any point was assigned")
             }
@@ -1573,6 +1673,7 @@ struct PointEmitter<'a> {
     placement_slots: &'a mut HashMap<usize, (String, usize)>,
     mirror_normals: &'a mut HashMap<usize, String>,
     attract_slots: &'a mut HashMap<usize, (usize, usize)>,
+    scale_slots: &'a mut HashMap<usize, String>,
     shared_frame: &'a mut HashMap<(NodeId, usize), (String, String)>,
     pattern_loops: &'a mut HashMap<usize, PatternLoop>,
     mask_taken: &'a mut bool,
@@ -1677,6 +1778,17 @@ impl PointEmitter<'_> {
         };
         body.push_str(&line);
         mirror_normals.insert(index + 1, normal);
+    }
+
+    // The frame is gone by here, as a twist's is: `expand_frames` turned an aimed scale into
+    // one about the world's axes under a placement, so the point is divided axis by axis and
+    // nothing else. Three slots, so a dragged factor is a buffer write; the least of them is
+    // taken in the shader at the value, so a drag never needs a recompile either.
+    fn scale(self, factors: &[ParamRef; 3]) {
+        let PointEmitter { mut params, body, scale_slots, index, parent, .. } = self;
+        let f = push_point(&mut params, factors);
+        body.push_str(&format!("    let p{} = p{parent} / {f};\n", index + 1));
+        scale_slots.insert(index + 1, f);
     }
 
     // One step of a pattern's window. The fold finds which instance a point belongs
@@ -1925,6 +2037,7 @@ struct NodeEmitter<'a> {
     blocks_before: &'a mut Vec<String>,
     placement_slots: &'a HashMap<usize, (String, usize)>,
     attract_slots: &'a HashMap<usize, (usize, usize)>,
+    scale_slots: &'a HashMap<usize, String>,
     pattern_loops: &'a HashMap<usize, PatternLoop>,
     operand_masks: &'a mut OperandMasks,
     /// The node, and the context it is emitted in.
@@ -2026,6 +2139,15 @@ impl NodeEmitter<'_> {
                 params.push(*start_radius);
                 params.push(*end_radius);
                 format!("capsule_distance({p}, {a}, {b}, params[{r}], params[{}])", r + 1)
+            }
+            Node::Coil { .. } | Node::Thread { .. } => {
+                let c = helical_slots(&mut params, node);
+                helical_call(node, &p, c).0
+            }
+            Node::Hole { ends, .. } => {
+                let (a, b) = push_ends(&mut params, document, graph, id, ends);
+                let c = hole_slots(&mut params, node);
+                hole_call(&p, &a, &b, c).0
             }
             _ => unreachable!("the walk sends a leaf here and nothing else"),
         }
@@ -2627,8 +2749,7 @@ impl NodeEmitter<'_> {
     fn blend(
         self,
         op: &BooleanOp,
-        a: &Operand,
-        b: &Operand,
+        inputs: &[Operand],
         fillet: &fieldform_scene::Fillet,
     ) -> Result<String, CodegenError> {
         let NodeEmitter {
@@ -2648,6 +2769,7 @@ impl NodeEmitter<'_> {
             ..
         } = self;
         Ok({
+            let [a, b, rest @ ..] = inputs else { return Err(CodegenError::NothingToCombine(id)) };
             let (name_a, name_b) = (operand(&slot, (*a, inner))?, operand(&slot, (*b, inner))?);
             // **The radius: a slot, or the ramp that drives it** (`round-chamfer-spec.md` §9.1),
             // lowered exactly as a driven offset's distance is -- the ramp's own expression read
@@ -2723,53 +2845,71 @@ impl NodeEmitter<'_> {
                 Some(&k_most),
             );
             let (a, b) = (oa.name, ob.name);
+            let tag = n;
             let n = fillet.exponent();
-            // A chamfer of two legs is the equal-legged one over scaled operands, as the field
-            // reads it (`two_legs` in the compile): the slot after the radius's is the second
-            // leg, and `k` becomes the lesser of the two.
-            let (a, b, k) = match second_slot {
-                Some(sb) => {
-                    let m = format!("min({k}, params[{sb}])");
-                    (
-                        format!("(({a}) * {m} / params[{sb}])"),
-                        format!("(({b}) * {m} / {k})"),
-                        m,
-                    )
-                }
-                None => (a, b, k),
-            };
-            // Each blended boolean is the smooth minimum of possibly-negated operands,
-            // exactly as the CPU path composes it -- and divided as the CPU path divides
-            // it, so the march never reads more room than there is over a shared face.
-            // See `blend_divisor` in the prelude.
-            let raw = match op {
-                BooleanOp::Union => format!("smooth_min({a}, {b}, {k}, {n:?})"),
-                BooleanOp::Difference => {
-                    format!("-smooth_min(-({a}), {b}, {k}, {n:?})")
-                }
-                BooleanOp::Intersection => {
-                    format!("-smooth_min(-({a}), -({b}), {k}, {n:?})")
-                }
-            };
-            let bounded = if tapers(graph) {
-                // The same three forms over the tapering minimum, divided by what tapering
-                // costs. The ratio is asked of the field crate so both paths hold one number.
-                let rho = finite(
-                    fieldform_field::taper_ratio(document, graph, id),
-                    "a tapering blend's bound",
-                )?;
-                let raw = raw.replacen("smooth_min(", "smooth_min_tapering(", 1);
-                format!("({raw} / blend_taper_divisor({k}, {n:?}, {rho:?}))")
+            // The ratio is asked of the field crate so both paths hold one number.
+            let rho = if tapers(graph) {
+                Some(finite(fieldform_field::taper_ratio(document, graph, id), "a tapering blend's bound")?)
             } else {
-                // Bounded, not divided: `blend_bound` in the prelude, and beside its
-                // namesake in fieldform-field the reason. Nothing to compound down a chain.
-                raw.replacen("smooth_min(", "blend_bound(", 1)
+                None
             };
-            // And over the driven divisor where the radius varies, as the field divides.
-            match divided_by {
-                Some(d) => format!("(({bounded}) / params[{d}])"),
-                None => bounded,
+            // One join of the chain: the CPU path's `Op::Blend`, written out.
+            let step = |a: String, b: String| -> String {
+                // A chamfer of two legs is the equal-legged one over scaled operands, as the
+                // field reads it (`two_legs` in the compile): the slot after the radius's is the
+                // second leg, and `k` becomes the lesser of the two.
+                let (a, b, k) = match second_slot {
+                    Some(sb) => {
+                        let m = format!("min({k}, params[{sb}])");
+                        (
+                            format!("(({a}) * {m} / params[{sb}])"),
+                            format!("(({b}) * {m} / {k})"),
+                            m,
+                        )
+                    }
+                    None => (a, b, k.clone()),
+                };
+                // Each blended boolean is the smooth minimum of possibly-negated operands,
+                // exactly as the CPU path composes it -- and divided as the CPU path divides
+                // it, so the march never reads more room than there is over a shared face.
+                // See `blend_divisor` in the prelude.
+                let raw = match op {
+                    BooleanOp::Union => format!("smooth_min({a}, {b}, {k}, {n:?})"),
+                    BooleanOp::Difference => {
+                        format!("-smooth_min(-({a}), {b}, {k}, {n:?})")
+                    }
+                    BooleanOp::Intersection => {
+                        format!("-smooth_min(-({a}), -({b}), {k}, {n:?})")
+                    }
+                };
+                let bounded = match rho {
+                    // The same three forms over the tapering minimum, divided by what tapering
+                    // costs.
+                    Some(rho) => {
+                        let raw = raw.replacen("smooth_min(", "smooth_min_tapering(", 1);
+                        format!("({raw} / blend_taper_divisor({k}, {n:?}, {rho:?}))")
+                    }
+                    // Bounded, not divided: `blend_bound` in the prelude, and beside its
+                    // namesake in fieldform-field the reason. Nothing to compound down a chain.
+                    None => raw.replacen("smooth_min(", "blend_bound(", 1),
+                };
+                // And over the driven divisor where the radius varies, as the field divides.
+                match divided_by {
+                    Some(d) => format!("(({bounded}) / params[{d}])"),
+                    None => bounded,
+                }
+            };
+            // **A third operand and on joins what the first two made**, as the compile folds
+            // them, each step a `let` of its own so the text grows with the list rather than
+            // nesting. Unmasked: the skip grid is a saving on the first pair's operands, and an
+            // operand it does not cover is only read, never misread.
+            let mut joined = step(a, b);
+            for (i, next) in rest.iter().enumerate() {
+                let name = format!("bl{tag}_{i}");
+                blocks_before.push(format!("    let {name} = {joined};\n"));
+                joined = step(name, operand(&slot, (*next, inner))?);
             }
+            joined
         })
     }
 
@@ -3008,6 +3148,17 @@ impl NodeEmitter<'_> {
         })
     }
 
+    // The point was squeezed for the subtree below; the value comes back multiplied by the
+    // least factor, which is what keeps it from overstating along any axis -- the kernel's
+    // `Op::Scale`, with the minimum taken here so the three slots are the only numbers.
+    fn scale(self, input: &Operand) -> Result<String, CodegenError> {
+        let NodeEmitter { slot, scale_slots, inner, .. } = self;
+        Ok({
+            let f = &scale_slots[&inner];
+            format!("(scale_least({f}) * {})", operand(&slot, (*input, inner))?)
+        })
+    }
+
     // **Three bindings and no placement.** The spine and its frame are in world
     // coordinates, so the point is read as it is; the profile is read in the section
     // plane the frame spans, which is why its polyline goes up flattened like an
@@ -3055,8 +3206,16 @@ impl NodeEmitter<'_> {
             // (`fieldform_field::sweep_tube`). Slots, so a spine dragged into or out of a tube
             // changes two numbers and not the shader; a straight spine's endless tube goes up as
             // a number too large to reach, since a shader may assume no infinities.
+            //
+            // **And the tube a section held at an angle or moved by a law is held to**, negated,
+            // so the one slot says which reading it bounds (`sweep_held_to_tube`): without it an
+            // arm round a coil read 7 mm past its surface between the turns.
             let (reach, tube) = fieldform_field::sweep_tube(document, outline, *spine, section, law)
                 .map(|(reach, tube)| (reach, tube.min(1e30)))
+                .or_else(|| {
+                    fieldform_field::sweep_cap_tube(document, outline, *spine, section, law)
+                        .map(|(reach, tube)| (reach, -tube.min(1e30)))
+                })
                 .unwrap_or((0.0, 0.0));
             params.push(ParamRef::Literal(reach));
             params.push(ParamRef::Literal(tube));
@@ -3245,6 +3404,124 @@ fn rimmed_call(call: String, rims: &fieldform_scene::Rims, params: &mut Vec<Para
     params.push(rims.radius.clone());
     params.extend(rims.fillet().second_leg().cloned());
     rim_call(&call, &rim_vector(r, rims, "0.0"))
+}
+
+/// How many slots a coil or a thread takes: seven and five, pushed by [`helical_slots`] and
+/// counted by the normal pass through this, so the two cannot drift.
+fn helical_slot_count(node: &Node) -> usize {
+    match node {
+        Node::Coil { .. } => 7,
+        Node::Thread { .. } => 5,
+        _ => 0,
+    }
+}
+
+/// Pushes a coil's or a thread's slots and answers where they start.
+///
+/// **Every number a slot, the structure as literals beside them.** A coil's size pair goes
+/// across as the two numbers typed with a literal saying which pair they are, and the shader
+/// derives the turns and the pitch as `CoilSize::turns_and_pitch` does -- so dragging the
+/// height of a coil said as height and pitch is a buffer write, as dragging its pitch is. A named
+/// thread's major and pitch are the table's, written as literals in the same two slots; naming
+/// another size changes two numbers and not the shader.
+fn helical_slots(params: &mut Vec<ParamRef>, node: &Node) -> usize {
+    let at = params.len();
+    match node {
+        Node::Coil { diameter, size, section, hand, .. } => {
+            let (a, b) = size.pair();
+            let kind = match size {
+                fieldform_scene::CoilSize::TurnsPitch { .. } => 0.0,
+                fieldform_scene::CoilSize::HeightPitch { .. } => 1.0,
+                fieldform_scene::CoilSize::TurnsHeight { .. } => 2.0,
+            };
+            let square = matches!(section, fieldform_scene::CoilSection::Square { .. });
+            params.extend([
+                *diameter,
+                *a,
+                *b,
+                ParamRef::Literal(kind),
+                *section.wire(),
+                ParamRef::Literal(if square { 1.0 } else { 0.0 }),
+                ParamRef::Literal(hand.sign()),
+            ]);
+        }
+        Node::Thread { major, pitch, length, hand, clearance, designation, .. } => {
+            // A name the table does not have is refused by the kernel's compile, by name; nought
+            // here draws nothing in the meantime rather than a thread nobody named.
+            let (major, pitch) = match designation {
+                Some(name) => {
+                    let (d, p) = fieldform_scene::thread_designation(name).unwrap_or((0.0, 0.0));
+                    (ParamRef::Literal(d), ParamRef::Literal(p))
+                }
+                None => (*major, *pitch),
+            };
+            params.extend([major, pitch, *length, *clearance, ParamRef::Literal(hand.sign())]);
+        }
+        _ => {}
+    }
+    debug_assert_eq!(params.len() - at, helical_slot_count(node));
+    at
+}
+
+/// A coil's or a thread's value and normal calls over the slots from `c`.
+fn helical_call(node: &Node, p: &str, c: usize) -> (String, String) {
+    let slots = (c..c + helical_slot_count(node))
+        .map(|i| format!("params[{i}]"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let name = if matches!(node, Node::Coil { .. }) { "coil" } else { "thread" };
+    (format!("{name}_distance({p}, {slots})"), format!("{name}_normal({p}, {slots})"))
+}
+
+/// How many slots a hole takes after its two ends.
+const HOLE_SLOTS: usize = 10;
+
+/// Pushes a hole's ten slots after its ends and answers where they start: the type as a literal,
+/// its three sizes (noughts where the type has fewer), the depth -- below nought for through --
+/// the drill's angle -- nought for flat -- and a tapped hole's thread: major, pitch, depth and
+/// clearance from the table, noughts otherwise. Every number the shader works the section out
+/// from is a slot, so dragging any of them is a buffer write.
+fn hole_slots(params: &mut Vec<ParamRef>, node: &Node) -> usize {
+    use fieldform_scene::{HoleDepth, HoleKind, HoleTip};
+    let at = params.len();
+    let lit = ParamRef::Literal;
+    let Node::Hole { kind, depth, tip, .. } = node else { return at };
+    let (code, sizes, thread) = match kind {
+        HoleKind::Simple { diameter } => (0.0, [*diameter, lit(0.0), lit(0.0)], None),
+        HoleKind::Counterbore { diameter, bore_diameter, bore_depth } => {
+            (1.0, [*diameter, *bore_diameter, *bore_depth], None)
+        }
+        HoleKind::Countersink { diameter, sink_diameter, sink_angle } => {
+            (2.0, [*diameter, *sink_diameter, *sink_angle], None)
+        }
+        HoleKind::Tapped { designation, thread_depth, clearance } => {
+            // A name the table does not have is refused by the kernel; noughts draw nothing.
+            let (d, p) = fieldform_scene::thread_designation(designation).unwrap_or((0.0, 0.0));
+            (3.0, [lit(0.0); 3], Some([lit(d), lit(p), *thread_depth, *clearance]))
+        }
+    };
+    params.push(lit(code));
+    params.extend(sizes);
+    params.push(match depth {
+        HoleDepth::Blind(d) => *d,
+        HoleDepth::Through => lit(-1.0),
+    });
+    params.push(match tip {
+        HoleTip::Flat => lit(0.0),
+        HoleTip::Drill(angle) => *angle,
+    });
+    params.extend(thread.unwrap_or([lit(0.0); 4]));
+    debug_assert_eq!(params.len() - at, HOLE_SLOTS);
+    at
+}
+
+/// A hole's value and normal calls over its ends and the slots from `c`.
+fn hole_call(p: &str, a: &str, b: &str, c: usize) -> (String, String) {
+    let slots = (c..c + HOLE_SLOTS).map(|i| format!("params[{i}]")).collect::<Vec<_>>().join(", ");
+    (
+        format!("hole_distance({p}, {a}, {b}, {slots})"),
+        format!("hole_normal({p}, {a}, {b}, {slots})"),
+    )
 }
 
 /// A revolve's rimmed call: the reach's slot and then the square-corner scale's, a literal the
@@ -3500,6 +3777,9 @@ fn normal_function(
     let mut mirror_folded: HashMap<usize, String> = HashMap::new();
     // The same for an attractor, and for the same reason as in the value pass.
     let mut attract_slots: HashMap<usize, (usize, usize)> = HashMap::new();
+    // And for a scale: the three factors the point was squeezed by, which the gradient is
+    // divided by on the way back out.
+    let mut scale_slots: HashMap<usize, String> = HashMap::new();
     // The same for a radial pattern: which frame and count a declared point was folded with, so
     // the normal found inside an instance can be turned back out by the angle it went in by.
     // What each pattern's loop needs, by the context standing for its current step.
@@ -3554,6 +3834,12 @@ fn normal_function(
                      params[{fo}]);\n",
                     index + 1,
                 ));
+            }
+            // The same three slots the value pass pushes, counted.
+            Some(Node::Scale { .. }) => {
+                let f = point_slots(&mut params, &[ParamRef::Literal(0.0); 3]);
+                body.push_str(&format!("    let p{} = p{parent} / {f};\n", index + 1));
+                scale_slots.insert(index + 1, f);
             }
             Some(Node::Mirror { frame, .. }) => {
                 let (at, normal) = frame_slots(&mut params, document, graph, frame);
@@ -3918,6 +4204,18 @@ fn normal_function(
                 let args = format!("{p}, {a}, {b}, params[{r}], params[{}]", r + 1);
                 (format!("capsule_distance({args})"), format!("capsule_normal({args})"))
             }
+            // Counted as the value pass pushed them, by the one function that says how many.
+            Node::Coil { .. } | Node::Thread { .. } => {
+                let c = params;
+                params += helical_slot_count(node);
+                helical_call(node, &p, c)
+            }
+            Node::Hole { .. } => {
+                let (a, b) = ends_slots(&mut params);
+                let c = params;
+                params += HOLE_SLOTS;
+                hole_call(&p, &a, &b, c)
+            }
             Node::Extrude { outline, sweep, draft, sides, rims, .. } => {
                 let found = |use_of: CurveUse| {
                     curves.iter().position(|x| *x == use_of).expect("interned above")
@@ -4236,7 +4534,8 @@ fn normal_function(
                 }
                 folded
             }
-            Node::Blend { op, a, b, fillet, .. } => {
+            Node::Blend { op, inputs, fillet } => {
+                let [a, b, rest @ ..] = &inputs[..] else { return Err(CodegenError::NothingToCombine(id)) };
                 let (va, vb) = (value_of(&slot, (*a, inner))?, value_of(&slot, (*b, inner))?);
                 let (ga, gb) = (normal_of(&slot, (*a, inner))?, normal_of(&slot, (*b, inner))?);
                 // One slot either way, counted as the value pass pushed it: the radius, or --
@@ -4261,73 +4560,91 @@ fn normal_function(
                         (format!("({amount})"), Some(d))
                     }
                 };
-                // A chamfer of two legs: the operands and their gradients scaled as the value
-                // pass scales them, and the radius the lesser leg.
-                let (va, vb, ga, gb, k) = match second_slot {
-                    Some(sb) => {
-                        let m = format!("min({k}, params[{sb}])");
-                        (
-                            format!("(({va}) * {m} / params[{sb}])"),
-                            format!("(({vb}) * {m} / {k})"),
-                            format!("(({ga}) * ({m} / params[{sb}]))"),
-                            format!("(({gb}) * ({m} / {k}))"),
-                            m,
-                        )
+                let e = fillet.exponent();
+                let rho = tapers(graph).then(|| fieldform_field::taper_ratio(document, graph, id));
+                // One join of the chain, value and gradient together, as the value pass writes it.
+                let step = |va: String, vb: String, ga: String, gb: String| -> (String, String) {
+                    // A chamfer of two legs: the operands and their gradients scaled as the value
+                    // pass scales them, and the radius the lesser leg.
+                    let (va, vb, ga, gb, k) = match second_slot {
+                        Some(sb) => {
+                            let m = format!("min({k}, params[{sb}])");
+                            (
+                                format!("(({va}) * {m} / params[{sb}])"),
+                                format!("(({vb}) * {m} / {k})"),
+                                format!("(({ga}) * ({m} / params[{sb}]))"),
+                                format!("(({gb}) * ({m} / {k}))"),
+                                m,
+                            )
+                        }
+                        None => (va, vb, ga, gb, k.clone()),
+                    };
+                    // The negations that turn a smooth union into a difference or an
+                    // intersection apply to the gradients too, and in the same places â€” a sign
+                    // dropped on one side only produces a surface that shades as though it were
+                    // lit from within.
+                    let (na, nb, sign) = match op {
+                        BooleanOp::Union => (va.clone(), vb.clone(), 1.0),
+                        BooleanOp::Difference => (format!("-({va})"), vb.clone(), -1.0),
+                        BooleanOp::Intersection => (format!("-({va})"), format!("-({vb})"), -1.0),
+                    };
+                    let (na_grad, nb_grad) = match op {
+                        BooleanOp::Union => (ga.clone(), gb.clone()),
+                        BooleanOp::Difference => (format!("-({ga})"), gb.clone()),
+                        BooleanOp::Intersection => (format!("-({ga})"), format!("-({gb})")),
+                    };
+                    // Only the value divides. The divisor is a positive constant, so the
+                    // gradient's direction is the undivided one's and the normal below needs
+                    // nothing done.
+                    let (value, normal) = match rho {
+                        Some(rho) => (
+                            format!(
+                                "(smooth_min_tapering({na}, {nb}, {k}, {e:?}) / \
+                                 blend_taper_divisor({k}, {e:?}, {rho:?}))"
+                            ),
+                            // Over the same divisor as the value, so that a blend handed to
+                            // another blend arrives with the gradient it really has. See
+                            // `blend_gradient`.
+                            format!(
+                                "(smooth_min_normal_tapering({na}, {nb}, {na_grad}, {nb_grad}, \
+                                 {k}, {e:?}) / blend_taper_divisor({k}, {e:?}, \
+                                 {rho:?}))"
+                            ),
+                        ),
+                        None => (
+                            format!("blend_bound({na}, {nb}, {k}, {e:?})"),
+                            format!(
+                                "blend_bound_normal({na}, {nb}, {na_grad}, {nb_grad}, {k}, \
+                                 {e:?})"
+                            ),
+                        ),
+                    };
+                    // A driven radius divides the value by its bound, as the value pass does;
+                    // the normal keeps the local radius's direction, the ramp's own gradient
+                    // turning it a little and gently for any grade worth tracing -- the pipe's
+                    // reasoning.
+                    let value = match divided_by {
+                        Some(d) => format!("(({value}) / params[{d}])"),
+                        None => value,
+                    };
+                    if sign < 0.0 {
+                        (format!("-({value})"), format!("-({normal})"))
+                    } else {
+                        (value, normal)
                     }
-                    None => (va, vb, ga, gb, k),
                 };
-                let n = fillet.exponent();
-                // The negations that turn a smooth union into a difference or an intersection
-                // apply to the gradients too, and in the same places — a sign dropped on one
-                // side only produces a surface that shades as though it were lit from within.
-                let (na, nb, sign) = match op {
-                    BooleanOp::Union => (va.clone(), vb.clone(), 1.0),
-                    BooleanOp::Difference => (format!("-({va})"), vb.clone(), -1.0),
-                    BooleanOp::Intersection => (format!("-({va})"), format!("-({vb})"), -1.0),
-                };
-                let (na_grad, nb_grad) = match op {
-                    BooleanOp::Union => (ga.clone(), gb.clone()),
-                    BooleanOp::Difference => (format!("-({ga})"), gb.clone()),
-                    BooleanOp::Intersection => (format!("-({ga})"), format!("-({gb})")),
-                };
-                // Only the value divides. The divisor is a positive constant, so the gradient's
-                // direction is the undivided one's and the normal below needs nothing done.
-                let (value, normal) = if tapers(graph) {
-                    let rho = fieldform_field::taper_ratio(document, graph, id);
-                    (
-                        format!(
-                            "(smooth_min_tapering({na}, {nb}, {k}, {n:?}) / \
-                             blend_taper_divisor({k}, {n:?}, {rho:?}))"
-                        ),
-                        // Over the same divisor as the value, so that a blend handed to another
-                        // blend arrives with the gradient it really has. See `blend_gradient`.
-                        format!(
-                            "(smooth_min_normal_tapering({na}, {nb}, {na_grad}, {nb_grad}, \
-                             {k}, {n:?}) / blend_taper_divisor({k}, {n:?}, \
-                             {rho:?}))"
-                        ),
-                    )
-                } else {
-                    (
-                        format!("blend_bound({na}, {nb}, {k}, {n:?})"),
-                        format!(
-                            "blend_bound_normal({na}, {nb}, {na_grad}, {nb_grad}, {k}, \
-                             {n:?})"
-                        ),
-                    )
-                };
-                // A driven radius divides the value by its bound, as the value pass does; the
-                // normal keeps the local radius's direction, the ramp's own gradient turning it
-                // a little and gently for any grade worth tracing -- the pipe's reasoning.
-                let value = match divided_by {
-                    Some(d) => format!("(({value}) / params[{d}])"),
-                    None => value,
-                };
-                if sign < 0.0 {
-                    (format!("-({value})"), format!("-({normal})"))
-                } else {
-                    (value, normal)
+                // A third operand and on joins what the first two made, each step a `let` pair
+                // of its own, as the value pass does it.
+                let mut joined = step(va, vb, ga, gb);
+                for (i, next) in rest.iter().enumerate() {
+                    let (value, normal) = (format!("blv{n}_{i}"), format!("blg{n}_{i}"));
+                    blocks_before.push(format!(
+                        "    let {value} = {};\n    let {normal} = {};\n",
+                        joined.0, joined.1
+                    ));
+                    joined = step(value, value_of(&slot, (*next, inner))?, normal, normal_of(&slot, (*next, inner))?);
                 }
+                joined
             }
             // The value divides and the normal is left to the caller's differencing: the
             // warp's Jacobian is not orthonormal, so a rotated normal would be plausible and
@@ -4542,6 +4859,17 @@ fn normal_function(
                 (
                     format!("params[{s}] * {}", value_of(&slot, (*input, inner))?),
                     format!("euler_rotation({euler}) * {}", normal_of(&slot, (*input, inner))?),
+                )
+            }
+            // The gradient of `F(p / s)` is the inner gradient divided axis by axis, and the
+            // normal is its direction -- exact, where a twist has to be differenced, because
+            // this Jacobian is diagonal and constant. The CPU's `Op::Scale` normal, line for
+            // line.
+            Node::Scale { input, .. } => {
+                let f = &scale_slots[&inner];
+                (
+                    format!("(scale_least({f}) * {})", value_of(&slot, (*input, inner))?),
+                    format!("normalize({} / {f})", normal_of(&slot, (*input, inner))?),
                 )
             }
             // No surface, so no normal. The vector is never read: a ramp is reached only as an
@@ -5573,6 +5901,7 @@ fn changes_the_point(node: &Node) -> bool {
             | Node::Twist { .. }
             | Node::Attract { .. }
             | Node::Pattern { .. }
+            | Node::Scale { .. }
     )
 }
 

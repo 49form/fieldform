@@ -1,0 +1,82 @@
+# Coils, threads and holes (backlog items 67 and 68), as far as the console reaches them: every
+# number below is a closed form, so a pass means the blocks are the shapes their numbers say. What
+# only an eye can judge -- the panels, the click that places a hole, how it shades -- is the hand
+# test in the project notes' test plan for these items, which this script is the first step of.
+#
+#   fieldform.exe --run benchmarks/smoke/helix-hole.ffc --keep-going --report helix-hole.json --exit
+#
+# Exit code 0 when every expect passed. Every line here is meant to succeed: a `!!` in
+# %TEMP%\fieldform-console.log is a regression, not a deliberate refusal. The last section's lines
+# are refused on purpose and are marked so.
+
+# --- Coils. A section in the axial half-plane carried helically keeps its area A and its centroid
+# radius R in every half-plane, so the volume is 2·π·N·A·R exactly, ends included (they are planar
+# cuts in half-planes through the axis).
+#   round wire 2, R 10, N 5:   2·π·5·π·10        = 100·π²  = 986.96
+#   square wire 2, R 10, N 5:  2·π·5·4·10        = 400·π   = 1256.64
+new
+coil diameter=20 turns=5 pitch=6 circle=2 'spring'
+expect target=spring volume=986.96 tol=1%
+# The same coil said by its height and pitch: the turns are derived, the solid is the same.
+coil diameter=20 height=30 pitch=6 circle=2 'same_spring'
+expect target=same_spring volume=986.96 tol=1%
+# Square wire, left-handed: the hand mirrors it and leaves the volume alone.
+coil diameter=20 turns=5 pitch=6 square=2 hand=left 'square_spring'
+expect target=square_spring volume=1256.64 tol=1%
+saveas file=target/helix-hole-coils.fform
+
+# --- A thread. Over a whole number of pitches the volume is π·L·mean(R²) over one period of the
+# basic profile. M8 × 1.25, L = 20 = 16 pitches, R between 4 and the minor radius 3.32342:
+#   mean(R²) = (2·16 + 4·11.04512 + 10·(16 + 13.29368 + 11.04512)/3) / 16 = 13.1652
+#   volume   = π · 20 · 13.1652 = 827.19
+new
+thread designation=M8 length=20 'rod'
+expect target=rod volume=827.19 tol=2%
+saveas file=target/helix-hole-thread.fform
+
+# --- Holes in a 40 × 40 × 20 block, top face at z = 20 (32000 mm³ whole).
+#
+# A: through, sized for an M8 bolt from the clearance table, medium series: 9 mm.
+#    removed π·4.5²·20 = 1272.35  ->  30727.65
+new
+cube size=40,40,20 centre=0,0,10 'block'
+hole target=block at=-10,0,20 dir=0,0,-1 clearance_for=M8 fit=medium depth=through 'plate'
+expect target=plate volume=30727.65 tol=0.5%
+# B: a second hole on the same body joins the same difference: counterbored 6.6 / 11 × 6.5, through.
+#    removed π·(5.5²·6.5 + 3.3²·13.5) = 1079.58  ->  29648.07
+hole target=plate at=10,0,20 dir=0,0,-1 hole=counterbore diameter=6.6 bore_diameter=11 bore_depth=6.5 depth=through
+expect target=plate volume=29648.07 tol=0.5%
+saveas file=target/helix-hole-two-holes.fform
+
+# C: blind, 6 mm to a depth of 12 at the shoulder, with a 118° drill point below it.
+#    cylinder π·9·12 = 339.29, point π·9·(3/tan 59°)/3 = 16.99  ->  32000 − 356.28 = 31643.72
+new
+cube size=40,40,20 centre=0,0,10 'block'
+hole target=block at=0,0,20 dir=0,0,-1 diameter=6 depth=12 tip_angle=118 'drilled'
+expect target=drilled volume=31643.72 tol=0.5%
+saveas file=target/helix-hole-drilled.fform
+
+# D: countersunk 6.6, 13 across at 90°, through. The sink is 3.2 deep.
+#    frustum π·3.2/3·(6.5² + 6.5·3.3 + 3.3²) = 249.96, bore π·3.3²·16.8 = 574.76  ->  31175.28
+new
+cube size=40,40,20 centre=0,0,10 'block'
+hole target=block at=0,0,20 dir=0,0,-1 hole=countersink diameter=6.6 sink_diameter=13 sink_angle=90 depth=through 'sunk'
+expect target=sunk volume=31175.28 tol=0.5%
+saveas file=target/helix-hole-sunk.fform
+
+# E: tapped M8, threaded 12 deep in a 16 deep drilled hole. No closed form worth the arithmetic;
+# it has to build, and the file is for the hand test to open.
+new
+cube size=40,40,20 centre=0,0,10 'block'
+hole target=block at=0,0,20 dir=0,0,-1 designation=M8 thread_depth=12 depth=16 tip_angle=118 'tapped'
+saveas file=target/helix-hole-tapped.fform
+
+# --- Refused on purpose: each of these lines should print `!!` with its reason, and nothing else.
+new
+cube size=40,40,20 centre=0,0,10 'block'
+# A thread the table has not got.
+hole target=block at=0,0,20 dir=0,0,-1 designation=M7 depth=16
+# A clearance hole for a size the clearance table has not got.
+hole target=block at=0,0,20 dir=0,0,-1 clearance_for=M9 depth=through
+# Two of turns, pitch and height, never all three.
+coil diameter=20 turns=5 pitch=6 height=30

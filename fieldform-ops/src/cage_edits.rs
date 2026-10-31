@@ -171,33 +171,9 @@ pub(crate) fn register(registry: &mut OpRegistry) {
         if count < 1.0 || count.fract() != 0.0 || count > 64.0 {
             return Err(bad(OP, "count", "expected a whole number of rings from 1 to 64"));
         }
-        // `count` rings evenly spaced along the edge, at k/(n+1) from its first end, as one
-        // step. Each is inserted on the mesh the one before it made, through the piece of the
-        // named edge that is left -- from the last ring's vertex on it to the far end -- so the
-        // k-th ring sits at 1/(n+2-k) of that piece. One ring takes `t` as typed.
-        let mut mesh = body.mesh().clone();
-        let n = count as usize;
-        let mut from = e;
-        for k in 1..=n {
-            let s = if n == 1 { t } else { 1.0 / (n as f64 + 2.0 - k as f64) };
-            let (pa, pb) = (mesh.vertex_position(from.0), mesh.vertex_position(from.1));
-            let result = edit::insert_ring(&mesh, from, s).map_err(|er| refused(OP, er))?;
-            mesh = result.mesh;
-            // The ring's vertex on the named edge, found where the primitive put it rather than
-            // by how it numbered what it added.
-            let at = pa + (pb - pa) * s;
-            let on_edge = result
-                .new_vertices
-                .iter()
-                .copied()
-                .find(|&v| (mesh.vertex_position(v) - at).norm() < 1e-9)
-                .ok_or_else(|| OpError::Failed {
-                    op: OP.to_string(),
-                    detail: "the ring left no vertex on the edge it was asked through".to_string(),
-                })?;
-            from = (on_edge, from.1);
-        }
-        Ok(command(id, "cage.insert_ring", body.mesh(), mesh))
+        // `count` rings evenly spaced along the edge as one step; one ring takes `t` as typed.
+        let rings = edit::insert_rings(body.mesh(), e, t, count as usize).map_err(|er| refused(OP, er))?;
+        Ok(command(id, "cage.insert_ring", body.mesh(), rings.mesh))
     });
 
     registry.register("cage.delete_faces", |args, doc| {
@@ -280,7 +256,15 @@ pub(crate) fn register(registry: &mut OpRegistry) {
         const OP: &str = "cage.weld";
         let (id, body) = body(OP, args, doc)?;
         // `pairs=3-7,4-8`: each pair is the vertex that moves, then the one it moves onto.
-        let pairs = edges(OP, args, "pairs", body.mesh())?;
+        // `zip=3-7` is the boundary mode: the pairs that zip the open rim through 3 onto the one
+        // through 7, vertex for vertex, worked out from that one pair.
+        let pairs = match args.get("zip") {
+            Some(zip) => {
+                let (a, b) = edge(OP, "zip", &zip.text(), body.mesh())?;
+                edit::zip_pairs(body.mesh(), a, b).map_err(|e| refused(OP, e))?
+            }
+            None => edges(OP, args, "pairs", body.mesh())?,
+        };
         // `at=target` (the default) leaves the second where it is; `at=midpoint` meets halfway.
         let at = args.get("at").map(|v| v.text()).unwrap_or_else(|| "target".to_string());
         let mesh = match at.as_str() {

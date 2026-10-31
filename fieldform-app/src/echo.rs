@@ -315,9 +315,10 @@ pub fn keys_of(node: &Node, n: &Names) -> Result<Written, String> {
             let named: Result<Vec<String>, String> = inputs.iter().map(|o| operand(o, n)).collect();
             keys.push(("in", named?.join(",")));
         }
-        Node::Blend { op, a, b, fillet: Fillet { radius, continuity, second } } => {
+        Node::Blend { op, inputs, fillet: Fillet { radius, continuity, second } } => {
             keys.push(("op", op_word(*op).to_string()));
-            keys.push(("in", format!("{},{}", operand(a, n)?, operand(b, n)?)));
+            let named: Result<Vec<String>, String> = inputs.iter().map(|o| operand(o, n)).collect();
+            keys.push(("in", named?.join(",")));
             keys.push(("radius", value(radius, n)?));
             keys.push(("g", g_word(*continuity).to_string()));
             // A chamfer's second leg, only where there is one.
@@ -338,12 +339,92 @@ pub fn keys_of(node: &Node, n: &Names) -> Result<Written, String> {
             keys.push(("target", operand(input, n)?));
             keys.push(("thickness", value(thickness, n)?));
         }
+        // The two numbers of the size pair under their own names, which is what says the pair.
+        Node::Coil { frame: f, diameter, size, section, hand } => {
+            let (origin, axis) = frame(f, n)?;
+            keys.push(("diameter", value(diameter, n)?));
+            let (a, b) = size.pair();
+            let (wa, wb) = match size {
+                fieldform_scene::CoilSize::TurnsPitch { .. } => ("turns", "pitch"),
+                fieldform_scene::CoilSize::HeightPitch { .. } => ("height", "pitch"),
+                fieldform_scene::CoilSize::TurnsHeight { .. } => ("turns", "height"),
+            };
+            keys.push((wa, value(a, n)?));
+            keys.push((wb, value(b, n)?));
+            keys.push(("section", section.name().to_string()));
+            keys.push(("wire", value(section.wire(), n)?));
+            keys.push(("hand", hand.name().to_string()));
+            keys.push(("origin", origin));
+            keys.push(("axis", axis));
+        }
+        // Its two points as `from=` and `to=`, which say a parameter where one is; the type, its own
+        // sizes, the depth -- `through` or a number -- and the tip. `target=` is the tool's and is
+        // not the block's: the hole's difference is written as the block it is.
+        Node::Hole { ends: e, kind, depth, tip } => {
+            use fieldform_scene::{HoleDepth, HoleKind, HoleTip};
+            let (from, to) = ends(e, n)?;
+            keys.push(("from", from));
+            keys.push(("to", to));
+            keys.push(("hole", kind.name().to_string()));
+            match kind {
+                HoleKind::Simple { diameter } => keys.push(("diameter", value(diameter, n)?)),
+                HoleKind::Counterbore { diameter, bore_diameter, bore_depth } => {
+                    keys.push(("diameter", value(diameter, n)?));
+                    keys.push(("bore_diameter", value(bore_diameter, n)?));
+                    keys.push(("bore_depth", value(bore_depth, n)?));
+                }
+                HoleKind::Countersink { diameter, sink_diameter, sink_angle } => {
+                    keys.push(("diameter", value(diameter, n)?));
+                    keys.push(("sink_diameter", value(sink_diameter, n)?));
+                    keys.push(("sink_angle", value(sink_angle, n)?));
+                }
+                HoleKind::Tapped { designation, thread_depth, clearance } => {
+                    keys.push(("designation", designation.clone()));
+                    keys.push(("thread_depth", value(thread_depth, n)?));
+                    keys.push(("clearance", value(clearance, n)?));
+                }
+            }
+            keys.push(("depth", match depth {
+                HoleDepth::Blind(d) => value(d, n)?,
+                HoleDepth::Through => "through".to_string(),
+            }));
+            match tip {
+                HoleTip::Flat => keys.push(("tip", "flat".to_string())),
+                HoleTip::Drill(angle) => keys.push(("tip_angle", value(angle, n)?)),
+            }
+        }
+        // A named thread is its name: the major and pitch typed beside it would make it custom.
+        Node::Thread { frame: f, major, pitch, length, hand, clearance, designation } => {
+            let (origin, axis) = frame(f, n)?;
+            match designation {
+                Some(name) => keys.push(("designation", name.clone())),
+                None => {
+                    keys.push(("designation", "none".to_string()));
+                    keys.push(("major", value(major, n)?));
+                    keys.push(("pitch", value(pitch, n)?));
+                }
+            }
+            keys.push(("length", value(length, n)?));
+            keys.push(("clearance", value(clearance, n)?));
+            keys.push(("hand", hand.name().to_string()));
+            keys.push(("origin", origin));
+            keys.push(("axis", axis));
+        }
         Node::Twist { input, degrees_per_mm, frame: f } => {
             let (origin, axis) = frame(f, n)?;
             keys.push(("target", operand(input, n)?));
             keys.push(("degrees_per_mm", value(degrees_per_mm, n)?));
             keys.push(("axis", axis));
             keys.push(("origin", origin));
+        }
+        // Three factors always, even when they agree: one would fold into a placement on replay
+        // and this is a block of its own. `about=`, as the placement verbs call a centre.
+        Node::Scale { input, factors, frame: f } => {
+            let (origin, axis) = frame(f, n)?;
+            keys.push(("target", operand(input, n)?));
+            keys.push(("by", triple(factors, n)?));
+            keys.push(("axis", axis));
+            keys.push(("about", origin));
         }
         Node::Mirror { input, frame: f, join } => {
             let (origin, axis) = frame(f, n)?;
@@ -523,13 +604,64 @@ pub fn quoted(name: &str) -> String {
     format!("{mark}{name}{mark}")
 }
 
+/// The keys a line needs to make a point on a surface. A spot and a seed are held in their frame and
+/// typed in world, so a spot is said in world, and a seed as where the point stands, which is the
+/// same question from there.
+fn surface_point_keys(
+    doc: &Document,
+    graph: &Graph,
+    record: &fieldform_scene::SurfacePoint,
+    at: &[(&'static str, String)],
+    n: &Names,
+) -> Result<Vec<(&'static str, String)>, String> {
+    use fieldform_scene::{Facing, Guide, GuideFrame};
+    let mut keys = vec![("on", n.block(record.body)?)];
+    if let GuideFrame::Plane { node } = record.frame {
+        keys.push(("from", n.block(node)?));
+    }
+    match &record.guide {
+        Guide::Spot { at, facing } => {
+            let frame = crate::surface_point::guide_frame(doc, graph, record)?;
+            let resolve = |r: &fieldform_scene::ParamRef| doc.resolve(r).ok_or("a number of the spot has no value");
+            let spot = frame * nalgebra::Point3::new(resolve(&at[0])?, resolve(&at[1])?, resolve(&at[2])?);
+            let way = frame.isometry.rotation * nalgebra::Vector3::from(*facing);
+            keys.push(("at", format!("{},{},{}", number(spot.x), number(spot.y), number(spot.z))));
+            keys.push(("facing", format!("{},{},{}", number(way.x), number(way.y), number(way.z))));
+        }
+        Guide::Ray { along, flipped, u, v, facing } => {
+            keys.push(("u", value(u, n)?));
+            keys.push(("v", value(v, n)?));
+            keys.push(("dir", format!("{along:?}").to_ascii_lowercase()));
+            if *flipped {
+                keys.push(("flip", "true".to_string()));
+            }
+            if *facing == Facing::Back {
+                keys.push(("back", "true".to_string()));
+            }
+        }
+        Guide::Nearest { .. } => {
+            if let Some((_, place)) = at.iter().find(|(k, _)| *k == "at") {
+                keys.push(("near", place.clone()));
+            }
+        }
+    }
+    if !record.live {
+        keys.push(("fixed", "true".to_string()));
+    }
+    Ok(keys)
+}
+
 /// The lines that make block `id` as it now is: its verb, every key, its name; then a `set` for
 /// what the verb could not say.
 pub fn create_lines(doc: &Document, graph: &Graph, id: NodeId) -> Result<Vec<String>, String> {
     let n = Names { doc };
     let node = graph.node(id).ok_or("the block is gone")?;
     let name = n.block(id)?;
-    let written = keys_of(node, &n)?;
+    let mut written = keys_of(node, &n)?;
+    // A point on a surface says what it asks, not where the answer happened to be.
+    if let Some(record) = doc.surface_points.get(&id) {
+        written.keys = surface_point_keys(doc, graph, record, &written.keys, &n)?;
+    }
     let mut line = written.verb.to_string();
     for (k, v) in &written.keys {
         line.push(' ');
@@ -1050,6 +1182,28 @@ mod tests {
             Node::Cone { .. } => Node::Cone { ends, base_radius: one, top_radius: one, edge: Default::default() },
             Node::Torus { .. } => Node::Torus { centre: Place::origin(), major_radius: one, minor_radius: one, turn: fieldform_scene::no_turn() },
             Node::Capsule { .. } => Node::Capsule { ends, start_radius: one, end_radius: one },
+            Node::Coil { .. } => Node::Coil {
+                frame: Frame::default(),
+                diameter: one,
+                size: fieldform_scene::CoilSize::TurnsPitch { turns: one, pitch: one },
+                section: fieldform_scene::CoilSection::Square { wire: zero },
+                hand: fieldform_scene::Hand::Right,
+            },
+            Node::Hole { .. } => Node::Hole {
+                ends,
+                kind: fieldform_scene::HoleKind::Simple { diameter: one },
+                depth: fieldform_scene::HoleDepth::Blind(one),
+                tip: fieldform_scene::HoleTip::Flat,
+            },
+            Node::Thread { .. } => Node::Thread {
+                frame: Frame::default(),
+                major: one,
+                pitch: one,
+                length: one,
+                hand: fieldform_scene::Hand::Right,
+                clearance: one,
+                designation: None,
+            },
             Node::Lattice { .. } => Node::Lattice {
                 cell: LatticeCell::Gyroid,
                 frame: Frame::default(),
@@ -1070,6 +1224,7 @@ mod tests {
             Node::Shell { .. } => Node::Shell { input: empty, thickness: ParamRef::Literal(0.1) },
             Node::Twist { .. } => Node::Twist { input: empty, degrees_per_mm: zero, frame: Frame::default() },
             Node::Mirror { .. } => Node::Mirror { input: empty, frame: Frame::default(), join: false },
+            Node::Scale { .. } => Node::Scale { input: empty, factors: [one; 3], frame: Frame::default() },
             Node::Attract { .. } => Node::Attract { input: empty, toward: Attractor::Curve(curve), strength: zero, falloff: one },
             Node::Pattern { .. } => Node::Pattern {
                 input: empty,

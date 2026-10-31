@@ -17,6 +17,8 @@ mod outputs;
 mod menu_hover;
 mod preview;
 mod split_axis;
+mod surface_point;
+mod hole_tool;
 mod console_keys;
 mod commands;
 mod block_edit;
@@ -1379,6 +1381,8 @@ enum PrimitiveKind {
     Cone,
     Torus,
     Capsule,
+    Coil,
+    Thread,
     Plane,
     Point,
 }
@@ -1395,9 +1399,10 @@ impl PrimitiveKind {
     /// **The menu and the console read the command registry now** (`commands.rs`), which lists
     /// each primitive in this order; this is what the tests walk to hold the two together —
     /// `every_primitive_is_reachable_from_the_console` asks that every kind has an entry with its
-    /// word and its operation, in this order, in Create › Primitives.
+    /// word and its operation, in this order, in Create › Primitives — the capsule, the coil and
+    /// the thread carrying on in Create › Features, below Sweep.
     #[cfg(test)]
-    const ALL: [PrimitiveKind; 9] = [
+    const ALL: [PrimitiveKind; 11] = [
         PrimitiveKind::Point,
         PrimitiveKind::Plane,
         PrimitiveKind::Sphere,
@@ -1407,6 +1412,8 @@ impl PrimitiveKind {
         PrimitiveKind::Cone,
         PrimitiveKind::Torus,
         PrimitiveKind::Capsule,
+        PrimitiveKind::Coil,
+        PrimitiveKind::Thread,
     ];
 
     /// Where the reference geometry ends and the solids begin, which is where the menu puts a
@@ -1423,6 +1430,8 @@ impl PrimitiveKind {
             PrimitiveKind::Cone => "Cone",
             PrimitiveKind::Torus => "Torus",
             PrimitiveKind::Capsule => "Capsule",
+            PrimitiveKind::Coil => "Coil",
+            PrimitiveKind::Thread => "Thread",
             PrimitiveKind::Plane => "Plane",
             PrimitiveKind::Point => "Point",
         }
@@ -1447,6 +1456,8 @@ impl PrimitiveKind {
             PrimitiveKind::Cone => "create.cone",
             PrimitiveKind::Torus => "create.torus",
             PrimitiveKind::Capsule => "create.capsule",
+            PrimitiveKind::Coil => "create.coil",
+            PrimitiveKind::Thread => "create.thread",
             PrimitiveKind::Plane => "create.plane",
             PrimitiveKind::Point => "create.point",
         }
@@ -1529,6 +1540,37 @@ impl PrimitiveKind {
                 start_radius: literal(size * 0.25),
                 end_radius: literal(size * 0.25),
             },
+            // Standing on the centre and climbing Z, four turns filling the envelope's height
+            // and most of its width. Turns and pitch, the pair a spring is usually given in.
+            PrimitiveKind::Coil => Node::Coil {
+                frame: fieldform_scene::Frame::At {
+                    origin: along_z(centre, -size * 0.4),
+                    axis: [literal(0.0), literal(0.0), literal(1.0)],
+                },
+                diameter: literal(size * 0.8),
+                size: fieldform_scene::CoilSize::TurnsPitch {
+                    turns: literal(4.0),
+                    pitch: literal(size * 0.2),
+                },
+                section: fieldform_scene::CoilSection::Circle { wire: literal(size * 0.08) },
+                hand: fieldform_scene::Hand::Right,
+            },
+            // A custom thread at the envelope's scale rather than a named one, which would arrive
+            // a twelfth of the size of everything beside it: the major diameter four tenths of
+            // it, at the coarse series' own ratio of pitch to diameter, and as long as it is.
+            // Naming a size in the block puts the table's numbers in their place.
+            PrimitiveKind::Thread => Node::Thread {
+                frame: fieldform_scene::Frame::At {
+                    origin: along_z(centre, -size * 0.5),
+                    axis: [literal(0.0), literal(0.0), literal(1.0)],
+                },
+                major: literal(size * 0.4),
+                pitch: literal(size * 0.4 * 0.15),
+                length: literal(size),
+                hand: fieldform_scene::Hand::Right,
+                clearance: literal(0.0),
+                designation: None,
+            },
             // Both arrive at the centre rather than offset like the solids: there is no
             // envelope to fill, since one has no edges and the other no volume.
             PrimitiveKind::Plane => Node::Plane {
@@ -1574,6 +1616,7 @@ fn drawn_where_it_is(graph: &Graph, id: NodeId) -> bool {
                 Node::Transform { .. }
                     | Node::Pattern { .. }
                     | Node::Mirror { .. }
+                    | Node::Scale { .. }
                     | Node::Twist { .. }
                     | Node::Attract { .. }
                     | Node::Morph { .. }
@@ -2222,6 +2265,13 @@ const ANYWHERE_MM: std::ops::RangeInclusive<f64> = -1.0e6..=1.0e6;
 /// 360 degrees on purpose (§6.5), and clamping the readout there would make a continuous drag
 /// appear to stop.
 const DEGREES: std::ops::RangeInclusive<f64> = -1.0e5..=1.0e5;
+
+/// A scale factor: above nought, since nought has no inverse and a negative scale is a mirror.
+/// The floor is a thousandth rather than nought so the widget cannot drag a body to nothing.
+const SCALE_FACTOR: std::ops::RangeInclusive<f64> = 1.0e-3..=1.0e4;
+
+/// A coil's turns: above nought, since none is no wire, and not whole by necessity.
+const COIL_TURNS: std::ops::RangeInclusive<f64> = 1.0e-3..=1.0e4;
 
 /// How far round a revolve turns: a full turn is the whole solid, and the widget stops there
 /// rather than letting a drag run on past it, since past it nothing changes. **A degree at
@@ -3489,9 +3539,22 @@ struct App {
     point_drag: Option<PointDrag>,
     /// A curve waiting for its clicks. See [`PendingCurve`].
     pending_curve: Option<PendingCurve>,
+    /// What a hole waiting for its click was asked to be: the line's keys, kept until the
+    /// surface it goes into is picked (`hole_tool.rs`).
+    pending_hole: Option<Args>,
     /// Why an axis on a surface cannot stand where it says, by curve, when its ray no longer meets
     /// its body; shown in its block. Derived on every rebuild, never saved (`split_axis`).
     surface_axis_notes: std::collections::HashMap<CurveId, String>,
+    /// What each point on a surface's last solve said: why it is red, a warning, and which of a
+    /// ray's crossings it took. Derived, and read by the panel and the viewport.
+    surface_point_states: std::collections::HashMap<NodeId, surface_point::PointState>,
+    /// The record a drag of one of a point's numbers began from, until the hand comes off.
+    surface_point_edit_before: Option<(NodeId, fieldform_scene::SurfacePoint)>,
+    /// A point on a surface being slid, by its dot or by a handle: its body, asked once for the
+    /// gesture (`surface_point.rs`).
+    slide: Option<surface_point::Slide>,
+    /// Whether the press that is down landed on a surface point's dot, which it then slides.
+    press_on_surface_point: bool,
     /// An axis's record as it was when a drag of its U, V or length began, so that the drag lands on
     /// the history as one entry when it ends.
     surface_axis_edit_before: Option<(CurveId, fieldform_scene::SurfaceAxis)>,
@@ -3611,6 +3674,9 @@ struct App {
     /// the pointer has left the handle and where the gesture *started* can no longer be
     /// asked.
     press_on_gizmo: bool,
+    /// The same, for the knife's active point: a press that lands on it, while the knife is
+    /// armed, slides the point along its edge instead of tumbling the camera.
+    press_on_cage_tool: bool,
     /// The same, for a control point: it claims the press so the click does not also land on
     /// the cage or the body drawn behind it.
     press_on_control_point: bool,
@@ -3850,6 +3916,9 @@ struct App {
     ///
     /// Cached rather than asked for, because asking means compiling — see `compile_error`.
     compile_error: Option<String>,
+    /// The block whose draft the last compile refused, so its panel can say why beside the
+    /// number that was typed rather than only on the line above every block.
+    draft_refused: Option<NodeId>,
     /// Parameters a panel row made or stopped referring to this frame, waiting for the graph edit
     /// they go on the history with — see [`ParameterEdits`] and [`App::parametric_field`].
     parameter_edits: ParameterEdits,
@@ -4303,7 +4372,12 @@ impl App {
             move_state: None,
             point_drag: None,
             pending_curve: None,
+            pending_hole: None,
             surface_axis_notes: std::collections::HashMap::new(),
+            surface_point_states: std::collections::HashMap::new(),
+            surface_point_edit_before: None,
+            slide: None,
+            press_on_surface_point: false,
             surface_axis_edit_before: None,
             gizmo_drag: None,
             gizmo_hover: None,
@@ -4312,6 +4386,7 @@ impl App {
             stolen_tab: None,
             console_complete: false,
             press_on_gizmo: false,
+            press_on_cage_tool: false,
             press_on_control_point: false,
             other_points: Vec::new(),
             pending_narrow: None,
@@ -4386,6 +4461,7 @@ impl App {
             obj_as: ObjReading::Cage,
             leaves: fieldform_field::LeafCache::default(),
             compile_error: None,
+            draft_refused: None,
             parameter_edits: ParameterEdits::default(),
             expression_drafts: std::collections::HashMap::new(),
             offset_distance: 1.0,
@@ -4479,6 +4555,9 @@ impl App {
         // Whatever asked for this changed the part or what is visible of it, which is what the
         // overlay reads; opening a file and starting a new one reach the readings this way.
         self.document_moved();
+        // Before everything else here, because a point's position is in the graph and all of what
+        // follows reads it. See `refresh_surface_points`.
+        self.refresh_surface_points();
         // **Curve ends catch up here, because this is what runs when the part changes.**
         // It was called on binding an end, on editing a variable and on opening a document —
         // and not when the *point itself* moved, which is the one case anybody would try first.
@@ -4528,6 +4607,7 @@ impl App {
             Ok(field) => {
                 self.pick_field = Some(field);
                 self.compile_error = None;
+                self.draft_refused = None;
             }
             Err(e) => {
                 self.pick_field = None;
@@ -4537,6 +4617,10 @@ impl App {
                 // a blend against a lattice draws nothing and exports nothing, and until it
                 // named the block there was no way to tell which of several was at fault.
                 self.compile_error = Some(self.explain_compile(&e));
+                self.draft_refused = match e {
+                    fieldform_field::CompileError::DraftCrossesTheSection { node, .. } => Some(node),
+                    _ => None,
+                };
             }
         }
 
@@ -4645,6 +4729,8 @@ impl App {
             "create.cone" => self.add_primitive_with(PrimitiveKind::Cone, args),
             "create.torus" => self.add_primitive_with(PrimitiveKind::Torus, args),
             "create.capsule" => self.add_primitive_with(PrimitiveKind::Capsule, args),
+            "create.coil" => self.add_primitive_with(PrimitiveKind::Coil, args),
+            "create.thread" => self.add_primitive_with(PrimitiveKind::Thread, args),
             "create.plane" => self.add_primitive_with(PrimitiveKind::Plane, args),
             // Gyroid on a rectangular map when nothing says otherwise, and changeable in the
             // block afterwards — the same reasoning as Create > Curve, which stopped asking for
@@ -4653,7 +4739,13 @@ impl App {
             // read by their own names (`console_keys::lattice_with_keys`); a cell, map or phase
             // that does not exist is refused by name rather than quietly made a gyroid.
             "create.tpms" => self.add_lattice_with(args),
+            // `point on=<body>` stands on a surface; any other `point` is a place in space.
+            "create.point" if args.get("on").is_some() => self.point_on_surface_command(args),
             "create.point" => self.add_primitive_with(PrimitiveKind::Point, args),
+            "create.surfacepoint" => self.begin_axis_placement_for(AxisKind::SurfacePoint, None),
+            "create.surfaceplane" => self.begin_axis_placement_for(AxisKind::SurfacePlane, None),
+            "point.fix" => self.surface_point_live_command(args, false),
+            "point.live" => self.surface_point_live_command(args, true),
             // Every argument optional, so `ramp` alone places the default one and the console
             // and the menu are the same act. `in` and `out` take a pair because a range is one
             // idea: two arguments for it would let a file say half of one.
@@ -4920,6 +5012,7 @@ impl App {
             "cage.refine" => self.refine_cage(args),
             "modify.split" => self.split_body(args),
             "construct.axis" => self.axis_command(args),
+            "create.hole" => self.hole_command(args),
             _ => {
                 // A cage verb acts on the cage on screen unless told which, as `refine` does: the
                 // registry takes the only cage and refuses to guess among several, and the app
@@ -7322,6 +7415,17 @@ impl App {
             Some(Node::Cylinder { .. }) => "Cylinder".to_string(),
             Some(Node::Cone { .. }) => "Cone".to_string(),
             Some(Node::Torus { .. }) => "Torus".to_string(),
+            Some(Node::Coil { .. }) => "Coil".to_string(),
+            // Its name, where it has one, is what it is: "M8 thread" reads down the list.
+            Some(Node::Thread { designation: Some(name), .. }) => format!("{name} thread"),
+            Some(Node::Thread { .. }) => "Thread".to_string(),
+            // What kind of hole it is, which is what reads down a list of several.
+            Some(Node::Hole { kind, .. }) => match kind {
+                fieldform_scene::HoleKind::Simple { .. } => "Hole".to_string(),
+                fieldform_scene::HoleKind::Counterbore { .. } => "Counterbored hole".to_string(),
+                fieldform_scene::HoleKind::Countersink { .. } => "Countersunk hole".to_string(),
+                fieldform_scene::HoleKind::Tapped { designation, .. } => format!("{designation} tapped hole"),
+            },
             Some(Node::Plane { .. }) => "Plane".to_string(),
             Some(Node::Point { .. }) => "Point".to_string(),
             // Its own name, because an import is a thing the user brought in and will look for
@@ -7381,6 +7485,9 @@ impl App {
             ),
             Some(Node::Mirror { input, .. }) => {
                 format!("Mirror ({})", self.operand_label_in(graph, input))
+            }
+            Some(Node::Scale { input, .. }) => {
+                format!("Scale ({})", self.operand_label_in(graph, input))
             }
             // **"Offset", which is what the menu calls it.** The row said "Grow" or "Shrink"
             // -- which way the number went -- so the menu entry somebody clicked and the row
@@ -8375,7 +8482,16 @@ impl App {
         // the setting and the view, and setting it to what it already is does nothing. The
         // rebuild below is handed its walks from this same reading, so what the view compares
         // is what it was built from.
-        let fineness = self.display_quality.fineness();
+        // The rung's cells, held down for a big cage: what the settled bake costs grows with the
+        // cage's faces, and its accuracy does not (`display_quality::cell_cap`).
+        let biggest_cage = self
+            .part_graph()
+            .nodes()
+            .filter_map(|(_, node)| if let Node::Cage(id) = node { self.doc.cage_body(*id) } else { None })
+            .map(|body| body.mesh().face_count())
+            .max()
+            .unwrap_or(0);
+        let fineness = self.display_quality.fineness_for(biggest_cage);
         self.traced.set_fineness(fineness);
         // A settled band that has finished being computed elsewhere comes in here, and asks for
         // the rebuild that draws with it. While one is still being computed the viewport keeps
@@ -9062,16 +9178,20 @@ impl App {
         // **Typing into a pending session's panel needs no click** (`interaction-spec.md` §4.3):
         // a digit or the first letter of a parameter's name starts it, and the plain keys this
         // frame are then text, not bindings -- `h` starting `height` must not also hide.
-        let typed_into_panel = self.panel_typed(ui.ctx()) || self.cage_panel_typed(ui.ctx());
+        let typed_into_panel = self.panel_typed(ui.ctx()) || self.cage_panel_typed(ui.ctx()) || self.cage_tool_panel_typed(ui.ctx());
 
         // The Tab that `raw_input_hook` took off the queue, dispatched here so it still goes
         // through the keymap and can still be rebound — the interception is about *when* egui
         // sees the key, not about who decides what it means. While a session is pending it moves
         // between the panel's rows instead (§4.2).
+        let knife_armed = self.cage_tool.as_ref().is_some_and(|t| t.command.op == "cage.cut");
         if let Some(modifiers) = self.stolen_tab.take() {
             if self.cage_session.is_some() && !modifiers.ctrl && !modifiers.alt {
                 // A pending extrude or inset: Tab walks its panel's rows.
                 self.cage_panel_tab(modifiers.shift);
+            } else if self.cage_tool_has_panel() && !modifiers.ctrl && !modifiers.alt {
+                // An armed click tool's settings window, the same way.
+                self.cage_tool_panel_tab(modifiers.shift);
             } else if self.session.is_some() && !modifiers.ctrl && !modifiers.alt {
                 // With no panel, Tab with nothing focused goes back to the pending block's first
                 // number, so the keyboard can always find its way to the block being made.
@@ -9115,7 +9235,6 @@ impl App {
             }
             // **The knife's path**: Enter cuts it, Backspace takes a point back, and Esc
             // discards it before a second Esc puts the knife down.
-            let knife_armed = self.cage_tool.as_ref().is_some_and(|t| t.command.op == "cage.cut");
             if knife_armed && !shortcut.modifiers.any() && matches!(key, egui::Key::Enter | egui::Key::Backspace) {
                 ui.ctx().input_mut(|i| i.consume_key(egui_modifiers, key));
                 if key == egui::Key::Enter {
@@ -9330,6 +9449,7 @@ impl eframe::App for App {
         // palette Space opened this frame has the keyboard at once.
         self.tool_panel(ui.ctx());
         self.cage_panel(ui.ctx());
+        self.cage_tool_panel(ui.ctx());
         self.palette_ui(ui.ctx());
         self.marking_ui(ui.ctx());
 
@@ -9485,6 +9605,21 @@ impl eframe::App for App {
             {
                 pressed_control_point = self.control_point_at(aspect, rect, pos);
             }
+            // **A surface point's dot takes the press the same way**, behind a control point and
+            // ahead of the manipulator: pressing it and dragging slides the point over its surface,
+            // which is the one gesture the point is for. Its own manipulator still works for a
+            // move along one axis; the dot is how it is moved by hand.
+            if pressed_control_point.is_none()
+                && !press_over_cube
+                && !nav_mods
+                && !placing
+                && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
+                && let Some(pos) = response.interact_pointer_pos()
+                && let Some(point) = self.surface_point_at(aspect, rect, pos)
+            {
+                self.press_on_surface_point = true;
+                self.grab_surface_point(point);
+            }
 
             // **A control point pressed this frame takes the click off the manipulator.**
             // The manipulator's pivot sits at the middle of what it moves, and on a curve with
@@ -9501,6 +9636,7 @@ impl eframe::App for App {
                 && !nav_mods
                 && !placing
                 && pressed_control_point.is_none()
+                && !self.press_on_surface_point
                 && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
                 && let Some(frame) = gizmo_frame
                 && let Some(pos) = response.interact_pointer_pos()
@@ -9514,6 +9650,20 @@ impl eframe::App for App {
                     self.press_on_gizmo = true;
                     self.begin_gizmo(&frame, handle, aspect, rect, pos);
                 }
+            }
+
+            // **A press on what an armed tool drags -- the knife's active point, the edge Insert
+            // Edge slides a ring along -- is the tool's, not the camera's** (`cage-knife-spec.md`
+            // §3): decided at the press, for the same reason the gizmo's own grab is -- by the time
+            // egui calls it a drag the pointer has moved on.
+            if !press_over_cube
+                && !self.press_on_gizmo
+                && self.cage_tool.is_some()
+                && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
+                && let Some(pos) = response.interact_pointer_pos()
+                && self.cage_tool_press(aspect, rect, pos)
+            {
+                self.press_on_cage_tool = true;
             }
 
             if !press_over_cube
@@ -9618,11 +9768,22 @@ impl eframe::App for App {
 
             let on_gizmo = self.press_on_gizmo
                 || self.gizmo_drag.is_some()
-                || self.press_on_control_point;
+                || self.press_on_control_point
+                || self.press_on_surface_point;
             let moving = self.press_on_selection
                 || self.move_state.is_some()
                 || on_gizmo
-                || self.press_on_marquee;
+                || self.press_on_marquee
+                || self.press_on_cage_tool;
+
+            // What the tool took the press for, dragged: the knife's point slides along its own
+            // edge, Insert Edge's ring along the edge pressed, rather than the camera tumbling.
+            if self.press_on_cage_tool
+                && response.dragged_by(egui::PointerButton::Primary)
+                && let Some(pos) = response.interact_pointer_pos()
+            {
+                self.cage_tool_drag(aspect, rect, pos);
+            }
 
             if !press_over_cube && !moving {
                 // The pivot is chosen on the *press*, not on the drag that may follow.
@@ -9785,7 +9946,7 @@ impl eframe::App for App {
                     && !self.press_on_marquee
                     && response.clicked_by(egui::PointerButton::Primary)
                     && self.cage_tool.is_some()
-                    && self.cage_tool_click(ui.input(|i| i.modifiers.shift), response.interact_pointer_pos())
+                    && self.cage_tool_click(ui.input(|i| i.modifiers.shift), response.interact_pointer_pos(), aspect, rect)
                 {
                     // The click was the tool's: its line has run, and nothing is picked by it.
                 } else if !placing
@@ -9868,6 +10029,20 @@ impl eframe::App for App {
                     self.continue_point_drag(aspect, rect, pos, snapping, grid);
                 }
             }
+            // **A surface point's dot, dragged, slides the point under the cursor** -- over its own
+            // body only, and it waits where it is while the cursor is over anything else. Escape
+            // puts it back.
+            if self.press_on_surface_point {
+                if response.dragged_by(egui::PointerButton::Primary)
+                    && let Some(pos) = response.interact_pointer_pos()
+                {
+                    self.continue_surface_point_grab(aspect, rect, pos);
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.cancel_surface_point_grab();
+                    self.press_on_surface_point = false;
+                }
+            }
             if self.press_on_marquee
                 && let Some((from, _)) = self.marquee
                 && let Some(to) = response.interact_pointer_pos().or(response.hover_pos())
@@ -9947,12 +10122,20 @@ impl eframe::App for App {
                 if self.gizmo_drag.is_some() {
                     self.end_gizmo();
                 }
+                if self.press_on_surface_point {
+                    self.end_surface_point_grab();
+                    self.press_on_surface_point = false;
+                }
                 if let Some((from, adding)) = self.marquee.take()
                     && let Some(to) = response.interact_pointer_pos().or(response.hover_pos())
                 {
                     self.finish_marquee(aspect, rect, from, to, adding);
                 }
                 self.press_on_gizmo = false;
+                if self.press_on_cage_tool {
+                    self.cage_tool_release();
+                }
+                self.press_on_cage_tool = false;
                 self.press_on_control_point = false;
                 self.press_on_curve = false;
                 self.press_on_selection = false;
@@ -10001,8 +10184,10 @@ impl eframe::App for App {
             // An armed cage tool reads the hover: where along the edge the pointer is, and what
             // a click there would make (`app/cage_tools.rs`).
             if self.cage_tool.is_some() {
-                let snap_half = ui.input(|i| i.modifiers.shift);
-                self.cage_tool_hover(aspect, rect, response.hover_pos(), snap_half);
+                let (snap_half, ctrl, alt) =
+                    ui.input(|i| (i.modifiers.shift, i.modifiers.ctrl || i.modifiers.command, i.modifiers.alt));
+                let pointer = response.hover_pos().or(if self.press_on_cage_tool { response.interact_pointer_pos() } else { None });
+                self.cage_tool_hover(aspect, rect, pointer, snap_half, ctrl, alt);
             }
 
             let mvp = self.camera.mvp(aspect);
@@ -10191,6 +10376,7 @@ impl eframe::App for App {
                 &highlighted,
                 &stale,
             );
+            self.draw_surface_points(ui.painter(), aspect, rect);
             // **The centerline a selected loft built for itself, dashed** -- the same mark a
             // stale axis gets, and for a related reason: it is a line the document does not
             // hold. Dashed is what says "derived, not drawn"; the panel offers to make it real.

@@ -246,3 +246,49 @@
         assert!(!carries_true_distance(&doc, &graph, part_node));
         let _ = (node, Vector3::<f64>::z());
     }
+
+    /// **A partial revolve is boxed as the sector it turns through**: every solid point of the
+    /// wedge, at every angle and every way of laying it about the section, lies in its box, and a
+    /// quarter turn's box spans only the quadrant it turns through.
+    #[test]
+    fn a_partial_revolve_s_extent_is_its_sector_and_holds_all_of_it() {
+        let mut doc = Document::new();
+        let id = circle(&mut doc);
+        let boxed = |angle: f64, sides: AngleSides| {
+            let mut graph = Graph::empty();
+            let node = graph.add(Node::Revolve { rims: Default::default(), outline: Outline::closed(id), frame: Frame::default(), angle: lit(angle), sides });
+            let field = GraphField::compile_graph(&doc, &graph, 1e-4).expect("compiles");
+            let (lo, hi) = graph_extent(&doc, &graph, node).as_box().expect("bounded");
+            (field, lo, hi)
+        };
+        for (angle, sides) in [
+            (30.0, AngleSides::One),
+            (90.0, AngleSides::One),
+            (90.0, AngleSides::Symmetric),
+            (180.0, AngleSides::One),
+            (200.0, AngleSides::Two { angle: lit(70.0) }),
+            (300.0, AngleSides::Symmetric),
+        ] {
+            let (field, lo, hi) = boxed(angle, sides.clone());
+            let mut solid = 0;
+            for i in 0..4000 {
+                let a = TAU * (i as f64 * 0.618_034).fract();
+                let rho = R - A + 2.0 * A * (i as f64 * 0.414_21).fract();
+                let z = -A + 2.0 * A * (i as f64 * 0.732_05).fract();
+                let p = Point3::new(rho * a.cos(), rho * a.sin(), z);
+                if field.distance(p) < 0.0 {
+                    solid += 1;
+                    for k in 0..3 {
+                        assert!(p[k] >= lo[k] - 1e-9 && p[k] <= hi[k] + 1e-9, "{angle} {sides:?}: {p:?} outside {lo:?}..{hi:?}");
+                    }
+                }
+            }
+            assert!(solid > 50, "{angle}: {solid}");
+        }
+        // A quarter turn from the +x half-plane spans x and y from about nought to R + A, not
+        // ±(R + A) as the ring's box did.
+        let (_, lo, hi) = boxed(90.0, AngleSides::One);
+        assert!(lo.x > -1e-6 && lo.y > -1e-6, "{lo:?}");
+        assert!((hi.x - (R + A)).abs() < 1e-6 && (hi.y - (R + A)).abs() < 1e-6, "{hi:?}");
+        let _ = PI;
+    }

@@ -99,6 +99,11 @@ pub struct SectionLaw {
     pub shape: fieldform_scene::RampShape,
     /// Where along the spine the solid runs, as fractions of its length: `(0, 1)` is all of it.
     pub window: (f64, f64),
+    /// How fast the section's mitred corners move per millimetre its walls do: the longest
+    /// mitre vector (`Footprint::mitre_rate`), read only by a draft that mitres. One otherwise,
+    /// and a property of the section rather than of the law, so it is set by whoever holds both
+    /// ([`SectionLaw::with_mitre`]) and ignored by [`SectionLaw::is_plain`].
+    pub mitre: f64,
 }
 
 impl Default for SectionLaw {
@@ -109,6 +114,7 @@ impl Default for SectionLaw {
             twist: 0.0,
             shape: fieldform_scene::RampShape::Linear,
             window: (0.0, 1.0),
+            mitre: 1.0,
         }
     }
 }
@@ -117,7 +123,23 @@ impl SectionLaw {
     /// Whether this is the law every sweep had before there was one: no taper, no turn, the
     /// whole path. A sweep under it is the sweep it always was, byte for byte in the shader.
     pub(crate) fn is_plain(&self) -> bool {
-        *self == Self::default()
+        Self { mitre: 1.0, ..*self } == Self::default()
+    }
+
+    /// The same law for a section whose longest mitre vector is `mitre`.
+    pub(crate) fn with_mitre(self, mitre: f64) -> Self {
+        Self { mitre: mitre.max(1.0), ..self }
+    }
+
+    /// How far the boundary moves per millimetre of path under a draft: the draft's tangent,
+    /// times the longest mitre where the corners are mitred -- a wall moves out at `tan α` and a
+    /// mitred corner along its mitre, `|m|` times as far. Nought without a draft.
+    fn draft_rate(&self) -> f64 {
+        match self.taper {
+            Taper::Draft { tangent } if !self.corners.is_default() => tangent * self.mitre,
+            Taper::Draft { tangent } => tangent,
+            _ => 0.0,
+        }
     }
 
     /// The scale at a fraction `f` of the way along the window.
@@ -147,10 +169,7 @@ impl SectionLaw {
     /// the whole of a draft's offset outward. **What the fold refusal, the bound and the
     /// extent all measure by**, which is why it is one function.
     pub(crate) fn reach_under(&self, reach: f64, run: f64) -> f64 {
-        let grown = match self.taper {
-            Taper::Draft { tangent } => (run * tangent).max(0.0),
-            _ => 0.0,
-        };
+        let grown = (run * self.draft_rate()).max(0.0);
         self.scale_range().1 * reach + grown
     }
 
@@ -182,10 +201,10 @@ impl SectionLaw {
             _ => 0.0,
         };
         let turn_rate = k * self.twist.abs() / run;
-        let lean = match self.taper {
-            Taper::Draft { tangent } => tangent.abs(),
-            _ => 0.0,
-        };
+        // The draft's term is how fast the boundary moves, which for a mitred section is its
+        // corners' rate (`draft_rate`): divided by the walls' alone, a square drafted 25° and
+        // mitred claimed 0.495 mm more room than there was outside a corner.
+        let lean = self.draft_rate().abs();
         let along = scale_rate * reach + turn_rate * rho_max + lean;
         (1.0 + along * along).sqrt()
     }
@@ -209,6 +228,22 @@ pub enum SweepError {
     EmptyWindow { start: f64, end: f64 },
     /// A draft pushes a section's boundary out from its inside, and an open wall has none.
     DraftOnAnOpenWall,
+    /// A draft that mitres the section's corners and moves its walls past where the mitred
+    /// outline first crosses itself, before the end of the path -- which the walk would read as
+    /// a different solid with no message. The extrude's `DraftCrossesTheSection`, worded alike.
+    DraftCrossesTheSection {
+        /// The draft asked for, in degrees, and which way it leans the walls.
+        degrees: f64,
+        way: &'static str,
+        /// How far the walls may move before the outline crosses itself, in millimetres.
+        room: f64,
+        /// How far along the path that is reached.
+        along: f64,
+        /// The run of path the draft is applied over.
+        length: f64,
+        /// The steepest draft that keeps the outline whole over that run, in degrees.
+        fits: f64,
+    },
     /// A draft asked to mitre the corners of a **wall**, which V1 does not do.
     ///
     /// A band has two faces, and a draft moves both outward along their own normals. Mitring
@@ -275,6 +310,13 @@ impl std::fmt::Display for SweepError {
                 "a draft can only mitre the corners of a closed profile, not of a wall \u{2014} \
                  a band has two faces and mitring both is not built yet; round its corners, or \
                  draft the profile the wall runs along instead"
+            ),
+            SweepError::DraftCrossesTheSection { degrees, way, room, along, length, fits } => write!(
+                f,
+                "the draft ({degrees:.1}\u{b0} {way}) makes the mitred outline cross itself \
+                 before the end of the solid \u{2014} the walls have moved {room:.2} mm by \
+                 {along:.2} mm along a path of {length:.2} mm; ease the draft under \
+                 {fits:.1}\u{b0}, shorten the path, or round the corners"
             ),
             SweepError::DraftOnAnOpenWall => write!(
                 f,
@@ -391,13 +433,20 @@ impl SpineFrame {
 /// A unit tangent at each sample: the segment's direction at the ends, and the mean of the two
 /// adjacent segments' directions in between, so the frame turns smoothly through a joint rather
 /// than jumping at it.
+///
+/// **A closed spine has no ends**, so its first and last samples, which are the same point, are
+/// the joint between its last segment and its first like any other. Read as an open path's ends
+/// they were not: the frame left along the first leg and arrived along the last, turning the
+/// whole corner at once where the path closes, and a 60 mm square round a hexagon claimed 13 mm
+/// more room than there was there. The shader's `sweep_tangent` wraps the same way.
 fn sample_tangents(points: &[Point3<f64>]) -> Option<Vec<Vector3<f64>>> {
     let n = points.len();
     let seg = |i: usize| (points[i + 1] - points[i]).try_normalize(1e-12);
+    let closed = closes(points);
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        let before = if i > 0 { seg(i - 1) } else { None };
-        let after = if i + 1 < n { seg(i) } else { None };
+        let before = if i > 0 { seg(i - 1) } else if closed { seg(n - 2) } else { None };
+        let after = if i + 1 < n { seg(i) } else if closed { seg(0) } else { None };
         let t = match (before, after) {
             (Some(a), Some(b)) => (a + b).try_normalize(1e-12).or(Some(b)),
             (Some(a), None) | (None, Some(a)) => Some(a),
@@ -408,22 +457,41 @@ fn sample_tangents(points: &[Point3<f64>]) -> Option<Vec<Vector3<f64>>> {
     Some(out)
 }
 
+/// Whether a polyline closes on itself: three points or more, the last on the first -- the rule
+/// the sweep reads a closed path by.
+fn closes(points: &[Point3<f64>]) -> bool {
+    let n = points.len();
+    n > 2 && (points[0] - points[n - 1]).norm_squared() < 1e-18
+}
+
 fn any_perpendicular(t: Vector3<f64>) -> Vector3<f64> {
     let axis = if t.x.abs() < 0.9 { Vector3::x() } else { Vector3::y() };
     t.cross(&axis)
 }
 
 /// The tightest curvature along a polyline: the turning angle at each interior sample over the
-/// mean length of the two segments meeting there.
+/// mean length of the two segments meeting there -- and, round a closed spine, at the corner
+/// where it closes, which is a joint like every other. Left out, a closed path whose sharpest
+/// corner was its start was built with a section wider than that corner, folded through itself,
+/// and divided by a stretch that never saw it.
 ///
 /// A polyline concentrates its curvature at its joints, which makes this an overestimate for a
 /// coarse tessellation and an honest figure for a fine one — and the spine is tessellated to the
 /// compile's own tolerance, which is fine. Over rather than under, which is the safe direction
 /// for a number the bound divides by.
 pub(crate) fn max_curvature(points: &[Point3<f64>]) -> f64 {
+    let n = points.len();
     let mut worst: f64 = 0.0;
-    for i in 1..points.len().saturating_sub(1) {
+    for i in 1..n.saturating_sub(1) {
         worst = worst.max(joint_curvature(points[i - 1], points[i], points[i + 1]));
+    }
+    if closes(points) {
+        // The legs either side of the start, past any point repeated there.
+        let before = points[..n - 1].iter().rev().find(|p| (*p - points[0]).norm_squared() > 1e-18);
+        let after = points[1..].iter().find(|p| (*p - points[0]).norm_squared() > 1e-18);
+        if let (Some(&before), Some(&after)) = (before, after) {
+            worst = worst.max(joint_curvature(before, points[0], after));
+        }
     }
     worst
 }
@@ -456,8 +524,9 @@ fn joint_curvature(before: Point3<f64>, at: Point3<f64>, after: Point3<f64>) -> 
 /// section read across the frame's plane is shortened by up to its cosine: the solid reaches
 /// `reach / cos` from the spine, and every reading in the section is off the rigid one by up to
 /// `1 − cos` of the distance from the spine. Read off the frame's own tangents rather than the
-/// turns, because round a closed spine the frame does not wrap: it leaves along the first
-/// segment and arrives along the last, so the corner where the spine closes is leaned off whole.
+/// turns, so the lean is whatever the frame actually does -- round a closed spine, which the
+/// frame now wraps, half the corner where it closes as at every other joint; before it wrapped,
+/// the whole of that corner.
 ///
 /// **The twist is the frame's turn about a segment against the rigid one.** In a plane it is
 /// only what interpolating the normal leaves: none with the normal in the plane or square to
@@ -680,12 +749,9 @@ pub(crate) fn tube_radius(points: &[Point3<f64>]) -> f64 {
         return 0.0;
     }
     let closed = n > 3 && (pts[0] - pts[n - 1]).norm_squared() < 1e-18;
-    // The corner where a closed spine meets its own start is a joint like every other, and
-    // `max_curvature` reads only those between the first point and the last.
-    let mut curvature = max_curvature(&pts);
-    if closed {
-        curvature = curvature.max(joint_curvature(pts[n - 2], pts[0], pts[1]));
-    }
+    // The corner where a closed spine meets its own start is a joint like every other, which
+    // `max_curvature` reads.
+    let curvature = max_curvature(&pts);
     let bend = if curvature > 0.0 { 1.0 / curvature } else { f64::INFINITY };
     bend.min(0.5 * nearest_return(&pts, closed, 2.0 * bend))
 }
@@ -886,12 +952,15 @@ pub struct Swept {
     /// `1 / (1 − κ_max · r_max)`: what the reading is divided by to stay a lower bound -- all of
     /// it, or only the caps read from inside where `tube` says the section reads truly.
     stretch: f64,
-    /// The tube about the spine, where the section is held square under the plain law and the
-    /// tube is wider than the solid reaches: there the reading is the section's own, less what
-    /// the frame's lean and twist can account for, and the stretch divides only the caps
-    /// (`sweep-spec.md` §4). `None` everywhere else, which divides the whole reading as every
-    /// sweep did before.
+    /// The tube about the spine, where it is wider than the solid reaches: every point within
+    /// it has one nearest place, so no reading in it may claim more than the tube allows
+    /// (the bound made local, in the sweep's design notes). `None` where the tube is no wider
+    /// than the solid, which divides the whole reading as every sweep did before.
     tube: Option<InTube>,
+    /// Whether the section is read as it is inside the tube: held square under the plain law,
+    /// less what the frame's lean and twist can account for, with the stretch dividing only the
+    /// caps. Otherwise the reading is divided whole and only held to the tube.
+    reads_as_is: bool,
     /// Whether the section's axes are coefficients in the frame (so they are carried along the
     /// path) or world vectors (so they never turn).
     follow: bool,
@@ -960,6 +1029,7 @@ impl Swept {
         law: SectionLaw,
     ) -> Result<Self, SweepError> {
         let footprint = footprint.into();
+        let law = law.with_mitre(footprint.mitre_rate(law.corners));
         let frame = SpineFrame::along(&spine, seed).ok_or(SweepError::SpineHasNoLength)?;
         if spine.length() <= 0.0 {
             return Err(SweepError::SpineHasNoLength);
@@ -1007,6 +1077,31 @@ impl Swept {
                 {
                     return Err(SweepError::SharpCornersOnAWall);
                 }
+                // **A mitred outline that crosses itself is a different solid**, read by the
+                // walk with no message: held to the first offset at which it stops being simple,
+                // as the extrude is (`draft_crossing::mitre_crossing`), which never comes after
+                // the depth.
+                if let crate::Footprint::Closed(profile) = &footprint
+                    && tangent != 0.0
+                    && !law.corners.is_default()
+                {
+                    let moved = run * tangent;
+                    if let Some(room) = crate::draft_crossing::mitre_crossing(
+                        profile.points(),
+                        profile.miters(),
+                        moved.signum(),
+                        moved.abs(),
+                    ) {
+                        return Err(SweepError::DraftCrossesTheSection {
+                            degrees: tangent.atan().to_degrees().abs(),
+                            way: if moved < 0.0 { "inward" } else { "outward" },
+                            room,
+                            along: room / tangent.abs(),
+                            length: run,
+                            fits: (room / run).atan().to_degrees(),
+                        });
+                    }
+                }
                 // Inward by more than the section is deep is a section that has closed.
                 if tangent < 0.0 && run * -tangent >= footprint.depth() {
                     return Err(SweepError::TaperClosesTheSection {
@@ -1052,9 +1147,15 @@ impl Swept {
         // and a law moves the section with the arc. And only where the tube is wider than the
         // solid reaches, since the argument needs every point of the solid inside it.
         // `sweep_tube` in `graph_field` asks the same of the graph for the shader.
-        let tube = (matches!(held, Held::Square) && law.is_plain())
-            .then(|| InTube::of(points, &frame, rho_max))
-            .flatten();
+        //
+        // **The tube itself holds every sweep, though**, since what it bounds is a property of
+        // the spine and of how far the solid reaches, not of how the section is read: held at an
+        // angle or moved by a law, the section reaches no further than `rho_max` over the
+        // frame's lean, and the divided reading rises no faster than one a millimetre wherever
+        // the nearest place is unique, which is what the cap needs.
+        // `sweep_cap_tube` asks the same of the graph for the shader.
+        let tube = InTube::of(points, &frame, rho_max);
+        let reads_as_is = matches!(held, Held::Square) && law.is_plain();
         Ok(Self {
             footprint,
             spine,
@@ -1065,6 +1166,7 @@ impl Swept {
             // asserts. `sweep_stretch` in `graph_field.rs` computes the same from the graph.
             stretch: law.stretch_along(reach, run) / (1.0 - product),
             tube,
+            reads_as_is,
             follow,
             ua,
             vb,
@@ -1196,9 +1298,19 @@ impl ScalarField for Swept {
         let lean = square.abs();
         // The slab is the window: where the solid runs along the path, which is all of it
         // unless an extent says otherwise. A closed path has no ends to cap.
+        //
+        // **Shortened by the lean too, because `w` is millimetres of arc and a cap is a plane.**
+        // A held section's cap is its own plane at the end of the window, and the slide that
+        // puts a point in its section is taken *along the path*, so the slab reads how far the
+        // point is from the cap along a line that crosses it at the lean: `1 / cos` of the way
+        // across. On a straight path the sections are parallel planes `cos` apart for every
+        // millimetre of arc, so the slab times the cosine is the signed distance to the cap's
+        // plane, exactly, before the cap and past it. Read unshortened, the owner's wing -- a
+        // lens held flush at sixty degrees -- read a quarter of a millimetre past its cap as half
+        // of one. One for a section held square, where this is the slab it always was.
         let slab = (!self.closed).then(|| {
             let (a0, a1) = self.window;
-            (w - (a0 + a1) * 0.5).abs() - (a1 - a0) * 0.5
+            ((w - (a0 + a1) * 0.5).abs() - (a1 - a0) * 0.5) * lean
         });
         // The corner is Pythagoras between two *perpendicular* measurements. A leaning section
         // and its own end cap are not perpendicular to each other, and taking the corner anyway
@@ -1216,7 +1328,8 @@ impl ScalarField for Swept {
         // taper puts between them, so it takes the divisor the sweep already does and no other
         // (`Rim::join`).
         // Which end is nearer is how far past the window's middle the point landed.
-        let toward = w - (self.window.0 + self.window.1) * 0.5;
+        // Shortened as the slab is, since a rim reads the length off the two together.
+        let toward = (w - (self.window.0 + self.window.1) * 0.5) * lean;
         let divided = match slab {
             Some(slab) if !self.rims.is_hard() => self.rims.join_ends(section * lean, slab, toward),
             _ => hard(slab),
@@ -1224,6 +1337,16 @@ impl ScalarField for Swept {
         let Some(tube) = self.tube else {
             return divided;
         };
+        // **And no more than the tube allows** -- below, where it is argued.
+        let rho = near.distance;
+        let held_to_tube = (rho - tube.reach).max(tube.radius - rho);
+        if !self.reads_as_is {
+            // A held section or a moving law reads its whole value divided, which rises no faster
+            // than one a millimetre wherever the nearest place is unique, so the tube's bound
+            // holds it exactly as it holds the reading below. Without it the arm round a coil read
+            // 7.0 mm past its surface held flush, 5.2 scaled and 5.8 turned.
+            return divided.min(held_to_tube);
+        }
         // **The section read as it is, and the caps divided where they are read from
         // inside** (`sweep-spec.md` §4). The frame turns about no axis of its own, so the
         // section's coordinates change at the rate the point moves. Only the arc is stretched,
@@ -1254,7 +1377,6 @@ impl ScalarField for Swept {
         // three claims no more than there is, outside or in. Where that leaves less than
         // dividing does -- within about that much of the surface -- the divided reading stands,
         // and where the frame does not meet itself round a closed spine it stands throughout.
-        let rho = near.distance;
         let reading = match (tube.allowance(rho), own > 0.0) {
             (None, _) => divided,
             (Some(allowance), true) => divided.max(own - allowance),
@@ -1267,7 +1389,7 @@ impl ScalarField for Swept {
         // `tube − ρ` away, or the reading would have been held, and at least `ρ − reach`, since
         // nothing of the solid is further than its reach from the spine. A coil read 8.4 mm long
         // between its turns before this.
-        reading.min((rho - tube.reach).max(tube.radius - rho))
+        reading.min(held_to_tube)
     }
 
     fn normalization(&self) -> Normalization {
@@ -1702,6 +1824,65 @@ mod tests {
         assert!(over < 1e-9, "claimed {over} mm more room than there was");
     }
 
+    /// **And between the turns of a coil, a section held at an angle or moved by a law claims no
+    /// more room either.** The same arm round the same coil, held flush with a plane tipped off
+    /// the path's start, held parallel to the plane the coil climbs through, and held square
+    /// under a scale, a twist and a draft. None of these reads its section as it is, so all of
+    /// them divide the whole reading -- and the divisor says nothing about the cut locus between
+    /// the turns, where the nearest place jumps and a point is read against a section facing
+    /// away from the turn beside it.
+    #[test]
+    fn a_held_or_moving_section_never_overstates_the_room_between_the_turns_of_a_coil() {
+        let coil: Vec<Point3<f64>> = (0..=120)
+            .map(|i| {
+                let a = 2.0 * TAU * i as f64 / 120.0;
+                Point3::new(60.0 * a.cos(), 60.0 * a.sin(), 15.0 * a)
+            })
+            .collect();
+        let on_an_arm = || {
+            Profile::new(vec![
+                Point2::new(12.0, -8.0),
+                Point2::new(28.0, -8.0),
+                Point2::new(28.0, 8.0),
+                Point2::new(12.0, 8.0),
+            ])
+            .unwrap()
+        };
+        // A plane through the coil's start, its normal tipped twenty degrees off the start
+        // tangent toward the coil's centre.
+        let start = (coil[1] - coil[0]).normalize();
+        let inward = -Vector3::x();
+        let tip = 20f64.to_radians();
+        let normal = start * tip.cos() + inward * tip.sin();
+        let u = (Vector3::x() - normal * normal.x).normalize();
+        let flush = Held::Flush { normal, u, v: normal.cross(&u) };
+        let parallel = Held::Parallel { normal: Vector3::z(), u: Vector3::x(), v: Vector3::y() };
+        let law = |taper: Taper, twist: f64| SectionLaw { taper, twist, ..SectionLaw::default() };
+        let cases: Vec<(&str, Held, SectionLaw)> = vec![
+            ("held flush", flush, SectionLaw::default()),
+            ("held parallel", parallel, SectionLaw::default()),
+            ("scaled to 0.7", Held::Square, law(Taper::Scale { end: 0.7 }, 0.0)),
+            ("turned a quarter", Held::Square, law(Taper::None, PI / 2.0)),
+            ("drafted out a degree", Held::Square, law(Taper::Draft { tangent: 1f64.to_radians().tan() }, 0.0)),
+            ("held flush and scaled", flush, law(Taper::Scale { end: 0.8 }, 0.0)),
+        ];
+        let mut points = Vec::new();
+        for k in 0..36 {
+            let a = TAU * k as f64 / 36.0;
+            for r in [65.0, 75.0, 85.0, 100.0] {
+                for z in 0..14 {
+                    points.push(Point3::new(r * a.cos(), r * a.sin(), 50.0 + 7.0 * z as f64));
+                }
+            }
+        }
+        for (what, held, law) in cases {
+            let swept = Swept::under_law(on_an_arm(), Spine::new(coil.clone()), Vector3::x(), held, law)
+                .unwrap_or_else(|e| panic!("{what}: {e}"));
+            let over = crate::overstatement(&swept, &points, &crate::probe_directions(), 0.25, 1.2);
+            assert!(over < 1e-9, "{what}: claimed {over} mm more room than there was");
+        }
+    }
+
     /// **Where nothing comes back, the tube is the tightest bend's**: a sixty degree arc of
     /// radius 50 has a tube of 50, and a straight spine has no edge to its tube at all.
     #[test]
@@ -2020,6 +2201,85 @@ mod tests {
         // Reach is the corner, `11·√2`, so this one fails too; half-width 6 reaches 8.5 and fits.
         Swept::new(square(6.0), Spine::new(arc), Vector3::z()).expect("fits inside the bend");
     }
+
+    /// A hexagon of circumradius 150 about the Z axis, closed: it starts and ends at its corner
+    /// on +X, which is where the frame has to wrap.
+    fn hexagon() -> Vec<Point3<f64>> {
+        (0..=6)
+            .map(|k| {
+                let a = TAU * (k % 6) as f64 / 6.0;
+                Point3::new(150.0 * a.cos(), 150.0 * a.sin(), 0.0)
+            })
+            .collect()
+    }
+
+    /// **A closed polyline's frame turns through the corner where it closes as through every
+    /// other.** The tangent at a sample is the mean of its two segments', and at the first and
+    /// last samples of a closed spine those are the last segment and the first: read as an open
+    /// path's ends instead, the frame left along the first leg and arrived along the last, so the
+    /// whole corner was turned at once where the path closes and the section was read across a
+    /// plane leaning the whole sixty degrees off the leg beside it. A 60 mm square round the
+    /// hexagon claimed 13 mm more room than there was about that corner.
+    #[test]
+    fn a_closed_polylines_frame_turns_through_the_corner_where_it_closes() {
+        let ring = hexagon();
+        let frame = SpineFrame::along(&Spine::new(ring.clone()), Vector3::z()).expect("a frame");
+        let first = (ring[1] - ring[0]).normalize();
+        let last = (ring[6] - ring[5]).normalize();
+        let bisector = (first + last).normalize();
+        for t in [frame.tangents[0], frame.tangents[6]] {
+            assert!((t - bisector).norm() < 1e-12, "the closing corner's tangent is {t:?}, not {bisector:?}");
+        }
+        let swept = Swept::new(square(30.0), Spine::new(ring.clone()), Vector3::z()).expect("sweeps");
+        let mut probes = Vec::new();
+        for corner in [ring[0], ring[2]] {
+            for i in 0..9 {
+                for j in 0..9 {
+                    for k in 0..5 {
+                        let o = Vector3::new(
+                            -60.0 + 15.0 * i as f64 + 0.37,
+                            -60.0 + 15.0 * j as f64 - 0.21,
+                            -50.0 + 25.0 * k as f64 + 0.13,
+                        );
+                        probes.push(corner + o);
+                    }
+                }
+            }
+        }
+        let over = crate::overstatement(&swept, &probes, &crate::probe_directions(), 0.25, 1.2);
+        assert!(over < 0.25, "claimed {over} mm more room than there was");
+    }
+
+    /// **And the corner where a closed spine closes is a joint for the stretch and the fold
+    /// refusal too.** The closed path whose tube the closing corner narrows: out 5 mm along +X,
+    /// round an arc of radius 100, and back in along the last 5 mm at 30 degrees to the first leg.
+    /// Every other joint turns 15 degrees over 26 mm or less, a radius of 100; the corner where it
+    /// closes turns 30 over 5, a radius of 9.5. A 16 mm square reaches 11.3, so it fits every
+    /// other corner and folds at that one -- refused by name now, where it used to be built.
+    #[test]
+    fn the_corner_where_a_closed_spine_closes_is_read_for_its_curvature() {
+        let along = 100.0 * (2.0 - 3f64.sqrt());
+        let centre = Point3::new(along, 100.0, 0.0);
+        let mut path = vec![Point3::origin(), Point3::new(5.0, 0.0, 0.0)];
+        for k in 0..=22 {
+            let a = (-90.0 + 15.0 * k as f64).to_radians();
+            path.push(centre + Vector3::new(a.cos(), a.sin(), 0.0) * 100.0);
+        }
+        let back = Vector3::new(30f64.to_radians().cos(), -(30f64.to_radians().sin()), 0.0);
+        path.push(Point3::origin() - back * 5.0);
+        path.push(Point3::origin());
+        let corner = joint_curvature(path[path.len() - 2], path[0], path[1]);
+        assert!((corner - 30f64.to_radians() / 5.0).abs() < 1e-9, "{corner}");
+        assert!((max_curvature(&path) - corner).abs() < 1e-12, "max_curvature read {}", max_curvature(&path));
+        let made = Swept::new(square(8.0), Spine::new(path.clone()), Vector3::z());
+        assert!(
+            matches!(made, Err(SweepError::FoldsThroughItself { .. })),
+            "a 16 mm square round a corner of radius {:.1} should be refused, got {:?}",
+            1.0 / corner,
+            made.map(|_| ())
+        );
+        Swept::new(square(5.0), Spine::new(path), Vector3::z()).expect("a 10 mm square fits it");
+    }
 }
 
 /// What a draft does to the section's corners -- the owner's ruling of 2026-10-03, that both
@@ -2055,8 +2315,8 @@ mod corner_tests {
     /// **The corner is where each answer says it is, and the faces are in the same place.**
     /// Half way up a 100 mm extrude drafted 10°, the wall has moved 8.82 mm: the round corner
     /// stands that far from the drawn vertex along its bisector and the sharp one stands
-    /// `8.82·√2` -- while off the middle of a face the two read the same number, because a
-    /// face does not care how the corners are cut.
+    /// `8.82·√2` -- while off the middle of a face the two measure the same face, because a
+    /// face does not care how the corners are cut, each over its own divisor.
     #[test]
     fn a_sharp_corner_stands_where_the_two_walls_meet_and_a_round_one_on_the_arc() {
         let (round, sharp) = (extrude(Corners::Round, 10.0), extrude(Corners::Sharp, 10.0));
@@ -2072,9 +2332,13 @@ mod corner_tests {
         // And the sharp solid holds what the round one does not: the mitre's own apex.
         let apex = vertex + bisector * (moved * std::f64::consts::SQRT_2 - 0.1);
         assert!(sharp.distance(apex) < 0.0 && round.distance(apex) > 0.0, "the mitre is material");
-        // Off the middle of a face, nothing differs.
+        // Off the middle of a face, the two measure the same face, and differ only by the
+        // divisor: a mitred corner moves √2 times as fast as a wall, so the sharp draft's
+        // reading is divided by that rate's slope (`a_sharp_draft_is_divided_by_how_fast_its_
+        // corners_move`), and the round one's by the walls'.
+        let slope = |rate: f64| (1.0 + (10f64.to_radians().tan() * rate).powi(2)).sqrt();
         for at in [Point3::new(0.0, 20.0, z), Point3::new(0.0, -20.0, z), Point3::new(25.0, 0.0, z)] {
-            let (a, b) = (round.distance(at), sharp.distance(at));
+            let (a, b) = (round.distance(at) * slope(1.0), sharp.distance(at) * slope(std::f64::consts::SQRT_2));
             assert!((a - b).abs() < 1e-9, "a face is a face either way, at {at:?}: {a} vs {b}");
         }
     }
@@ -2288,6 +2552,118 @@ mod corner_tests {
             needle.offset_by(tip, t, Corners::Sharp) < 0.0,
             "the held mitre still covers the tip"
         );
+    }
+
+    /// Probes outside the corner at `(10, 10)` of the drafted square, from a fifth of the way up
+    /// to near the top, fanned about the corner's bisector.
+    fn about_the_corner(draft_degrees: f64) -> Vec<Point3<f64>> {
+        let mut out = Vec::new();
+        for z in [20.0, 50.0, 80.0] {
+            let moved = z * draft_degrees.to_radians().tan();
+            let apex = Point3::new(10.0, 10.0, z) + Vector3::new(1.0, 1.0, 0.0) * moved;
+            for k in 0..9 {
+                let a = (45.0 + 15.0 * (k as f64 - 4.0)).to_radians();
+                for r in [0.3, 1.0, 2.5, 5.0] {
+                    for dz in [-3.0, 0.0, 3.0] {
+                        out.push(apex + Vector3::new(a.cos(), a.sin(), 0.0) * r + Vector3::z() * dz);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Every direction a probe could find the corner by: the usual ten, and the corner's own.
+    fn toward_the_corner() -> Vec<Vector3<f64>> {
+        let mut out = crate::probe_directions();
+        out.extend([
+            Vector3::new(-1.0, -1.0, 0.0),
+            Vector3::new(-1.0, -1.0, -0.5),
+            Vector3::new(-1.0, -1.0, 0.5),
+            Vector3::new(-1.0, -0.3, 0.0),
+            Vector3::new(-0.3, -1.0, 0.0),
+        ]);
+        out
+    }
+
+    /// **A sharp draft is divided by how fast its corners move, not its walls.** The draft's
+    /// share of the divisor is the rate the section's reading changes along the extrusion, and
+    /// a wall moves out at `tan α` while a mitred corner moves at `|m|·tan α`, `m` its mitre
+    /// vector -- √2 for a square's right angle. Divided by the walls' rate alone, a 20 mm
+    /// square drafted outward over 100 mm claimed more room than there was outside its corners,
+    /// extruded and swept alike: 0.057 mm at 10°, 0.495 at 25°, 0.855 at 40°, marched at two
+    /// microns. A round draft's corner is an arc moving at the walls' rate, and never did.
+    #[test]
+    fn a_sharp_draft_is_divided_by_how_fast_its_corners_move() {
+        for degrees in [10.0, 25.0, 40.0] {
+            let probes = about_the_corner(degrees);
+            for corners in [Corners::Sharp, Corners::Round] {
+                let solid = extrude(corners, degrees);
+                let over = crate::overstatement(&solid, &probes, &toward_the_corner(), 0.002, 1.3);
+                assert!(over < 0.002, "{corners:?} at {degrees}°: claimed {over} mm more room than there was");
+                // The sweep along a straight path is the same solid, and divides the same way.
+                let swept = Swept::under_law(
+                    square(10.0),
+                    Spine::new(vec![Point3::origin(), Point3::new(0.0, 0.0, 100.0)]),
+                    Vector3::x(),
+                    Held::Square,
+                    SectionLaw {
+                        taper: Taper::Draft { tangent: degrees.to_radians().tan() },
+                        corners,
+                        ..SectionLaw::default()
+                    },
+                )
+                .expect("a straight drafted sweep");
+                let over = crate::overstatement(&swept, &probes, &toward_the_corner(), 0.002, 1.3);
+                assert!(over < 0.002, "swept, {corners:?} at {degrees}°: claimed {over} mm more room than there was");
+            }
+        }
+    }
+    /// **A sharp draft is held to where its mitred outline first crosses itself, as the
+    /// extrude's is.** A U whose notch is 4 mm wide closes the notch when its walls have moved
+    /// 2 mm out, and past that a mitred outline folds over itself there, which the walk reads as
+    /// a different solid and says nothing: drafted 2.5 mm out over a 20 mm path it is refused by
+    /// name, with the room it had; 1.5 mm out fits, and a round draft only unions the prongs.
+    /// It used to be checked against the section's depth alone, which an outward draft never
+    /// reaches.
+    #[test]
+    fn a_sharp_drafts_mitred_outline_may_not_cross_itself() {
+        let u = || {
+            Profile::new(vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(24.0, 0.0),
+                Point2::new(24.0, 30.0),
+                Point2::new(14.0, 30.0),
+                Point2::new(14.0, 10.0),
+                Point2::new(10.0, 10.0),
+                Point2::new(10.0, 30.0),
+                Point2::new(0.0, 30.0),
+            ])
+            .unwrap()
+        };
+        let swept = |moved: f64, corners: Corners| {
+            Swept::under_law(
+                u(),
+                Spine::new(vec![Point3::origin(), Point3::new(0.0, 0.0, 20.0)]),
+                Vector3::x(),
+                Held::Square,
+                SectionLaw {
+                    taper: Taper::Draft { tangent: moved / 20.0 },
+                    corners,
+                    ..SectionLaw::default()
+                },
+            )
+        };
+        match swept(2.5, Corners::Sharp) {
+            Err(err @ SweepError::DraftCrossesTheSection { room, .. }) => {
+                assert!((room - 2.0).abs() < 1e-9, "the notch closes at 2 mm, read {room}");
+                let said = err.to_string();
+                assert!(said.contains("cross itself") && said.contains("round the corners"), "{said}");
+            }
+            other => panic!("a sharp draft past its crossing was {:?}", other.map(|_| ())),
+        }
+        swept(1.5, Corners::Sharp).expect("short of the crossing");
+        swept(2.5, Corners::Round).expect("a round draft only unions the prongs");
     }
 }
 

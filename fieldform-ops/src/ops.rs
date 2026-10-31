@@ -769,6 +769,57 @@ impl Command for SetRelation {
     }
 }
 
+/// A point stood on a body's surface made, edited or removed (`Document::surface_points`).
+///
+/// The record alone, as [`SetSurfaceAxis`] is: the position it derives is the block's own `at`, set
+/// by the graph's commands or by the solve that follows any change.
+pub struct SetSurfacePoint {
+    point: NodeId,
+    before: Option<fieldform_scene::SurfacePoint>,
+    after: Option<fieldform_scene::SurfacePoint>,
+}
+
+impl SetSurfacePoint {
+    pub fn new(
+        point: NodeId,
+        before: Option<fieldform_scene::SurfacePoint>,
+        after: Option<fieldform_scene::SurfacePoint>,
+    ) -> Self {
+        Self { point, before, after }
+    }
+
+    pub fn insert(point: NodeId, record: fieldform_scene::SurfacePoint) -> Self {
+        Self::new(point, None, Some(record))
+    }
+
+    fn apply(&self, doc: &mut Document, state: &Option<fieldform_scene::SurfacePoint>) {
+        match state {
+            Some(record) => {
+                doc.surface_points.insert(self.point, *record);
+            }
+            None => {
+                doc.surface_points.remove(&self.point);
+            }
+        }
+    }
+}
+
+impl Command for SetSurfacePoint {
+    fn name(&self) -> &str {
+        "surface_point.set"
+    }
+
+    fn execute(&mut self, doc: &mut Document) -> Result<(), OpError> {
+        self.apply(doc, &self.after);
+        Ok(())
+    }
+
+    fn undo(&mut self, doc: &mut Document) -> Result<(), OpError> {
+        self.apply(doc, &self.before);
+        Ok(())
+    }
+}
+
 /// An axis stood on a body's surface made, edited or removed (`Document::surface_axes`).
 ///
 /// The record alone, as [`SetRelation`] is: the two points it derives are ordinary control points,
@@ -2134,6 +2185,31 @@ mod tests {
         }
         assert!(registry.build("cage.refine", &Args::new(), &d).is_err());
     }
+    /// Making a point on a surface, editing it and undoing both puts each record back.
+    #[test]
+    fn a_surface_point_is_made_edited_and_undone_as_a_record() {
+        use fieldform_scene::{Guide, GuideFrame, ParamRef, SurfacePoint};
+        let mut d = Document::new();
+        let point = fieldform_scene::NodeId::new();
+        let made = SurfacePoint {
+            body: fieldform_scene::NodeId::new(),
+            frame: GuideFrame::Body,
+            guide: Guide::Nearest { at: [ParamRef::Literal(1.0); 3] },
+            live: true,
+            solved: None,
+        };
+        let edited = SurfacePoint { live: false, ..made };
+        let mut make = SetSurfacePoint::insert(point, made);
+        let mut edit = SetSurfacePoint::new(point, Some(made), Some(edited));
+        make.execute(&mut d).unwrap();
+        edit.execute(&mut d).unwrap();
+        assert_eq!(d.surface_points.get(&point), Some(&edited));
+        edit.undo(&mut d).unwrap();
+        assert_eq!(d.surface_points.get(&point), Some(&made));
+        make.undo(&mut d).unwrap();
+        assert!(d.surface_points.is_empty());
+    }
+
 
     /// A surface axis is made, edited and removed through the stack, each reversing exactly: the
     /// record before is what an undo writes, and an edit's undo does not leave the edit's numbers.
@@ -2146,12 +2222,12 @@ mod tests {
             body: NodeId::from_raw(3),
             direction: Axis::Z,
             flipped: false,
-            u: 0.5,
-            v: 0.5,
-            length: 50.0,
+            u: fieldform_scene::ParamRef::Literal(0.5),
+            v: fieldform_scene::ParamRef::Literal(0.5),
+            length: fieldform_scene::ParamRef::Literal(50.0),
             seed: None,
         };
-        let edited = SurfaceAxis { u: 0.2, length: 12.0, ..made };
+        let edited = SurfaceAxis { u: fieldform_scene::ParamRef::Literal(0.2), length: fieldform_scene::ParamRef::Literal(12.0), ..made };
         let mut stack = CommandStack::default();
 
         stack.execute(&mut d, Box::new(SetSurfaceAxis::insert(curve, made))).unwrap();

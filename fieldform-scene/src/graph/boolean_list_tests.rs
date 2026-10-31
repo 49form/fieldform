@@ -15,8 +15,7 @@
         });
         graph.add(Node::Blend {
             op: BooleanOp::Difference,
-            a: ball.into(),
-            b: bore.into(),
+            inputs: vec![ball.into(), bore.into()],
             fillet: Fillet { radius: ParamRef::Literal(2.0), continuity: Continuity::G1, second: None },
         });
         assert!(graph.mark_critical(Critical { tolerance: 0.05, ..Critical::new(bore) }));
@@ -112,6 +111,30 @@
         for (id, node) in g.nodes() {
             assert_eq!(back.node(id), Some(node));
         }
+    }
+
+    /// **A blend of two is written as it always was, and a longer one adds `more`** (3.27): the
+    /// first two operands stay `a` and `b`, so every blend saved before the list existed is
+    /// byte-for-byte what it was, and a third and on -- an empty slot keeping its place as a
+    /// boolean's does -- come back in order.
+    #[test]
+    fn a_blend_of_two_writes_as_it_did_and_a_longer_one_round_trips_in_order() {
+        let fillet = Fillet { radius: ParamRef::Literal(2.0), continuity: Continuity::G1, second: None };
+        let mut g = Graph::empty();
+        let (a, b, c, d) = (g.add(sphere()), g.add(sphere()), g.add(sphere()), g.add(sphere()));
+        let pair = g.add(Node::Blend { op: BooleanOp::Difference, inputs: vec![a.into(), b.into()], fillet });
+        let json = serde_json::to_value(&g).unwrap();
+        let written = json.to_string();
+        assert!(!written.contains("\"more\""), "a pair writes no list: {written}");
+        assert!(serde_json::from_value::<Graph>(json).unwrap().node(pair) == g.node(pair));
+
+        let listed = g.add(Node::Blend {
+            op: BooleanOp::Union,
+            inputs: vec![c.into(), d.into(), a.into(), Operand::empty(), b.into()],
+            fillet,
+        });
+        let back: Graph = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
+        assert_eq!(back.node(listed), g.node(listed), "five operands, a hole among them, in order");
     }
 
     /// The pair spelling is not read. Deliberately: a build that read `a` and `b` into a

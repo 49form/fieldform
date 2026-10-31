@@ -766,6 +766,26 @@ impl Footprint {
         }
     }
 
+    /// How fast the section's boundary moves for each millimetre `offset_by` moves its walls:
+    /// one where the corners are rounded, and the longest mitre vector where they are mitred.
+    ///
+    /// **What a draft's divisor has to be multiplied by.** A wall moves out along its own normal
+    /// at the offset's rate, but a mitred corner moves along its mitre `m`, `|m|` times as fast
+    /// -- √2 at a right angle, up to the mitre limit at a needle -- and the walk's reading changes no
+    /// faster than the fastest point of the boundary it walks. Divided by the walls' rate alone, a
+    /// square drafted outward 25° claimed 0.495 mm more room than there was outside a corner. A
+    /// wall is never mitred (refused upstream), so it moves at the walls' rate.
+    pub(crate) fn mitre_rate(&self, corners: fieldform_scene::Corners) -> f64 {
+        match self {
+            Footprint::Closed(profile) if !corners.is_default() => profile
+                .miters()
+                .iter()
+                .map(|m| m.norm())
+                .fold(1.0f64, f64::max),
+            _ => 1.0,
+        }
+    }
+
     /// The section scaled by `scale` about the origin and pushed out by `offset`: what a
     /// tapered sweep reads at a station. `scale · d(q / scale)` is the exact distance to the
     /// scaled section, and taking `offset` off it is the exact distance to its outward contour
@@ -783,17 +803,51 @@ impl Footprint {
     /// deepest point and never invent one. What a draft that narrows the section is held to
     /// (`sweep-v2-spec.md` §2, by way of `round-chamfer-spec.md` §4's proxy): past this the
     /// section has closed before the end of the path.
+    ///
+    /// **Then climbed from the deepest sample**, a compass search that halves its step, so a
+    /// section whose middle falls between samples -- an arm whose half-thickness is not a whole
+    /// number of them -- is not reported shallower by most of a sample. Every value it keeps is
+    /// a reading at a real point, so the answer is still never deeper than the section: still a
+    /// floor, only a closer one.
     pub(crate) fn depth(&self) -> f64 {
         let (lo, hi) = self.bounds();
         let n = 48;
         let mut deepest = 0.0f64;
+        let mut at = Point2::new(0.5 * (lo.x + hi.x), 0.5 * (lo.y + hi.y));
         for i in 0..=n {
             for j in 0..=n {
                 let q = Point2::new(
                     lo.x + (hi.x - lo.x) * i as f64 / n as f64,
                     lo.y + (hi.y - lo.y) * j as f64 / n as f64,
                 );
-                deepest = deepest.min(self.distance(q));
+                let d = self.distance(q);
+                if d < deepest {
+                    deepest = d;
+                    at = q;
+                }
+            }
+        }
+        if deepest < 0.0 {
+            let size = (hi - lo).norm();
+            let mut step = (hi.x - lo.x).max(hi.y - lo.y) / n as f64;
+            let toward = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0), (1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)];
+            for _ in 0..400 {
+                if step <= size * 1e-10 {
+                    break;
+                }
+                let better = toward
+                    .iter()
+                    .map(|&(x, y)| at + nalgebra::Vector2::new(x, y) * step)
+                    .map(|q| (q, self.distance(q)))
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .filter(|(_, d)| *d < deepest);
+                match better {
+                    Some((q, d)) => {
+                        at = q;
+                        deepest = d;
+                    }
+                    None => step *= 0.5,
+                }
             }
         }
         -deepest

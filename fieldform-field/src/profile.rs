@@ -1731,7 +1731,8 @@ impl ScalarField for SkewExtrusion {
         );
         let plane =
             self.footprint.offset_by(Point2::new(landed.x, landed.y), grown, self.corners);
-        let steepest = steepest_tangent(self.draft_tangent, self.depth);
+        let steepest = steepest_tangent(self.draft_tangent, self.depth)
+            * self.footprint.mitre_rate(self.corners);
         // **The larger, unless there is no shear to lose.** `Extrusion` may take the corner
         // outside both faces, because there the profile's distance and the slab's are measured
         // along perpendicular directions and Pythagoras is exact. A shear is precisely the loss
@@ -1857,7 +1858,10 @@ impl Extrusion {
     /// Closed form, so the error is *known* rather than bounded by hope: at five degrees of
     /// draft the field reads 0.4% long before the correction and nothing after it.
     fn honesty(&self) -> f64 {
-        1.0 / extrude_divisor(1.0, steepest_tangent(self.draft_tangent, self.depth))
+        1.0 / extrude_divisor(
+            1.0,
+            steepest_tangent(self.draft_tangent, self.depth) * self.footprint.mitre_rate(self.corners),
+        )
     }
 }
 
@@ -1993,7 +1997,8 @@ impl ScalarField for Extrusion {
         // *perpendicular* measurements, and a draft tilts one of them out of square with the
         // other. Same reason `SkewExtrusion` takes the larger — see the note there, which cost
         // eight millimetres to learn.
-        let steepest = steepest_tangent(self.draft_tangent, self.depth);
+        let steepest = steepest_tangent(self.draft_tangent, self.depth)
+            * self.footprint.mitre_rate(self.corners);
         // **A rounded or chamfered rim is the blend's own bound across the two** -- see
         // `Rim::join`, which says why it needs no divisor the draft did not already bring.
         let combined = if !self.rims.is_hard() {
@@ -2221,6 +2226,29 @@ mod tests {
             Point2::new(-half, half),
         ])
         .expect("a square is a profile")
+    }
+
+    /// **A mitred narrowing holds until an edge shrinks away**: a square of half-side 10 closes
+    /// to a point at an offset of 10 inward and no sooner; a 40 × 4 bar's short ends vanish at 2;
+    /// growing, a convex outline never crosses.
+    #[test]
+    fn a_mitred_narrowing_fails_where_an_edge_shrinks_away() {
+        let crossing = |p: &Profile, sign: f64, limit: f64| {
+            crate::draft_crossing::mitre_crossing(p.points(), p.miters(), sign, limit)
+        };
+        let sq = square(10.0);
+        assert_eq!(crossing(&sq, -1.0, 9.0), None);
+        assert!((crossing(&sq, -1.0, 12.0).expect("closes") - 10.0).abs() < 1e-6);
+        assert_eq!(crossing(&sq, 1.0, 5.0), None);
+        let bar = Profile::new(vec![
+            Point2::new(-20.0, -2.0),
+            Point2::new(20.0, -2.0),
+            Point2::new(20.0, 2.0),
+            Point2::new(-20.0, 2.0),
+        ])
+        .unwrap();
+        assert!((crossing(&bar, -1.0, 5.0).expect("ends vanish") - 2.0).abs() < 1e-6);
+        assert_eq!(crossing(&bar, -1.0, 1.9), None);
     }
 
     /// Two curves meeting at both ends, plus a stray line, and a document holding them.

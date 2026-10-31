@@ -152,17 +152,13 @@ impl MeshField {
     /// regardless of level, and `levels` only controls how closely the *distance* field
     /// tracks the true surface between sample points.
     pub fn from_cage(cage: &Cage, levels: usize) -> Result<Self, CageError> {
-        let mut limit_surface = fieldform_subd::LimitSurface::new(cage);
-        let fieldform_subd::Tessellation {
-            positions,
-            normals,
-            triangles,
-            // Where on the surface each triangle came from. A distance field does not need it —
-            // it answers "how far", and the parametric position is a different question, asked
-            // by the conformal cell map through `SurfaceMap`.
-            ..
-        } = limit_surface.tessellate(levels);
-        Ok(Self::from_triangles(positions, normals, triangles))
+        // The tessellation the self-intersection check reads too, built once for both when they
+        // overlap (`shared_tessellation`): the check judges exactly the surface this field is
+        // made from. Only the positions, normals and triangles are taken -- where on the surface
+        // each triangle came from is a different question, asked by the conformal cell map
+        // through `SurfaceMap`.
+        let shared = crate::shared_tessellation(cage, levels);
+        Ok(Self::from_triangles(shared.positions.clone(), shared.normals.clone(), shared.triangles.clone()))
     }
 
     /// Builds the field from an arbitrary closed triangle mesh — an import, rather than a cage.

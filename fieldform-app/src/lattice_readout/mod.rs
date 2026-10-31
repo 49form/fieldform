@@ -1212,6 +1212,8 @@ pub(crate) fn changes_the_cells(consumer: &Node, from: NodeId) -> bool {
         Node::Attract { input, .. } => input.source() == Some(from),
         // A rigid move and a uniform scale keep every ratio a density is.
         Node::Transform { .. } => false,
+        // And a scale of one factor is one; three factors stretch the cells unevenly.
+        Node::Scale { factors, .. } => fieldform_scene::uniform_factor(factors).is_none(),
         // They clip, place or join: material changes only where two operands meet, which a
         // per-cell figure does not describe, and the hover says that rather than calling them
         // rigid -- a pattern's union can be rounded, and overlapping copies are not one cell.
@@ -1237,6 +1239,9 @@ pub(crate) fn changes_the_cells(consumer: &Node, from: NodeId) -> bool {
         | Node::Point { .. }
         | Node::Torus { .. }
         | Node::Capsule { .. }
+        | Node::Coil { .. }
+        | Node::Thread { .. }
+        | Node::Hole { .. }
         | Node::Pipe { .. }
         | Node::Sweep { .. }
         | Node::Loft { .. } => false,
@@ -1294,6 +1299,7 @@ fn block_name(doc: &Document, id: NodeId, node: &Node) -> String {
         Node::Blend { .. } => "Blend",
         Node::Pattern { .. } => "Pattern",
         Node::Mirror { .. } => "Mirror",
+        Node::Scale { .. } => "Scale",
         Node::Transform { .. } => "Placement",
         Node::Unknown(_) => "Unreadable",
         _ => "block",

@@ -438,7 +438,7 @@ mod tests {
         let mut graph = Graph::empty();
         let a = slab(&mut graph, -40.0, 10.0);
         let b = slab(&mut graph, -10.0, 40.0);
-        let blend = graph.add(Node::Blend { op: BooleanOp::Union, a: a.into(), b: b.into(), fillet: fillet(k) });
+        let blend = graph.add(Node::Blend { op: BooleanOp::Union, inputs: vec![a.into(), b.into()], fillet: fillet(k) });
         graph.mark_critical(Critical::new(a));
 
         let reports = verify_unprotected(&Document::new(), &graph, 1e-3).expect("compiles");
@@ -464,13 +464,13 @@ mod tests {
         let mut graph = Graph::empty();
         let a = slab(&mut graph, -40.0, 10.0);
         let b = slab(&mut graph, -10.0, 40.0);
-        let body = graph.add(Node::Blend { op: BooleanOp::Union, a: a.into(), b: b.into(), fillet: fillet(3.0) });
+        let body = graph.add(Node::Blend { op: BooleanOp::Union, inputs: vec![a.into(), b.into()], fillet: fillet(3.0) });
         let boss = graph.add(Node::Sphere {
             centre: Place::At([lit(30.0), lit(0.0), lit(0.0)]),
             radius: lit(6.0),
         });
         let bossed =
-            graph.add(Node::Blend { op: BooleanOp::Union, a: body.into(), b: boss.into(), fillet: fillet(2.0) });
+            graph.add(Node::Blend { op: BooleanOp::Union, inputs: vec![body.into(), boss.into()], fillet: fillet(2.0) });
         let bore = graph.add(Node::Cylinder { edge: Default::default(),
             ends: fieldform_scene::Ends::between(
                 Place::At([lit(0.0), lit(0.0), lit(-30.0)]),
@@ -480,8 +480,7 @@ mod tests {
         });
         let drilled = graph.add(Node::Blend {
             op: BooleanOp::Difference,
-            a: bossed.into(),
-            b: bore.into(),
+            inputs: vec![bossed.into(), bore.into()],
             fillet: fillet(1.5),
         });
         graph.mark_critical(Critical::new(bore));
@@ -527,7 +526,7 @@ mod tests {
             centre: Place::At([lit(104.0), lit(0.0), lit(0.0)]),
             radius: lit(5.0),
         });
-        graph.add(Node::Blend { op: BooleanOp::Union, a: placed.into(), b: other.into(), fillet: fillet(1.0) });
+        graph.add(Node::Blend { op: BooleanOp::Union, inputs: vec![placed.into(), other.into()], fillet: fillet(1.0) });
         graph.mark_critical(Critical::new(inner));
         let report = &verify_critical(&Document::new(), &graph, 1e-3).expect("compiles")[0];
         assert_eq!(report.verdict(), Verdict::NoPatch);

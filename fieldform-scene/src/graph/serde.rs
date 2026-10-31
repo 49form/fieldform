@@ -10,7 +10,8 @@ use super::{
 use crate::graph::Operand;
 use crate::Frame;
 use crate::{
-    AngleSides, Corners, LoftSmooth, Outline, Sides, Sweep, SweepLaw, Taper, WallEnds, WallSide,
+    AngleSides, CoilSection, CoilSize, Corners, HoleDepth, HoleKind, HoleTip, LoftSmooth, Outline,
+    Sides, Sweep, SweepLaw, Taper, WallEnds, WallSide,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -728,6 +729,76 @@ impl Serialize for Node {
                 ("start_radius", json(start_radius)?),
                 ("end_radius", json(end_radius)?),
             ]),
+            // The size's two numbers under their own names beside the pair's tag, so a file
+            // reads `turns` and `pitch` rather than a nested object, as the console does.
+            Node::Coil { frame, diameter, size, section, hand } => {
+                let (first, second) = size.pair();
+                let (a, b) = match size {
+                    CoilSize::TurnsPitch { .. } => ("turns", "pitch"),
+                    CoilSize::HeightPitch { .. } => ("height", "pitch"),
+                    CoilSize::TurnsHeight { .. } => ("turns", "height"),
+                };
+                json_object([
+                    (KIND, json(&"coil")?),
+                    ("frame", json(frame)?),
+                    ("diameter", json(diameter)?),
+                    ("size", json(&size.name())?),
+                    (a, json(first)?),
+                    (b, json(second)?),
+                    ("section", json(&section.name())?),
+                    ("wire", json(section.wire())?),
+                    ("hand", json(hand)?),
+                ])
+            }
+            // Flat, as the console reads it: the type under `hole` (the node's own tag is `kind`),
+            // its sizes under their own names, and `depth` or `through`, `tip` and its angle.
+            Node::Hole { ends, kind, depth, tip } => {
+                let mut fields: Vec<(&str, Value)> =
+                    vec![(KIND, json(&"hole")?), ("ends", json(ends)?), ("hole", json(&kind.name())?)];
+                match kind {
+                    HoleKind::Simple { diameter } => fields.push(("diameter", json(diameter)?)),
+                    HoleKind::Counterbore { diameter, bore_diameter, bore_depth } => {
+                        fields.push(("diameter", json(diameter)?));
+                        fields.push(("bore_diameter", json(bore_diameter)?));
+                        fields.push(("bore_depth", json(bore_depth)?));
+                    }
+                    HoleKind::Countersink { diameter, sink_diameter, sink_angle } => {
+                        fields.push(("diameter", json(diameter)?));
+                        fields.push(("sink_diameter", json(sink_diameter)?));
+                        fields.push(("sink_angle", json(sink_angle)?));
+                    }
+                    HoleKind::Tapped { designation, thread_depth, clearance } => {
+                        fields.push(("designation", json(designation)?));
+                        fields.push(("thread_depth", json(thread_depth)?));
+                        fields.push(("clearance", json(clearance)?));
+                    }
+                }
+                match depth {
+                    HoleDepth::Blind(d) => fields.push(("depth", json(d)?)),
+                    HoleDepth::Through => fields.push(("through", json(&true)?)),
+                }
+                match tip {
+                    HoleTip::Flat => fields.push(("tip", json(&"flat")?)),
+                    HoleTip::Drill(angle) => {
+                        fields.push(("tip", json(&"drill")?));
+                        fields.push(("tip_angle", json(angle)?));
+                    }
+                }
+                json_fields(fields)
+            }
+            Node::Thread { frame, major, pitch, length, hand, clearance, designation } => json_fields(
+                [
+                    (KIND, json(&"thread")?),
+                    ("frame", json(frame)?),
+                    ("major", json(major)?),
+                    ("pitch", json(pitch)?),
+                    ("length", json(length)?),
+                    ("hand", json(hand)?),
+                    ("clearance", json(clearance)?),
+                ]
+                .into_iter()
+                .chain(designation.as_ref().map(|d| json(d).map(|v| ("designation", v))).transpose()?),
+            ),
             Node::Sweep { outline, spine, section, law, rims } => json_fields(
                 [(KIND, json(&"sweep")?)]
                     .into_iter()
@@ -764,7 +835,11 @@ impl Serialize for Node {
             // code and two fields on disk, which is deliberate: making it a nested object would
             // move every blend ever saved for no gain, and the format's job is to be stable
             // rather than to mirror the types.
-            Node::Blend { op, a, b, fillet } => json_fields(
+            // **Two operands write as they always did, `a` and `b`; a third and on go in
+            // `more`** (3.27), written only where there is one, so every blend saved before it is
+            // byte-for-byte what it was, and a 3.26 build keeps a longer one as a block it cannot
+            // read rather than drawing the first two and dropping the rest.
+            Node::Blend { op, inputs, fillet } => json_fields(
                 [
                     (KIND, json(&"blend")?),
                     ("op", json(op)?),
@@ -775,8 +850,9 @@ impl Serialize for Node {
                 // A chamfer's second leg, 3.22's, written only where there is one: every blend
                 // written before it is written as it was.
                 .chain(fillet.second.as_ref().map(|s| json(s).map(|v| ("second", v))).transpose()?)
-                .chain(slot_field("a", a)?)
-                .chain(slot_field("b", b)?),
+                .chain(slot_field("a", inputs.first().unwrap_or(&Operand::empty()))?)
+                .chain(slot_field("b", inputs.get(1).unwrap_or(&Operand::empty()))?)
+                .chain(if inputs.len() > 2 { Some(("more", slots_array(&inputs[2..])?)) } else { None }),
             ),
             Node::Morph { a, b, t } => json_fields(
                 [(KIND, json(&"morph")?), ("t", json(t)?)]
@@ -914,6 +990,15 @@ impl Serialize for Node {
                     (KIND, json(&"mirror")?),
                     ("frame", json(frame)?),
                     ("join", json(join)?),
+                ]
+                .into_iter()
+                .chain(slot_field("input", input)?),
+            ),
+            Node::Scale { input, factors, frame } => json_fields(
+                [
+                    (KIND, json(&"scale")?),
+                    ("factors", json(factors)?),
+                    ("frame", json(frame)?),
                 ]
                 .into_iter()
                 .chain(slot_field("input", input)?),
@@ -1060,6 +1145,16 @@ impl<'de> Deserialize<'de> for Node {
             "plane" => &[KIND, "origin", "flipped", "turn"],
             "point" => &[KIND, "at"],
             "capsule" => &[KIND, "ends", "start_radius", "end_radius"],
+            // Format 3.24's two helical blocks. A coil carries the two of its three size
+            // numbers its `size` tag names, never all three.
+            "coil" => &[KIND, "frame", "diameter", "size", "turns", "pitch", "height", "section", "wire", "hand"],
+            "thread" => &[KIND, "frame", "major", "pitch", "length", "hand", "clearance", "designation"],
+            // Format 3.25's hole: the type's own sizes under their names, never another type's.
+            "hole" => &[
+                KIND, "ends", "hole", "diameter", "bore_diameter", "bore_depth", "sink_diameter",
+                "sink_angle", "designation", "thread_depth", "clearance", "depth", "through", "tip",
+                "tip_angle",
+            ],
             "pipe" => &[KIND, "curve", "radius"],
             // A wall is a different set of fields and not more of them, here as on an extrude
             // and for the reason given there.
@@ -1111,7 +1206,7 @@ impl<'de> Deserialize<'de> for Node {
             // `rims`, `rims_continuity` and `rims_at` are 3.21's on a revolve.
             "revolve" => &[KIND, "profile", "frame", "angle", "symmetric", "angle_2", "rims", "rims_continuity", "rims_at", "rims_second"],
             // `second` is 3.22's: a chamfer's second leg.
-            "blend" => &[KIND, "op", "a", "b", "radius", "continuity", "second"],
+            "blend" => &[KIND, "op", "a", "b", "more", "radius", "continuity", "second"],
             "boolean" => &[KIND, "op", "inputs"],
             "morph" => &[KIND, "a", "b", "t"],
             "transform" => &[KIND, "input", "translation", "rotation", "scale", "about"],
@@ -1123,6 +1218,7 @@ impl<'de> Deserialize<'de> for Node {
                 KIND, "input", "frame", "plane", "axis", "origin", "plane_node", "join",
             ],
             "twist" => &[KIND, "input", "degrees_per_mm", "frame", "axis", "origin"],
+            "scale" => &[KIND, "input", "factors", "frame", "axis", "origin"],
             "attract" => &[KIND, "input", "curve", "point", "strength", "falloff"],
             "ramp" => &[KIND, "input", "in_min", "in_max", "out_min", "out_max", "shape"],
             "shell" => &[KIND, "input", "thickness"],
@@ -1438,6 +1534,107 @@ impl<'de> Deserialize<'de> for Node {
                 start_radius: read(kind, "start_radius", field("start_radius")?)?,
                 end_radius: read(kind, "end_radius", field("end_radius")?)?,
             },
+            "coil" => {
+                // The pair's tag decides which two numbers are required, as a lattice's map
+                // does, so a file naming one pair and carrying another's numbers is refused by
+                // name rather than read as a coil nobody typed.
+                let tag: String = read(kind, "size", field("size")?)?;
+                let size = match tag.as_str() {
+                    "turns_pitch" => CoilSize::TurnsPitch {
+                        turns: read(kind, "turns", field("turns")?)?,
+                        pitch: read(kind, "pitch", field("pitch")?)?,
+                    },
+                    "height_pitch" => CoilSize::HeightPitch {
+                        height: read(kind, "height", field("height")?)?,
+                        pitch: read(kind, "pitch", field("pitch")?)?,
+                    },
+                    "turns_height" => CoilSize::TurnsHeight {
+                        turns: read(kind, "turns", field("turns")?)?,
+                        height: read(kind, "height", field("height")?)?,
+                    },
+                    other => {
+                        return Err(D::Error::custom(format!(
+                            "coil node's \"size\": {other:?} is not turns_pitch, height_pitch or turns_height"
+                        )))
+                    }
+                };
+                let shape: String = read(kind, "section", field("section")?)?;
+                let wire: ParamRef = read(kind, "wire", field("wire")?)?;
+                let section = match shape.as_str() {
+                    "circle" => CoilSection::Circle { wire },
+                    "square" => CoilSection::Square { wire },
+                    other => {
+                        return Err(D::Error::custom(format!(
+                            "coil node's \"section\": {other:?} is not circle or square"
+                        )))
+                    }
+                };
+                Node::Coil {
+                    frame: read_frame(kind, object)?,
+                    diameter: read(kind, "diameter", field("diameter")?)?,
+                    size,
+                    section,
+                    hand: read(kind, "hand", field("hand")?)?,
+                }
+            }
+            "hole" => {
+                let tag: String = read(kind, "hole", field("hole")?)?;
+                let hole = match tag.as_str() {
+                    "simple" => HoleKind::Simple { diameter: read(kind, "diameter", field("diameter")?)? },
+                    "counterbore" => HoleKind::Counterbore {
+                        diameter: read(kind, "diameter", field("diameter")?)?,
+                        bore_diameter: read(kind, "bore_diameter", field("bore_diameter")?)?,
+                        bore_depth: read(kind, "bore_depth", field("bore_depth")?)?,
+                    },
+                    "countersink" => HoleKind::Countersink {
+                        diameter: read(kind, "diameter", field("diameter")?)?,
+                        sink_diameter: read(kind, "sink_diameter", field("sink_diameter")?)?,
+                        sink_angle: read(kind, "sink_angle", field("sink_angle")?)?,
+                    },
+                    "tapped" => HoleKind::Tapped {
+                        designation: read(kind, "designation", field("designation")?)?,
+                        thread_depth: read(kind, "thread_depth", field("thread_depth")?)?,
+                        clearance: read(kind, "clearance", field("clearance")?)?,
+                    },
+                    other => {
+                        return Err(D::Error::custom(format!(
+                            "hole node's \"hole\": {other:?} is not simple, counterbore, countersink or tapped"
+                        )))
+                    }
+                };
+                // Through when it says so; otherwise a depth is required, so a file that says
+                // neither is refused by name rather than read as a depth nobody typed.
+                let through = match object.get("through") {
+                    Some(v) => read::<bool, D::Error>(kind, "through", v)?,
+                    None => false,
+                };
+                let depth = if through {
+                    HoleDepth::Through
+                } else {
+                    HoleDepth::Blind(read(kind, "depth", field("depth")?)?)
+                };
+                let shape: String = read(kind, "tip", field("tip")?)?;
+                let tip = match shape.as_str() {
+                    "flat" => HoleTip::Flat,
+                    "drill" => HoleTip::Drill(read(kind, "tip_angle", field("tip_angle")?)?),
+                    other => {
+                        return Err(D::Error::custom(format!("hole node's \"tip\": {other:?} is not flat or drill")))
+                    }
+                };
+                Node::Hole { ends: read(kind, "ends", field("ends")?)?, kind: hole, depth, tip }
+            }
+            "thread" => Node::Thread {
+                frame: read_frame(kind, object)?,
+                major: read(kind, "major", field("major")?)?,
+                pitch: read(kind, "pitch", field("pitch")?)?,
+                length: read(kind, "length", field("length")?)?,
+                hand: read(kind, "hand", field("hand")?)?,
+                clearance: read(kind, "clearance", field("clearance")?)?,
+                designation: match object.get("designation") {
+                    Some(v) => Some(read(kind, "designation", v)?),
+                    None => None,
+                },
+            },
             "extrude" => Node::Extrude {
                 outline: read_outline(kind, object)?,
                 sweep: read_sweep(kind, object)?,
@@ -1516,8 +1713,13 @@ impl<'de> Deserialize<'de> for Node {
             }
             "blend" => Node::Blend {
                 op: read(kind, "op", field("op")?)?,
-                a: slot("a")?,
-                b: slot("b")?,
+                inputs: {
+                    let mut inputs = vec![slot("a")?, slot("b")?];
+                    if object.contains_key("more") {
+                        inputs.extend(slot_list("more")?);
+                    }
+                    inputs
+                },
                 fillet: Fillet {
                     radius: read(kind, "radius", field("radius")?)?,
                     continuity: read(kind, "continuity", field("continuity")?)?,
@@ -1628,6 +1830,11 @@ impl<'de> Deserialize<'de> for Node {
                 input: slot("input")?,
                 frame: read_frame(kind, object)?,
                 join: read(kind, "join", field("join")?)?,
+            },
+            "scale" => Node::Scale {
+                input: slot("input")?,
+                factors: read(kind, "factors", field("factors")?)?,
+                frame: read_frame(kind, object)?,
             },
             "offset" => Node::Offset {
                 input: slot("input")?,

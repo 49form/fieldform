@@ -1416,6 +1416,22 @@ impl App {
             self.place_normal_axis(aspect, rect, pos);
             return;
         }
+        if axis == Some(AxisKind::Hole) {
+            self.place_hole_click(aspect, rect, pos);
+            return;
+        }
+        if let Some(AxisKind::Stand(id)) = axis {
+            self.stand_ends_click(id, aspect, rect, pos);
+            return;
+        }
+        if axis == Some(AxisKind::SurfacePoint) {
+            self.place_surface_point_click(crate::surface_point::Stand::Point, aspect, rect, pos);
+            return;
+        }
+        if axis == Some(AxisKind::SurfacePlane) {
+            self.place_surface_point_click(crate::surface_point::Stand::Plane, aspect, rect, pos);
+            return;
+        }
 
         let snapped = if snapping { self.placement_snap(aspect, rect, pos) } else { None };
         let (at, onto) = match snapped {
@@ -1548,7 +1564,12 @@ impl App {
         let normal_axis = self
             .pending_curve
             .as_ref()
-            .is_some_and(|p| p.axis == Some(AxisKind::Normal));
+            .is_some_and(|p| {
+                matches!(
+                    p.axis,
+                    Some(AxisKind::Normal | AxisKind::Hole | AxisKind::Stand(_) | AxisKind::SurfacePoint | AxisKind::SurfacePlane)
+                )
+            });
         let at = if normal_axis {
             self.normal_axis_landing(aspect, rect, cursor)
         } else {

@@ -687,6 +687,11 @@ impl App {
     /// Whatever was typed after its word -- `sphere radius=10 centre=40,0,0` -- is read before
     /// anything is added, so a refused key leaves no default block behind.
     pub(crate) fn add_primitive_with(&mut self, kind: PrimitiveKind, args: &Args) {
+        // `plane on=`: a plane standing on a point, or on a body's surface at a place.
+        if kind == PrimitiveKind::Plane && args.get("on").is_some() {
+            self.plane_on_surface_command(args);
+            return;
+        }
         let centre = [ParamRef::Literal(0.0); 3];
         let node = kind.node(centre, DEFAULT_BODY_MM);
         let node = match console_keys::primitive_with_keys(node, &kind.word(), args, &|t| self.lookup(t)) {
@@ -2718,13 +2723,7 @@ impl App {
         let mut graph = self.part_graph().clone();
         let node = match fillet {
             None => graph.add(Node::Boolean { op: self.boolean_op, inputs: inputs.clone() }),
-            Some(fillet) => {
-                if inputs.len() != 2 {
-                    self.warn("a fillet joins two bodies; union the rest first");
-                    return;
-                }
-                graph.add(Node::Blend { op: self.boolean_op, a: inputs[0], b: inputs[1], fillet })
-            }
+            Some(fillet) => graph.add(Node::Blend { op: self.boolean_op, inputs: inputs.clone(), fillet }),
         };
         // Checked before it is committed, not after. This is the click that makes a filleted
         // union, so it is the click D8 refuses, and refusing it here leaves the two bodies
@@ -3912,8 +3911,7 @@ mod tests {
         );
         let blend = graph.add(Node::Blend {
             op: BooleanOp::Union,
-            a: Operand::filled(ball),
-            b: Operand::filled(lattice),
+            inputs: vec![Operand::filled(ball), Operand::filled(lattice)],
             fillet: Fillet { radius: lit(2.0), continuity: Continuity::G1, second: None },
         });
         assert_eq!(

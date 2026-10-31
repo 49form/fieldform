@@ -5,7 +5,7 @@
 use super::{
     build_loft, corner_reach, draft_offset, ends_at, extrude_section, loft_parts, own_divisor,
     pattern_fillet, pattern_reach_in, placement_similarity, resolve_frame, resolve_place,
-    rotation_from_z, sweep_direction, sweep_law, sweep_offset, sweep_section, turn_rotation,
+    revolve_wedge, rotation_from_z, sweep_direction, sweep_law, sweep_offset, sweep_section, turn_rotation,
     wall_about_axis, wall_in_plane,
 };
 use crate::{Extent, PatternLayout};
@@ -103,6 +103,25 @@ pub(crate) fn place_at(
 ) -> Point3<f64> {
     let numbers = |r: &fieldform_scene::ParamRef| Some(resolve(r));
     resolve_place(document, graph, place, &numbers).unwrap_or_else(|_| Point3::origin())
+}
+
+/// A box in a frame's own coordinates, as the box of its eight corners placed in the world.
+fn framed_box(
+    document: &fieldform_scene::Document,
+    graph: &fieldform_scene::Graph,
+    frame: &fieldform_scene::Frame,
+    numbers: &dyn Fn(&fieldform_scene::ParamRef) -> Option<f64>,
+    (lo, hi): (Point3<f64>, Point3<f64>),
+) -> Extent {
+    let Ok((translation, rotation)) = resolve_frame(document, graph, frame, numbers) else {
+        return Extent::Empty;
+    };
+    let corners = (0..8).map(|i: usize| {
+        let pick = |bit: usize, a: f64, b: f64| if i >> bit & 1 == 1 { b } else { a };
+        let local = Vector3::new(pick(0, lo.x, hi.x), pick(1, lo.y, hi.y), pick(2, lo.z, hi.z));
+        Point3::from(rotation * local + translation)
+    });
+    Extent::around(corners, 0.0)
 }
 
 fn extent_of(
@@ -262,6 +281,40 @@ fn extent_of(
             },
             _ => Extent::Unbounded,
         },
+        // Each solid's own box about `+Z`, carried by its frame: the eight corners placed, and
+        // the box of them. A block that is refused bounds nothing.
+        Node::Coil { frame, diameter, size, section, hand } => {
+            let Ok(coil) = super::coil_of(diameter, size, section, *hand, &numbers) else {
+                return Extent::Empty;
+            };
+            framed_box(document, graph, frame, &numbers, coil.bounds())
+        }
+        Node::Thread { frame, major, pitch, length, hand, clearance, designation } => {
+            let Ok(thread) = super::thread_of(
+                major,
+                pitch,
+                length,
+                *hand,
+                clearance,
+                designation.as_deref(),
+                &numbers,
+            ) else {
+                return Extent::Empty;
+            };
+            framed_box(document, graph, frame, &numbers, thread.bounds())
+        }
+        // From the entry to the bottom, as wide as its widest step: the cylinder that holds it. A
+        // hole that goes through has no bottom, which is the one way it never falls short.
+        Node::Hole { ends, kind, depth, tip } => {
+            let Ok(hole) = super::hole_of(document, graph, ends, kind, depth, tip, &numbers) else {
+                return Extent::Empty;
+            };
+            let Some(bottom) = hole.section.bottom() else { return Extent::Unbounded };
+            let reach = hole.section.widest().max(hole.thread.map_or(0.0, |t| t.outer_radius()));
+            let end = hole.entry + hole.axis * bottom;
+            let top = hole.entry - hole.axis * hole.section.lead();
+            Extent::between(top, end, reach, reach)
+        }
         Node::Plane { .. } => Extent::Unbounded,
         // A zero-radius source. Its surface is the single point it sits at, and it encloses no
         // volume at all — so it draws nothing as a body, and bounds tightly as an operand.
@@ -414,13 +467,18 @@ fn extent_of(
         // two curves was boxed as the revolve of one of them: 11.7 mm of solid outside its box
         // (`tile-mask-design-01941c5.md` §1.8 R6). A wall adds its band, which reaches a
         // thickness past the curve and, across the axis, comes back as a radius on this side.
-        Node::Revolve { outline, frame, .. } => {
+        Node::Revolve { outline, frame, angle, sides, .. } => {
             let Ok((translation, rotation)) = resolve_frame(document, graph, frame, &numbers) else {
                 return Extent::Empty;
             };
             let into = |p: Point3<f64>| {
                 Point3::from(rotation.inverse_transform_vector(&(p.coords - translation)))
             };
+            // The half-plane the section lies in, which a partial revolve starts from -- read as
+            // the compile reads it -- and whether any of the section is across the axis, which
+            // a wall's band can be and which comes back half a turn round.
+            let starts_at;
+            let mut across = false;
             // The section as `(r, z)` points it does not reach past.
             let reach: Vec<(f64, f64)> = match outline {
                 fieldform_scene::Outline::Closed { profile } => {
@@ -428,6 +486,7 @@ fn extent_of(
                     else {
                         return Extent::Empty;
                     };
+                    starts_at = crate::Profile::azimuth(&found.points, into);
                     found
                         .points
                         .iter()
@@ -442,18 +501,23 @@ fn extent_of(
                     else {
                         return Extent::Empty;
                     };
+                    starts_at = crate::Profile::azimuth(&chain.points, into);
                     let Ok(wall) =
                         wall_about_axis(&chain, *curve, resolve(thickness), *side, *ends, into)
                     else {
                         return Extent::Empty;
                     };
                     let (lo, hi) = wall.bounds();
+                    across = lo.x < 0.0;
                     let r = lo.x.abs().max(hi.x.abs());
-                    vec![(r, lo.y), (r, hi.y)]
+                    // The nearest the band comes to the axis, nought where it crosses.
+                    vec![(r, lo.y), (r, hi.y), (lo.x.max(0.0), lo.y)]
                 }
             };
-            let (mut r_max, mut z_lo, mut z_hi) = (0.0f64, f64::INFINITY, f64::NEG_INFINITY);
+            let (mut r_min, mut r_max, mut z_lo, mut z_hi) =
+                (f64::INFINITY, 0.0f64, f64::INFINITY, f64::NEG_INFINITY);
             for &(r, z) in &reach {
+                r_min = r_min.min(r);
                 r_max = r_max.max(r);
                 z_lo = z_lo.min(z);
                 z_hi = z_hi.max(z);
@@ -461,12 +525,40 @@ fn extent_of(
             if !z_lo.is_finite() {
                 return Extent::Empty;
             }
+            // **A partial revolve is boxed as the sector it turns through**, not the ring: its
+            // material lies between the angles the compile's wedge does, so the box is that of an
+            // annular sector -- the two ends of each arc, and the outer arc wherever it crosses an
+            // axis of the frame. A section across the axis turns up half a turn round too, so it
+            // keeps the whole ring, as does anything whose angle does not read.
+            let sector = match revolve_wedge(document, angle, sides) {
+                Ok((from, total)) if total < 360.0 - 1e-9 && !across => {
+                    Some((starts_at + from.to_radians(), total.to_radians()))
+                }
+                _ => None,
+            };
+            let local_xy: Vec<(f64, f64)> = match sector {
+                None => vec![(-r_max, -r_max), (r_max, -r_max), (r_max, r_max), (-r_max, r_max)],
+                Some((a0, sweep)) => {
+                    let mut points = Vec::new();
+                    for a in [a0, a0 + sweep] {
+                        for r in [r_min, r_max] {
+                            points.push((r * a.cos(), r * a.sin()));
+                        }
+                    }
+                    let quarter = std::f64::consts::FRAC_PI_2;
+                    let mut k = (a0 / quarter).ceil();
+                    while k * quarter <= a0 + sweep {
+                        let a = k * quarter;
+                        points.push((r_max * a.cos(), r_max * a.sin()));
+                        k += 1.0;
+                    }
+                    points
+                }
+            };
             let mut out = Extent::Empty;
             for &z in &[z_lo, z_hi] {
-                for (dx, dy) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-                    let at = Point3::from(
-                        rotation * Vector3::new(dx * r_max, dy * r_max, z) + translation,
-                    );
+                for &(x, y) in &local_xy {
+                    let at = Point3::from(rotation * Vector3::new(x, y, z) + translation);
                     out = out.union(Extent::around([at, at], 0.0));
                 }
             }
@@ -482,7 +574,7 @@ fn extent_of(
             let Some(section) = sweep_section(document, outline, *spine) else {
                 return Extent::Empty;
             };
-            let reach = match sweep_law(document, law) {
+            let reach = match sweep_law(document, law).map(|law| section.law(law)) {
                 Ok(law) => {
                     let path = crate::Spine::of_curve(curve, crate::DEFAULT_TOLERANCE_MM);
                     law.reach_under(section.reach, path.length() * (law.window.1 - law.window.0))
@@ -579,7 +671,8 @@ fn extent_of(
         // their distance, and 13.4 mm of solid sat outside the box
         // (`tile-mask-design-01941c5.md` §1.8 R2). Asked as a threshold instead, each operand
         // grows by its own division and the arithmetic is the operand's rather than the join's.
-        Node::Blend { op, a, b, fillet } => {
+        Node::Blend { op, inputs, fillet } => {
+            let Some((first, rest)) = inputs.split_first() else { return Extent::Empty };
             // The largest radius a ramp can give it, where one drives it: the reach is what the
             // rounding can add, and a graded fillet adds its most somewhere.
             let k = super::lipschitz::fillet_reach(document, graph, fillet);
@@ -595,11 +688,22 @@ fn extent_of(
                 BooleanOp::Union => join_reach(k, 2, fillet.exponent()),
                 BooleanOp::Difference | BooleanOp::Intersection => 0.0,
             };
-            let carried = g * divisor + reach;
+            // **A list is the chain of joins it stands for**, each dividing by one step's share
+            // of `divisor` and adding its reach: the last operand is read where the top join
+            // carries the threshold, the one before it one join further down, and the first
+            // where the second is -- what nesting the pairs by hand would have asked of each.
+            let step = super::lipschitz::blend_step_divisor(document, graph, here, fillet);
+            let mut carried = g;
+            let mut parts = Vec::with_capacity(rest.len());
+            for input in rest.iter().rev() {
+                carried = carried * step + reach;
+                parts.push(below(input, carried));
+            }
+            let first = below(first, carried);
             return match op {
-                BooleanOp::Union => below(a, carried).union(below(b, carried)),
-                BooleanOp::Difference => below(a, carried).difference(),
-                BooleanOp::Intersection => below(a, carried).intersection(below(b, carried)),
+                BooleanOp::Union => parts.into_iter().fold(first, Extent::union),
+                BooleanOp::Difference => first.difference(),
+                BooleanOp::Intersection => parts.into_iter().fold(first, Extent::intersection),
             };
         }
         // The input read at `g + d`, which is what `f − d < g` says. An eroded body asks for less
@@ -734,6 +838,26 @@ fn extent_of(
             } else {
                 reflected
             };
+        }
+        Node::Scale { input, factors, frame } => {
+            // An unreadable frame or a factor the compile refuses: nothing will be drawn from
+            // this box, as for a mirror.
+            let Ok((origin, rotation)) = resolve_frame(document, graph, frame, &numbers) else {
+                return Extent::Empty;
+            };
+            let s = Vector3::new(resolve(&factors[0]), resolve(&factors[1]), resolve(&factors[2]));
+            let s_min = s.x.min(s.y).min(s.z);
+            if !(s_min > 0.0) {
+                return Extent::Empty;
+            }
+            // The value is `s_min` times the input's reading at the squeezed point, so a
+            // threshold of `g` out here is `g / s_min` in there — the same carrying a placement
+            // does with its one factor. The box comes back through the stretch itself: into the
+            // frame, each axis by its factor, and out again, corner by corner.
+            let centre = Point3::from(origin);
+            return below(input, g / s_min).placed(|p| {
+                centre + rotation * (rotation.inverse() * (p - centre)).component_mul(&s)
+            });
         }
         Node::Transform { input, .. } => {
             // Through the same similarity the compile builds, so a pivot cannot move the solid

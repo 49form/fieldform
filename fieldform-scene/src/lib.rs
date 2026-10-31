@@ -27,6 +27,8 @@ mod ends;
 mod expression;
 mod eye;
 mod frame;
+mod helix;
+mod hole;
 mod sweep;
 mod outline;
 mod corners;
@@ -40,12 +42,14 @@ mod mesh;
 mod ownership;
 pub mod relation;
 mod surface_axis;
+mod surface_point;
 mod output;
 mod unit;
 
 pub use curve::{Curve, CurveData, CurveError, JOINED_MM};
 pub use relation::{CurveEnd, End, JointContinuity, Relation, RelationError, RelationRecord};
-pub use surface_axis::SurfaceAxis;
+pub use surface_axis::{ResolvedSurfaceAxis, SurfaceAxis};
+pub use surface_point::{across, Facing, Guide, GuideFrame, Solved, SurfacePoint};
 pub use import::StepOptions;
 pub use document::{
     Document, ExpressionError, EyeFlag, ImportSettings, ImportSource, InputKind, InputPort,
@@ -61,7 +65,7 @@ pub use graph::{
     Axis, Banding, BooleanOp, CellMap, Continuity, Critical, Graph,
     LatticeCell,
     Fillet, LatticePhase, Node, Operand, ParamRef, PatternKind, RampShape, RimEnds, Rims,
-    UnknownNode,
+    UnknownNode, uniform_factor,
     Unrecognised,
     // The count resolver and its refusals. One way a `Node::Pattern`'s count becomes an integer,
     // reachable by every crate that reads one — see `pattern_count`.
@@ -71,6 +75,11 @@ pub use graph::{
 };
 pub use ends::Ends;
 pub use frame::Frame;
+pub use helix::{thread_designation, CoilSection, CoilSize, Hand, THREAD_TABLE};
+pub use hole::{
+    clearance_hole, clearances_of, counterbore_for, countersink_for, thread_cleared_by, thread_size,
+    Fit, HoleDepth, HoleKind, HoleTip, CLEARANCE_TABLE, COUNTERBORE_TABLE, COUNTERSINK_TABLE,
+};
 pub use sweep::{Section, Sweep};
 pub use outline::{Outline, WallEnds, WallSide};
 pub use corners::{Corners, MITRE_LIMIT};

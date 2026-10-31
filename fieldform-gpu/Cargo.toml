@@ -1,6 +1,6 @@
 [package]
 name = "fieldform-gpu"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 license = "MPL-2.0"
 authors = ["49form"]
@@ -28,5 +28,6 @@ march-stats = []
 # For examples that measure a real document rather than a synthetic one.
 fieldform-io.workspace = true
 fieldform-cage.workspace = true
+fieldform-subd.workspace = true
 serde_json.workspace = true
 image.workspace = true

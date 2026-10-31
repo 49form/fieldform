@@ -138,6 +138,50 @@ fn appended_faces(from: usize, to: usize) -> Vec<FaceId> {
     (from..to).map(FaceId::new).collect()
 }
 
+/// `count` rings through `edge`, evenly spaced along it at `k/(count+1)` from its first end -- or,
+/// for one ring, at `t` as given. The result carries the mesh and the new edges of every ring as
+/// positions, which is what a preview draws and does not depend on how the primitive numbered
+/// what it added.
+///
+/// Each ring is inserted on the mesh the one before it made, through the piece of the named edge
+/// that is left (from the last ring's vertex on it to the far end), so the k-th of `n` sits at
+/// `1/(n+2-k)` of that piece.
+pub fn insert_rings(mesh: &QuadMesh, edge: (VertexId, VertexId), t: f64, count: usize) -> Result<RingsResult, EditError> {
+    let mut mesh = mesh.clone();
+    let mut from = edge;
+    let mut ring_edges = Vec::new();
+    for k in 1..=count {
+        let s = if count == 1 { t } else { 1.0 / (count as f64 + 2.0 - k as f64) };
+        let (pa, pb) = (mesh.vertex_position(from.0), mesh.vertex_position(from.1));
+        let result = insert_ring(&mesh, from, s)?;
+        let new: std::collections::HashSet<VertexId> = result.new_vertices.iter().copied().collect();
+        for (p, q) in result.mesh.edges() {
+            if new.contains(&p) && new.contains(&q) {
+                ring_edges.push((result.mesh.vertex_position(p), result.mesh.vertex_position(q)));
+            }
+        }
+        // The ring's vertex on the named edge, found where the primitive put it.
+        let at = pa + (pb - pa) * s;
+        let on_edge = result
+            .new_vertices
+            .iter()
+            .copied()
+            .find(|&v| (result.mesh.vertex_position(v) - at).norm() < 1e-9)
+            .ok_or_else(|| EditError::refuse("the ring left no vertex on the edge it was asked through", Highlight::default()))?;
+        mesh = result.mesh;
+        from = (on_edge, from.1);
+    }
+    Ok(RingsResult { mesh, ring_edges })
+}
+
+/// What [`insert_rings`] made.
+#[derive(Debug, Clone)]
+pub struct RingsResult {
+    pub mesh: QuadMesh,
+    /// The new edges of every ring, as pairs of positions.
+    pub ring_edges: Vec<(Point3<f64>, Point3<f64>)>,
+}
+
 /// Splits every face of the edge ring through `edge` into two quads, with the new loop crossing
 /// each ring edge at `t` (spec §3.3).
 ///
@@ -826,6 +870,54 @@ pub fn bridge_faces(
         vertex_map: deleted.vertex_map,
         face_map: deleted.face_map,
     })
+}
+
+/// The pairs that zip two open rims together vertex for vertex, from `a` and `b` along (the weld's
+/// boundary mode): `a` moves onto `b`, then each vertex after `a` along its rim onto the one after
+/// `b` along its own, as far as both run.
+///
+/// The rims are walked in whichever of the two relative directions keeps the pairs closer
+/// together -- two facing rims of a tube run opposite ways round, and a slit's two lips meet from
+/// both ends -- and the walk stops where a vertex would be used twice, so a slit zips shut to its
+/// middle and no further. Whether the result is a valid mesh is the weld's to say.
+pub fn zip_pairs(mesh: &QuadMesh, a: VertexId, b: VertexId) -> Result<Vec<(VertexId, VertexId)>, EditError> {
+    let by_origin = mesh.boundary_by_origin();
+    let here = Highlight { vertices: vec![a, b], ..Highlight::default() };
+    if a == b {
+        return Err(EditError::refuse("a vertex cannot be zipped onto itself", here));
+    }
+    if !by_origin.contains_key(&a) || !by_origin.contains_key(&b) {
+        return Err(EditError::refuse("a zip starts from two vertices on open rims", here));
+    }
+    // The rim through `start`, in the direction the faces run it.
+    let rim = |start: VertexId| -> Vec<VertexId> {
+        let mut out = vec![start];
+        let mut v = mesh.destination(by_origin[&start]);
+        while v != start && out.len() <= mesh.vertex_count() {
+            out.push(v);
+            v = mesh.destination(by_origin[&v]);
+        }
+        out
+    };
+    let forward_a = rim(a);
+    let forward_b = rim(b);
+    let backward_b: Vec<VertexId> = std::iter::once(b).chain(forward_b.iter().skip(1).rev().copied()).collect();
+    let cost = |along: &[VertexId]| -> f64 {
+        forward_a.iter().zip(along).map(|(&x, &y)| (mesh.vertex_position(x) - mesh.vertex_position(y)).norm()).sum::<f64>()
+            / forward_a.len().min(along.len()).max(1) as f64
+    };
+    let other = if cost(&forward_b) <= cost(&backward_b) { forward_b } else { backward_b };
+    let mut used = std::collections::HashSet::new();
+    let mut pairs = Vec::new();
+    for (&x, &y) in forward_a.iter().zip(&other) {
+        if x == y || used.contains(&x) || used.contains(&y) {
+            break;
+        }
+        used.insert(x);
+        used.insert(y);
+        pairs.push((x, y));
+    }
+    Ok(pairs)
 }
 
 /// Merges each pair's first vertex into its second, which keeps its position (spec §3.3). The tool

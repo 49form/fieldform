@@ -348,8 +348,8 @@ impl App {
             if self.eye_flag(body) == EyeFlag::Hidden && !self.is_visible(body) {
                 return None;
             }
-            // No box means no handles: an unbounded body has no extent to turn or scale
-            // about, and a gizmo drawn at a guessed size would move it by a guessed amount.
+            // No box and no place of its own means no handles: such a body has nothing to turn
+            // or scale about, and a gizmo drawn at a guessed size would move it by a guessed amount.
             // A plane has no box to centre handles in, so it says where its own are: at the
             // point it passes through, turned to face the way it does. Without this the
             // manipulator refused a plane outright, which left the one primitive that most
@@ -379,16 +379,6 @@ impl App {
                     handles: gizmo::Handles::body(),
                 });
             }
-            let (lo, hi) = self.body_extent(body).as_box()?;
-            // `graph_extent` reads a cage node's own coordinates, which are not where it is
-            // drawn if something above it has been placed. Every other body kind already
-            // accounts for its placement there, because the placement *is* a node on the path.
-            let (lo, hi) = if self.is_active_cage_node(body) {
-                let p = self.cage_placement();
-                (p * lo, p * hi)
-            } else {
-                (lo, hi)
-            };
             // A cage or a pipe is moved by moving points — the cage's own, or the curve the
             // pipe is swept along — so both get the per-axis scale cubes. Squashing points
             // along one axis cannot cost the result its distance property, which is the only
@@ -424,10 +414,28 @@ impl App {
             // between its ends and the first is the one its block lists first. The box centre
             // remains for everything with no position of its own -- a boolean, a lattice, a
             // mesh, a cage -- which is every block a placement is the only way to move.
-            let anchor = self
-                .own_anchors(body)
-                .and_then(|a| a.first().copied())
-                .unwrap_or_else(|| nalgebra::center(&lo, &hi));
+            //
+            // **The anchor before the box, so a block with no box still has handles if it has a
+            // place of its own.** A through hole runs on for ever and has no box, but it goes in
+            // at a point, and moving or turning it about that point means exactly what it does
+            // for a blind one; only a block with neither stays without.
+            let anchor = match self.own_anchors(body).and_then(|a| a.first().copied()) {
+                Some(anchor) => anchor,
+                None => {
+                    let (lo, hi) = self.body_extent(body).as_box()?;
+                    // `graph_extent` reads a cage node's own coordinates, which are not where it
+                    // is drawn if something above it has been placed. Every other body kind
+                    // already accounts for its placement there, because the placement *is* a
+                    // node on the path.
+                    let (lo, hi) = if self.is_active_cage_node(body) {
+                        let p = self.cage_placement();
+                        (p * lo, p * hi)
+                    } else {
+                        (lo, hi)
+                    };
+                    nalgebra::center(&lo, &hi)
+                }
+            };
             (anchor, Rotation3::identity(), handles)
         };
 
@@ -924,7 +932,16 @@ impl App {
                     // Every anchor moves by the same vector, so a cylinder keeps its length and
                     // a cone keeps its taper: this is the block being moved, not reshaped.
                     gizmo::Motion::Translate(d) => {
-                        let moved: Vec<Point3<f64>> = before.iter().map(|p| p + d).collect();
+                        let mut moved: Vec<Point3<f64>> = before.iter().map(|p| p + d).collect();
+                        // A point on a surface is kept on it this instant, not snapped back when
+                        // the hand comes off: the handle says where the hand is, the surface says
+                        // where the point can be (`slide_surface_point`).
+                        if let [target] = moved[..]
+                            && self.doc.surface_points.get(node).is_some_and(|r| r.live)
+                            && let Some(on) = self.slide_surface_point(*node, target)
+                        {
+                            moved = vec![on];
+                        }
                         Self::set_own_anchors(&mut graph, *node, &moved);
                     }
                     // Turned about the gizmo's own pivot, which is the block's origin -- so a
@@ -1059,6 +1076,12 @@ impl App {
                     self.rebuild_render_resources();
                     return;
                 }
+                if let Some(to) = after.first().copied()
+                    && self.doc.surface_points.get(&node).is_some_and(|r| r.live)
+                {
+                    self.surface_point_dragged(node, to, before_graph);
+                    return;
+                }
                 let after_graph = self.part_graph().clone();
                 self.set_part_graph(before_graph.clone());
                 let cmd = Box::new(SetPartGraph::new(self.active_part, before_graph, after_graph));
@@ -1118,7 +1141,7 @@ impl App {
     /// before the drain hears of it. No name is owed by anything dropped: the wrap took over the
     /// body's readers and putting it back hands them back, so the body is let go or re-homed, or
     /// stays the variable it was, and nothing else is read by anything new.
-    fn put_back_pressed_graph(&mut self, before_graph: Graph) {
+    pub(crate) fn put_back_pressed_graph(&mut self, before_graph: Graph) {
         let heard = self.doc.pending_ownership_changes.len();
         self.set_part_graph(before_graph);
         self.doc.pending_ownership_changes.truncate(heard);
@@ -1165,8 +1188,13 @@ impl App {
                 }
                 self.rebuild_curve_display();
             }
-            GizmoTarget::Anchors { before_graph, .. }
-            | GizmoTarget::Depth { before_graph, .. }
+            GizmoTarget::Anchors { node, before_graph, .. } => {
+                // The answer the instants wrote goes back with the graph, or a plane on the point
+                // would stay turned the way the abandoned drag left it until the next solve.
+                self.cancel_slide(node);
+                self.put_back_pressed_graph(before_graph)
+            }
+            GizmoTarget::Depth { before_graph, .. }
             | GizmoTarget::Body { before_graph, .. } => self.put_back_pressed_graph(before_graph),
             // Put back where the gesture started, like the others. Nothing was committed, so
             // there is nothing on the stack to disagree with this.

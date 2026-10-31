@@ -566,8 +566,7 @@ fn t1_the_echo_of_a_gui_session_replays_to_the_same_graph() {
         {
             *n = Node::Blend {
                 op,
-                a,
-                b,
+                inputs: vec![a, b],
                 fillet: fieldform_scene::Fillet { radius: ParamRef::Literal(2.0), continuity: fieldform_scene::Continuity::G2, second: None },
             };
         }
@@ -1307,8 +1306,7 @@ fn with_no_floating_panel_the_pending_block_waits_in_the_list() {
 fn slots_of(app: &App, holder: &str) -> Vec<fieldform_scene::Operand> {
     let id = app.node_named(holder).expect("the holder is in the graph");
     match app.part_graph().node(id).expect("the holder's node") {
-        Node::Boolean { inputs, .. } => inputs.clone(),
-        Node::Blend { a, b, .. } => vec![*a, *b],
+        Node::Boolean { inputs, .. } | Node::Blend { inputs, .. } => inputs.clone(),
         Node::Shell { input, .. } => vec![*input],
         other => panic!("slots_of does not know {other:?}"),
     }
@@ -1538,8 +1536,7 @@ fn a_block_moved_to_a_sibling_slot_empties_only_the_slot_it_left() {
     app.completing_a_move = Some((cut, ball));
     let mut node = app.part_graph().node(cut).cloned().expect("the node");
     match &mut node {
-        Node::Boolean { inputs, .. } => inputs[1] = ball.into(),
-        Node::Blend { b, .. } => *b = ball.into(),
+        Node::Boolean { inputs, .. } | Node::Blend { inputs, .. } => inputs[1] = ball.into(),
         other => panic!("a boolean, not {other:?}"),
     }
     app.replace_node(cut, node);
@@ -1671,6 +1668,277 @@ fn a_cut_through_line_across_the_view_cuts_the_cube_in_one_loop() {
     assert!(app.cage_tool.as_ref().is_some_and(|t| t.knife.through.is_none()), "the line is spent; the knife stays armed");
 }
 
+/// **The knife's panel: Pick type, Offset mode and Offset read and write the active point, Angle
+/// increment and Cut Through faces validate their words** (`cage-tools-instructions.md` §1). A
+/// typed offset moves the active point along its own edge from the end the tick marks, in mm or
+/// as a fraction, and a drag along the same edge does the same by the pointer.
+#[test]
+fn the_knife_s_panel_reads_and_writes_the_active_point_s_offset() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cage");
+    frame(&mut app, Vec::new());
+    app.invoke_command(by("cage.cut"));
+    frame(&mut app, Vec::new());
+    assert!(app.cage_tool.as_ref().is_some_and(|t| t.command.op == "cage.cut"), "the knife is armed");
+
+    // Nothing placed yet: the panel's defaults, and no offset to read.
+    let rows = app.knife_panel_rows();
+    assert_eq!(rows.iter().map(|r| r.key).collect::<Vec<_>>(), vec!["pick_type", "offset_mode", "offset", "angle_increment", "cut_through_faces"]);
+    assert_eq!(rows[0].text, "both");
+    assert_eq!(rows[1].text, "mm");
+    assert_eq!(rows[2].text, "\u{2014}", "no active point yet");
+    assert_eq!(rows[3].text, "45");
+    assert_eq!(rows[4].text, "all");
+
+    // A word row refuses a word that is not one of its choices, and keeps the setting.
+    assert!(app.knife_panel_set("pick_type", "sideways").is_err());
+    app.knife_panel_set("pick_type", "edges").expect("a pick type");
+    assert_eq!(app.knife_panel_rows()[0].text, "edges");
+
+    // An edge point placed directly on the path (as the Cut Through test places its line),
+    // active at the end nearer where it would have been clicked.
+    let mesh = app.cage().clone();
+    let (a, b) = mesh.edges().next().expect("a cube has edges");
+    let v0 = mesh.vertex_ids().find(|&v| v != a && v != b).expect("a third vertex");
+    let len = (mesh.vertex_position(a) - mesh.vertex_position(b)).norm();
+    if let Some(tool) = app.cage_tool.as_mut() {
+        tool.knife.path = vec![fieldform_cage::edit::knife::CutPoint::Vertex(v0), fieldform_cage::edit::knife::CutPoint::Edge { edge: (a, b), t: 0.5 }];
+        tool.knife.active_ref_end = Some(a);
+    }
+    let offset = app.knife_panel_rows()[2].text.clone();
+    assert!((offset.parse::<f64>().unwrap() - len * 0.5).abs() < 1e-6, "half the edge in mm: {offset}");
+
+    // Fraction mode reads the same point as 0.5, not the millimetre length.
+    app.knife_panel_set("offset_mode", "fraction").expect("a mode");
+    assert_eq!(app.knife_panel_rows()[2].text, "0.5");
+
+    // A typed offset moves the point along its edge, from the end the tick marks -- here `a`,
+    // so a fraction of 0.25 is a quarter of the way from `a` to `b`.
+    app.knife_panel_set("offset", "0.25").expect("a number");
+    let t = app.cage_tool.as_ref().and_then(|t| t.knife.path.last().copied());
+    assert_eq!(t, Some(fieldform_cage::edit::knife::CutPoint::Edge { edge: (a, b), t: 0.25 }));
+
+    // Back to mm: a distance past the edge's own length is clamped to it rather than refused.
+    app.knife_panel_set("offset_mode", "mm").expect("a mode");
+    app.knife_panel_set("offset", &(len * 10.0).to_string()).expect("a number");
+    let t = app.cage_tool.as_ref().and_then(|t| t.knife.path.last().copied());
+    assert_eq!(t, Some(fieldform_cage::edit::knife::CutPoint::Edge { edge: (a, b), t: 1.0 }), "clamped to the far end");
+
+    // Angle increment and Cut Through faces: a bad word or number is refused and nothing changes.
+    assert!(app.knife_panel_set("angle_increment", "0").is_err(), "an increment of nought is refused");
+    assert!(app.knife_panel_set("cut_through_faces", "diagonal").is_err());
+    app.knife_panel_set("cut_through_faces", "front-facing").expect("a choice");
+    assert_eq!(app.knife_panel_rows()[4].text, "front-facing");
+
+    // A drag along the active point's own edge, on screen, slides it without reaching for the
+    // camera: `knife_drag_active` is what the viewport's drag handler calls once the press
+    // landed on the point (`knife_active_point_near`).
+    let rect = app.viewport_rect.expect("a frame sets the viewport");
+    let aspect = rect.width() / rect.height().max(1.0);
+    let placement = app.control_placement();
+    let project = |v: fieldform_cage::VertexId| app.camera.project_to_screen(aspect, rect, vertex_pos(&mesh, &placement, v));
+    if let (Some(sa), Some(sb)) = (project(a), project(b)) {
+        // The clamp above left the active point at `t=1.0`, on `b`: a pointer a few pixels off it
+        // is still near it.
+        let near_b = sb + (sa - sb) * 0.02;
+        assert!(app.knife_active_point_near(aspect, rect, near_b), "the active point, at b, is near a pointer beside it");
+        let three_quarters = sa + (sb - sa) * 0.75;
+        app.knife_drag_active(aspect, rect, three_quarters);
+        let t = app.cage_tool.as_ref().and_then(|t| t.knife.path.last().copied());
+        let Some(fieldform_cage::edit::knife::CutPoint::Edge { edge: dragged_edge, t: dragged_t }) = t else {
+            panic!("the active point is still an edge point: {t:?}");
+        };
+        assert_eq!(dragged_edge, (a, b));
+        assert!((dragged_t - 0.75).abs() < 1e-4, "dragged to three quarters along a-b: {dragged_t}");
+    }
+}
+
+/// **An extrude's panel offers `vertex_normals` as a direction**: each cap vertex goes along its own
+/// normal, so the panel's cap lands where the primitive's own extrude puts it, the distance row
+/// reads the same number back, and the kept line says the words and the distance.
+#[test]
+fn an_extrude_in_vertex_normals_lands_where_the_primitive_puts_it() {
+    use fieldform_cage::FaceId;
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cage");
+    frame(&mut app, Vec::new());
+    let cage = app.active_cage;
+    let before = app.doc.cage_body(cage).unwrap().mesh().clone();
+    // Two faces meeting at a cube edge: the vertices on that edge have a diagonal normal.
+    let faces = [FaceId::from_index(0), FaceId::from_index(2)];
+    for f in faces {
+        app.selection.toggle(Selection::Face(f));
+    }
+    app.invoke_command(by("cage.extrude"));
+    frame(&mut app, Vec::new());
+    assert!(app.cage_session.is_some());
+    app.cage_panel_set("direction", "vertex_normals").expect("a direction");
+    app.cage_panel_set("distance", "10").expect("a number");
+    frame(&mut app, Vec::new());
+    assert_eq!(app.cage_panel_rows()[0].text, "10", "the row reads the distance back along each vertex's own normal");
+
+    let want = fieldform_cage::edit::extrude::extrude(
+        &before,
+        &faces,
+        fieldform_cage::edit::extrude::Mode::Region,
+        fieldform_cage::edit::extrude::Direction::VertexNormals,
+        10.0,
+    )
+    .expect("the primitive extrudes it");
+    let session = app.cage_session.as_ref().unwrap();
+    let mesh = app.cage();
+    let straight = session.cap.iter().all(|&v| mesh.vertex_position(v).coords.iter().all(|c| c.is_finite()));
+    assert!(straight);
+    let mut got: Vec<[i64; 3]> = session.cap.iter().map(|&v| key_of(mesh.vertex_position(v))).collect();
+    let mut expected: Vec<[i64; 3]> = want.new_vertices.iter().map(|&v| key_of(want.mesh.vertex_position(v))).collect();
+    got.sort();
+    expected.sort();
+    assert_eq!(got, expected, "the cap stands where the primitive's extrude puts it");
+
+    let echoed = app.echo_log.len();
+    frame(&mut app, vec![key(egui::Key::Enter)]);
+    assert_eq!(&app.echo_log[echoed..], &["cageextrude faces=0,2 distance=10 direction=vertex_normals".to_string()]);
+
+    fn key_of(p: nalgebra::Point3<f64>) -> [i64; 3] {
+        [(p.x * 1e6).round() as i64, (p.y * 1e6).round() as i64, (p.z * 1e6).round() as i64]
+    }
+}
+
+/// **Insert Edge, Bridge and Weld have a settings window too**: Count and a typed offset (from the
+/// end nearer the pointer, millimetres or a fraction) for Insert Edge, Divisions for Bridge,
+/// Position for Weld. What they hold reaches the line the click commits (`count=`, `divisions=`,
+/// `at=`), and several rings come out evenly spaced as one undo step.
+#[test]
+fn the_click_tools_settings_reach_the_lines_they_commit() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cage");
+    frame(&mut app, Vec::new());
+    let mesh = app.cage().clone();
+    let (a, b) = mesh.edges().next().expect("a cube has edges");
+
+    // Insert Edge: the rows, a refused count, and a count that reaches the line.
+    app.invoke_command(by("cage.insert_ring"));
+    frame(&mut app, Vec::new());
+    let keys: Vec<&str> = app.cage_tool_panel_rows().iter().map(|r| r.key).collect();
+    assert_eq!(keys, vec!["count", "offset_mode", "offset"]);
+    assert!(app.cage_tool_panel_set("count", "0").is_err() && app.cage_tool_panel_set("count", "65").is_err());
+    app.cage_tool_panel_set("count", "3").expect("a count");
+    assert!(app.cage_tool_row_disabled("offset"), "an offset means nothing to several evenly spaced rings");
+    app.hover = Selection::Edge(a, b);
+    let line = app.ring_line().expect("an edge is hovered");
+    assert!(line.starts_with(&format!("insertring edge={}-{} t=", a.index(), b.index())) && line.ends_with(" count=3"), "{line}");
+    let faces = app.cage().face_count();
+    app.run_command(&line);
+    assert_eq!(app.cage().face_count(), faces + 12, "three rings of four faces each, as one step");
+    app.run_command("undo");
+    assert_eq!(app.cage().face_count(), faces, "one undo step");
+
+    // A typed offset overrides the pointer: a quarter in from the end nearer the pointer.
+    app.cage_tool_panel_set("count", "1").expect("a count");
+    app.cage_tool_panel_set("offset_mode", "fraction").expect("a mode");
+    assert!(app.cage_tool_panel_set("offset", "far").is_err());
+    app.cage_tool_panel_set("offset", "0.25").expect("an offset");
+    let rect = app.viewport_rect.expect("a frame sets the viewport");
+    let aspect = rect.width() / rect.height().max(1.0);
+    let placement = app.control_placement();
+    let project = |v: fieldform_cage::VertexId| app.camera.project_to_screen(aspect, rect, vertex_pos(&mesh, &placement, v));
+    let (sa, sb) = (project(a).unwrap(), project(b).unwrap());
+    app.hover = Selection::Edge(a, b);
+    app.cage_tool_hover(aspect, rect, Some(sa + (sb - sa) * 0.3), false, false, false);
+    let tool = app.cage_tool.as_ref().unwrap();
+    assert_eq!(tool.ref_end, Some(a), "the end nearer the pointer");
+    assert!((tool.t - 0.25).abs() < 1e-9, "a quarter from a: {}", tool.t);
+    app.hover = Selection::Edge(a, b);
+    app.cage_tool_hover(aspect, rect, Some(sa + (sb - sa) * 0.7), false, false, false);
+    let tool = app.cage_tool.as_ref().unwrap();
+    assert_eq!(tool.ref_end, Some(b));
+    assert!((tool.t - 0.75).abs() < 1e-9, "a quarter from b is three quarters from a: {}", tool.t);
+    app.cage_tool_panel_set("offset", "off").expect("cleared");
+    assert_eq!(app.cage_tool_panel_rows()[2].text, "\u{2014}");
+
+    // A press on the hovered edge is the tool's, a drag along it slides t, and the release
+    // commits where it was left; the pointer need not stay on the edge.
+    app.hover = Selection::Edge(a, b);
+    assert!(app.cage_tool_press(aspect, rect, sa + (sb - sa) * 0.5));
+    app.cage_tool_drag(aspect, rect, sa);
+    app.hover = Selection::None;
+    app.cage_tool_hover(aspect, rect, Some(sa + (sb - sa) * 0.8 + egui::vec2(0.0, 40.0)), false, false, false);
+    let t = app.cage_tool.as_ref().unwrap().t;
+    assert!(t > 0.7 && t < 0.9, "t follows the pointer along the pressed edge: {t}");
+    app.cage_tool_release();
+    assert_eq!(app.cage().face_count(), faces + 4, "the release inserted one ring");
+    app.run_command("undo");
+
+    // Bridge: Divisions, whole and in range, reaching the line.
+    app.invoke_command(by("cage.bridge"));
+    frame(&mut app, Vec::new());
+    assert_eq!(app.cage_tool_panel_rows().iter().map(|r| r.key).collect::<Vec<_>>(), vec!["divisions"]);
+    assert!(app.cage_tool_panel_set("divisions", "0").is_err() && app.cage_tool_panel_set("divisions", "999").is_err());
+    app.cage_tool_panel_set("divisions", "2").expect("divisions");
+    assert_eq!(app.cage_tool.as_ref().unwrap().divisions, 2);
+
+    // Weld: Position.
+    app.invoke_command(by("cage.weld"));
+    frame(&mut app, Vec::new());
+    assert_eq!(app.cage_tool_panel_rows()[0].text, "target");
+    assert!(app.cage_tool_panel_set("position", "beside").is_err());
+    app.cage_tool_panel_set("position", "midpoint").expect("a position");
+    assert!(app.cage_tool.as_ref().unwrap().weld_midpoint);
+    assert_eq!(app.cage_tool_panel_rows().iter().map(|r| r.key).collect::<Vec<_>>(), vec!["position", "boundary"]);
+    assert!(app.cage_tool_panel_set("boundary", "everywhere").is_err());
+    app.cage_tool_panel_set("boundary", "zip").expect("a boundary mode");
+    assert!(app.cage_tool.as_ref().unwrap().weld_zip);
+}
+
+/// **The weld's boundary mode: `weld zip=A-B` zips the whole open rim through A onto the one
+/// through B**, from one pair, as one undo step -- two rims of a tube closing into a torus.
+#[test]
+fn a_zip_weld_closes_a_tube_in_one_step() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cage");
+    frame(&mut app, Vec::new());
+    // Two rings round the girth of the plain cube make three layers between its ends.
+    let start = app.cage().clone();
+    let (a, b) = start
+        .edges()
+        .find(|&(a, b)| (start.vertex_position(a).xy() - start.vertex_position(b).xy()).norm() < 1e-9)
+        .expect("a cube has vertical edges");
+    app.run_command(&format!("insertring edge={}-{} count=2", a.index(), b.index()));
+    frame(&mut app, Vec::new());
+    let mesh = app.cage().clone();
+    let (lo, hi) = mesh.vertex_ids().fold((f64::MAX, f64::MIN), |(lo, hi), v| {
+        let z = mesh.vertex_position(v).z;
+        (lo.min(z), hi.max(z))
+    });
+    let at = |v: fieldform_cage::VertexId, z: f64| (mesh.vertex_position(v).z - z).abs() < 1e-9;
+    let ends: Vec<String> = mesh
+        .face_ids()
+        .filter(|&f| mesh.face_vertices(f).iter().all(|&v| at(v, hi)) || mesh.face_vertices(f).iter().all(|&v| at(v, lo)))
+        .map(|f| f.index().to_string())
+        .collect();
+    assert_eq!(ends.len(), 2, "the cube's own top and bottom, after the rings: {} faces", mesh.face_count());
+    assert!(mesh.face_count() == 14, "six faces and two rings of four");
+    app.run_command(&format!("deletefaces faces={}", ends.join(",")));
+    frame(&mut app, Vec::new());
+    let tube = app.cage().clone();
+    assert!(tube.is_open(), "a tube");
+    let top = tube.vertex_ids().find(|&v| at(v, hi) && tube.vertex_position(v).x > 0.1 && tube.vertex_position(v).y > 0.1).expect("a corner of the top rim");
+    let p = tube.vertex_position(top);
+    let bottom = tube.vertex_ids().find(|&v| at(v, lo) && (tube.vertex_position(v).xy() - p.xy()).norm() < 1e-9).expect("the vertex below it");
+    let faces = tube.face_count();
+    app.run_command(&format!("weld zip={}-{}", top.index(), bottom.index()));
+    frame(&mut app, Vec::new());
+    assert!(!app.cage().is_open(), "both rims zipped: the tube is a closed torus");
+    assert_eq!(app.cage().face_count(), faces);
+    assert_eq!(app.cage().euler_characteristic(), 0, "a torus");
+    app.run_command("undo");
+    assert!(app.cage().is_open(), "one undo step puts the tube back");
+}
+
 /// **An extrude's panel: a typed distance places the cap, a typed direction re-places it, and the
 /// kept line says the numbers rather than positions** (R8). An inset's thickness re-runs the inset.
 #[test]
@@ -1733,4 +2001,154 @@ fn a_cage_session_s_panel_places_the_cap_and_the_kept_line_says_the_distance() {
     frame(&mut app, vec![key(egui::Key::Enter)]);
     let lines = &app.echo_log[echoed..];
     assert_eq!(lines, &["cageinset faces=1 thickness=2.5 depth=-1".to_string()]);
+}
+
+/// **A through hole has handles, at the point it goes in.** It runs on for ever and has no box,
+/// which used to leave it with none while a blind hole beside it could be dragged; the handles
+/// stand on the block's own place before they ask for a box, so both are moved the same way.
+#[test]
+fn a_through_hole_is_moved_from_where_it_goes_in() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cube size=40,40,20");
+    app.run_command("hole at=5,6,10 dir=0,0,-1 depth=through");
+    frame(&mut app, Vec::new());
+    let hole = app
+        .part_graph()
+        .nodes()
+        .find(|(_, n)| matches!(n, Node::Hole { depth: fieldform_scene::HoleDepth::Through, .. }))
+        .map(|(id, _)| id)
+        .expect("a through hole was made");
+    assert!(app.body_extent(hole).as_box().is_none(), "unbounded: this is the case without a box");
+    app.select_body(Some(hole));
+    let gizmo = app.gizmo_frame().expect("a through hole has handles");
+    assert!((gizmo.pivot - Point3::new(5.0, 6.0, 10.0)).norm() < 1e-9, "{:?}", gizmo.pivot);
+}
+
+/// **Standing a block on a surface keeps its length and faces the way its kind does**: a hole
+/// goes in, a cylinder stands out, both from the point picked and as typed points, one undo step
+/// each; and a block a placement moves is refused, since the click is not in its coordinates.
+#[test]
+fn a_block_stood_on_a_surface_keeps_its_length_and_faces_the_way_its_kind_does() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cylinder from=0,0,0 to=0,0,30 radius=4 'post'");
+    app.run_command("hole at=5,6,10 dir=0,0,-1 depth=12");
+    frame(&mut app, Vec::new());
+    let find = |app: &App, hole: bool| {
+        app.part_graph()
+            .nodes()
+            .find(|(_, n)| matches!(n, Node::Hole { .. }) == hole && matches!(n, Node::Hole { .. } | Node::Cylinder { .. }))
+            .map(|(id, _)| id)
+            .expect("made")
+    };
+    let ends_of = |app: &App, id| {
+        let node = app.part_graph().node(id).cloned().expect("there");
+        app.resolved_ends(node.ends()[0])
+    };
+    let (cylinder, hole) = (find(&app, false), find(&app, true));
+    let at = Point3::new(40.0, -3.0, 2.0);
+    let into = Vector3::new(-1.0, 0.0, 0.0);
+
+    app.stand_ends_at(cylinder, at, into).expect("a cylinder stands");
+    frame(&mut app, Vec::new());
+    let (a, b) = ends_of(&app, cylinder);
+    assert!((a - at).norm() < 1e-9 && (b - Point3::new(70.0, -3.0, 2.0)).norm() < 1e-9, "out, 30 long: {a} {b}");
+
+    let (h0, h1) = ends_of(&app, hole);
+    let was = (h1 - h0).norm();
+    app.stand_ends_at(hole, at, into).expect("a hole stands");
+    frame(&mut app, Vec::new());
+    let (a, b) = ends_of(&app, hole);
+    assert!((a - at).norm() < 1e-9, "it goes in where picked");
+    assert!(((b - a) - into * was).norm() < 1e-9, "into the body, as long as it was: {a} {b}");
+    app.run_command("undo");
+    frame(&mut app, Vec::new());
+    assert!((ends_of(&app, hole).0 - h0).norm() < 1e-9, "one undo step puts it back");
+
+    app.run_command("move target=post by=0,0,5 wrap=true");
+    frame(&mut app, Vec::new());
+    assert!(app.stand_ends_at(cylinder, at, into).is_err(), "a placed block is refused");
+}
+
+/// **A rounded boolean takes a list from the console as a hard one does**: three bodies and a
+/// radius make one rounded subtract of three, `set` takes the radius off and puts it back without
+/// losing a body, and the echo writes every operand.
+#[test]
+fn a_rounded_boolean_of_three_is_made_and_kept_from_the_console() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cube size=40 'block'");
+    app.run_command("sphere centre=12,0,20 radius=6 'one'");
+    app.run_command("sphere centre=-12,0,20 radius=6 'two'");
+    app.run_command("boolean op=subtract in=block,one,two radius=2 'cut'");
+    frame(&mut app, Vec::new());
+    let cut = app.node_named("cut").expect("made");
+    let inputs = |app: &App| match app.part_graph().node(cut).cloned() {
+        Some(Node::Blend { inputs, .. }) => (true, inputs.len()),
+        Some(Node::Boolean { inputs, .. }) => (false, inputs.len()),
+        other => panic!("a boolean, not {other:?}"),
+    };
+    assert_eq!(inputs(&app), (true, 3), "rounded, all three");
+    assert_eq!(app.part_graph().roots(), vec![cut]);
+    app.run_command("set cut.radius=0");
+    frame(&mut app, Vec::new());
+    assert_eq!(inputs(&app), (false, 3), "sharp, all three");
+    app.run_command("set cut.radius=1.5");
+    frame(&mut app, Vec::new());
+    assert_eq!(inputs(&app), (true, 3), "rounded again, all three");
+    let lines = crate::echo::create_lines(&app.doc, app.part_graph(), cut).expect("echoes");
+    assert!(
+        lines.iter().any(|l| l.starts_with("boolean") && l.contains("in=block,one,two") && l.contains("radius=1.5")),
+        "the echo names every operand: {lines:?}"
+    );
+}
+
+/// **A draft the section has no room for is said where it is typed, and a typed one is refused.**
+/// A slot 4 mm wide has 2 mm for its walls to move in, so over 20 mm with mitred corners 5° fits
+/// and 6.5° makes the outline cross itself. Typed, `set` refuses it by name and the draft stays at
+/// 5°: `replace_node` gates only an edit that rewires the graph, so this used to say "Set slot"
+/// and leave the next line to inherit the complaint. Through the panel's path the number goes in,
+/// as a dragged number must, and the compile's reason is kept against the block, which is what
+/// the extrude panel reads to say it under the draft.
+#[test]
+fn a_draft_past_the_section_s_room_is_refused_when_typed_and_said_beside_the_draft_in_the_panel() {
+    let Some(mut app) = headless_app() else { return };
+    for line in [
+        "line p0=-20,-2,0 p1=20,-2,0 's1'",
+        "line p0=20,-2,0 p1=20,2,0 's2'",
+        "line p0=20,2,0 p1=-20,2,0 's3'",
+        "line p0=-20,2,0 p1=-20,-2,0 's4'",
+        "extrude profile=s1 height=20 draft=-5 corners=sharp 'slot'",
+    ] {
+        app.run_command(line);
+    }
+    frame(&mut app, Vec::new());
+    let slot = app.node_named("slot").expect("the slot");
+    let draft = |app: &App| match app.part_graph().node(slot) {
+        Some(Node::Extrude { draft, .. }) => app.doc.resolve(draft),
+        _ => None,
+    };
+    assert_eq!(draft(&app), Some(-5.0));
+    assert_eq!(app.compile_error(), None, "5\u{b0} fits");
+
+    let said = app.console_log.len();
+    app.run_command("set slot.draft=-6.5");
+    let refused: Vec<&str> =
+        app.console_log[said..].iter().filter(|l| !l.ok).map(|l| l.text.as_str()).collect();
+    assert!(
+        refused.iter().any(|l| l.contains("cross itself") && l.contains("2.00 mm") && l.contains("5.7\u{b0}")),
+        "the console names the room and the draft that fits: {refused:?}"
+    );
+    assert_eq!(draft(&app), Some(-5.0), "and the typed draft is refused, not written");
+
+    // The panel's path: the number goes in, and the reason is kept against this block.
+    let mut node = app.part_graph().node(slot).cloned().expect("the slot");
+    if let Node::Extrude { draft, .. } = &mut node {
+        *draft = ParamRef::Literal(-6.5);
+    }
+    app.replace_node(slot, node);
+    frame(&mut app, Vec::new());
+    assert!(app.compile_error().is_some_and(|why| why.contains("cross itself")), "{:?}", app.compile_error());
+    assert_eq!(app.draft_refused, Some(slot), "the panel says it beside this block's draft");
 }

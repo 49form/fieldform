@@ -9,7 +9,7 @@
 //! rest of them to merge around.
 
 use super::*;
-use fieldform_field::LeafCache;
+use fieldform_field::{surface_normal, walk_to_surface, LeafCache};
 use fieldform_ops::{Batch, SetSurfaceAxis};
 use fieldform_scene::{Operand, Place, SurfaceAxis};
 
@@ -25,6 +25,17 @@ pub(crate) enum AxisKind {
     TwoPoints,
     /// One click on a surface: the axis leaves it along the field's normal there.
     Normal,
+    /// One click on a surface, for a hole: it goes in along the field's normal there, and the
+    /// rest of what it is waits in `App::pending_hole`.
+    Hole,
+    /// One click on a surface, for a block between two ends: it is laid there along the field's
+    /// normal -- a hole going in, anything else standing out -- and keeps its length.
+    Stand(NodeId),
+    /// One click on a surface: a point stands there (`surface_point.rs`).
+    SurfacePoint,
+    /// One click on a surface: a point stands there, and a plane on the point, square to the
+    /// surface (`surface_point.rs`).
+    SurfacePlane,
 }
 
 /// What a split added to the graph.
@@ -103,67 +114,6 @@ fn triple(value: &Value) -> Option<[f64; 3]> {
     }
 }
 
-/// Which way the field increases at `p`, as a unit vector.
-///
-/// **Normalised explicitly.** A gradient is unit length only for a `Distance` field, and most of
-/// the interesting targets — a lattice, a lean extrude — are `LowerBound`. The block's own
-/// analytic normal is taken when it has one; otherwise a central difference of its distance, at
-/// a step the caller sizes to the part.
-fn field_direction(field: &dyn ScalarField, p: Point3<f64>, h: f64) -> Option<Vector3<f64>> {
-    if let Some(n) = field.normal(p).and_then(|n| n.try_normalize(1e-9)) {
-        return Some(n);
-    }
-    let at = |dx: f64, dy: f64, dz: f64| field.distance(p + Vector3::new(dx, dy, dz));
-    let gradient = Vector3::new(
-        at(h, 0.0, 0.0) - at(-h, 0.0, 0.0),
-        at(0.0, h, 0.0) - at(0.0, -h, 0.0),
-        at(0.0, 0.0, h) - at(0.0, 0.0, -h),
-    );
-    gradient.try_normalize(1e-9)
-}
-
-/// The surface point nearest `from`, found by walking the field's own gradient.
-///
-/// **What an SDF is for.** The value at a point *is* the distance to the surface, so stepping
-/// `-f(p)` along the unit gradient lands on it in one move for a true distance field, and creeps in
-/// for one that understates (a twist, a lattice, a blend) — which is why this iterates rather than
-/// stepping once. Converged when the reading is inside `tolerance`, which is the same tolerance the
-/// field was compiled at.
-///
-/// It works where a projection cannot: every face is reachable because there is no ray to be
-/// parallel to one, and a torus or a C-shaped shell is no harder than a ball, because the question
-/// asked is about the surface rather than about a box around it. The one place it is awkward is the
-/// medial axis, where two walls are equally near and a small move of the seed swaps which one wins
-/// — local, and no worse than the ray's own discontinuity at a silhouette.
-///
-/// `None` when the walk does not settle, which a caller reports rather than papering over: a seed
-/// exactly on the medial axis of a symmetric body has no nearest point to give.
-fn nearest_surface_point(
-    field: &dyn ScalarField,
-    from: Point3<f64>,
-    tolerance: f64,
-    step: f64,
-) -> Option<Point3<f64>> {
-    let mut at = from;
-    let mut best: Option<(f64, Point3<f64>)> = None;
-    for _ in 0..64 {
-        let reading = field.distance(at);
-        if reading.abs() <= tolerance {
-            return Some(at);
-        }
-        // Kept, so a walk that wanders is still answered by the closest it ever came rather than
-        // by nothing. A field that understates can step short for ever and never cross.
-        if best.is_none_or(|(d, _)| reading.abs() < d) {
-            best = Some((reading.abs(), at));
-        }
-        let down = field_direction(field, at, step)?;
-        at -= down * reading;
-    }
-    // Within a few tolerances is a surface point for this purpose; further and the walk has not
-    // found one and the caller should say so.
-    best.filter(|(d, _)| *d <= tolerance * 8.0).map(|(_, p)| p)
-}
-
 /// Stands `axis` on its body: the two points of the line it draws, or why it cannot be.
 ///
 /// **A function of the document, not of the application**, for the reason `settle_curves_on_points`
@@ -196,12 +146,16 @@ pub(crate) fn solve_surface_axis(
     }
     let field = GraphField::compile_cached(doc, &body, (diagonal * 1e-3).max(1e-4), leaves)
         .map_err(|e| format!("the body it stands on cannot be evaluated: {e}"))?;
+    // Its numbers read through the document, so a variable that drives one moves the axis.
+    let axis = axis.resolved(&|r| doc.resolve(r)).ok_or_else(|| {
+        "a number of its place or length names a variable that has no value".to_string()
+    })?;
     let tolerance = (diagonal * 1e-3).max(1e-4);
     let step = (diagonal * 1e-4).max(1e-6);
     // **A seed is the default and the ray is the fallback**, which is also what an older file
     // means: it has no seed, so it takes the second arm and reads exactly as it always did.
     let hit = match axis.seed_point([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]) {
-        Some(seed) => nearest_surface_point(
+        Some(seed) => walk_to_surface(
             &field,
             Point3::new(seed[0], seed[1], seed[2]),
             tolerance,
@@ -229,7 +183,7 @@ pub(crate) fn solve_surface_axis(
             })?
         }
     };
-    let along = field_direction(&field, hit, (diagonal * 1e-4).max(1e-6))
+    let along = surface_normal(&field, hit, (diagonal * 1e-4).max(1e-6))
         .ok_or_else(|| "the field has no direction there — it is flat, or on a crease".to_string())?;
     Ok([hit, hit + along * axis.length.max(0.0)])
 }
@@ -273,7 +227,7 @@ pub(crate) fn surface_axis_through(
     graph: &Graph,
     body: NodeId,
     point: Point3<f64>,
-    length: f64,
+    length: ParamRef,
     leaves: &mut LeafCache,
 ) -> Result<SurfaceAxis, String> {
     let sub = graph.subtree(body).ok_or_else(|| "the body is gone".to_string())?;
@@ -283,7 +237,7 @@ pub(crate) fn surface_axis_through(
     let diagonal = (hi - lo).norm();
     let field = GraphField::compile_cached(doc, &sub, (diagonal * 1e-3).max(1e-4), leaves)
         .map_err(|e| format!("that body cannot be evaluated: {e}"))?;
-    let facing = field_direction(&field, point, (diagonal * 1e-4).max(1e-6))
+    let facing = surface_normal(&field, point, (diagonal * 1e-4).max(1e-6))
         .ok_or_else(|| "the field has no direction there — it is flat, or on a crease".to_string())?;
 
     // **Seeded from the clicked point, which is already on the surface.** The seed is what the
@@ -313,8 +267,8 @@ pub(crate) fn surface_axis_through(
             body,
             direction,
             flipped: facing[i] < 0.0,
-            u: u.clamp(0.0, 1.0),
-            v: v.clamp(0.0, 1.0),
+            u: ParamRef::Literal(u.clamp(0.0, 1.0)),
+            v: ParamRef::Literal(v.clamp(0.0, 1.0)),
             length,
             seed: None,
         };
@@ -323,7 +277,7 @@ pub(crate) fn surface_axis_through(
         if let Ok([hit, _]) = solve_surface_axis(doc, graph, &candidate, leaves) {
             let off = (hit - point).norm();
             if off <= diagonal * 1e-3 {
-                return Ok(SurfaceAxis { seed: Some(seed), ..candidate });
+                return Ok(SurfaceAxis { seed: Some(seed.map(ParamRef::Literal)), ..candidate });
             }
             if nearest.is_none_or(|(best, _)| off < best) {
                 nearest = Some((off, candidate));
@@ -337,12 +291,12 @@ pub(crate) fn surface_axis_through(
         body,
         direction: Axis::ALL[order[0]],
         flipped: facing[order[0]] < 0.0,
-        u: 0.5,
-        v: 0.5,
+        u: ParamRef::Literal(0.5),
+        v: ParamRef::Literal(0.5),
         length,
         seed: None,
     });
-    Ok(SurfaceAxis { seed: Some(seed), ..fallback })
+    Ok(SurfaceAxis { seed: Some(seed.map(ParamRef::Literal)), ..fallback })
 }
 
 impl App {
@@ -458,12 +412,9 @@ impl App {
         self.rebuild_curve_display();
         self.mark_changed();
         self.say(format!(
-            "Added {name} on {} — U {:.3}, V {:.3}, {:.1} mm. Its place is U, V and length in its \
-             block",
+            "Added {name} on {} — {:.1} mm long. Its place and length are in its block",
             self.body_label(axis.body),
-            axis.u,
-            axis.v,
-            axis.length
+            self.resolve(axis.length),
         ));
         Some(id)
     }
@@ -472,7 +423,7 @@ impl App {
     fn stand_axis_on_surface_for(
         &mut self,
         at: Point3<f64>,
-        length: f64,
+        length: ParamRef,
         restanding: Option<CurveId>,
     ) -> bool {
         let graph = self.part_graph().clone();
@@ -565,7 +516,9 @@ impl App {
         let graph = self.graph_holding(axis.body)?;
         let sub = graph.subtree(axis.body)?;
         let (lo, hi) = fieldform_field::graph_extent(&self.doc, &sub, axis.body).as_box()?;
-        let at = axis.seed_point([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z])?;
+        let at = axis
+            .resolved(&|r| self.doc.resolve(r))?
+            .seed_point([lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z])?;
         let stands = *self.doc.curve(id)?.control_points().first()?;
         Some((Point3::new(at[0], at[1], at[2]), stands))
     }
@@ -580,7 +533,7 @@ impl App {
     /// clamp trap) — the values are kept in range where they are made.
     pub(crate) fn surface_axis_controls(&mut self, ui: &mut egui::Ui, id: CurveId, axis: SurfaceAxis) {
         let mut edited = axis;
-        let (mut began, mut touched, mut settled, mut stepped) = (false, false, false, false);
+        let (mut touched, mut stepped) = (false, false);
         let (u_axis, v_axis) = {
             let (a, b) = axis.across();
             (Axis::ALL[a].label(), Axis::ALL[b].label())
@@ -649,10 +602,10 @@ impl App {
                 // surface point to that is the one the ray would have met.
                 let (a, b) = edited.across();
                 let d = edited.direction_index();
-                let mut from_ray = [0.5; 3];
+                let mut from_ray = [ParamRef::Literal(0.5); 3];
                 from_ray[a] = edited.u;
                 from_ray[b] = edited.v;
-                from_ray[d] = if edited.flipped { -0.1 } else { 1.1 };
+                from_ray[d] = ParamRef::Literal(if edited.flipped { -0.1 } else { 1.1 });
                 edited.seed = Some(from_ray);
                 stepped = true;
             }
@@ -709,33 +662,42 @@ impl App {
                 }
             });
         }
-        let mut number = |ui: &mut egui::Ui, label: &str, value: &mut f64, speed: f64, suffix: &str, hover: &str| {
-            ui.horizontal(|ui| {
-                row_label(ui, label);
-                let response = ui
-                    .add(
-                        egui::DragValue::new(value)
-                            .speed(speed)
-                            .max_decimals(4)
-                            .suffix(suffix)
-                            .clamp_existing_to_range(false),
-                    )
-                    .on_hover_text(hover);
-                began |= response.drag_started() || response.gained_focus();
-                touched |= response.changed();
-                settled |= response.drag_stopped() || response.lost_focus();
-            });
+        // **The shared number field, so each of these can be a variable** -- the same V menu
+        // every block's numbers have: name this value, or drive it by one that exists. A named
+        // value is edited on the parameter's own row, which moves the axis on the next rebuild
+        // like any other reader of it.
+        let mut number = |this: &mut Self, ui: &mut egui::Ui, label: &str, value: &mut ParamRef, speed: f64, range: std::ops::RangeInclusive<f64>, suffix: &str, hover: &str| {
+            let (now, changed) = this.number_field(
+                ui,
+                label,
+                *value,
+                speed,
+                range,
+                hover,
+                suffix,
+                Naming::Offered,
+                Labelled::Row,
+                Grain::Continuous,
+            );
+            if changed {
+                *value = now;
+                touched = true;
+            }
         };
+        // Outside the box is allowed for a seed, so its range is wide; U and V are held to it.
+        let anywhere = -1.0e3..=1.0e3;
         if seeded {
             // The seed's own three, which are what places it. Across the box, which is why they
             // are fractions rather than millimetres and why they survive the body moving.
-            let mut seed = edited.seed.unwrap_or([0.5; 3]);
+            let mut seed = edited.seed.unwrap_or([ParamRef::Literal(0.5); 3]);
             for (i, name) in ["Seed X:", "Seed Y:", "Seed Z:"].into_iter().enumerate() {
                 number(
+                    self,
                     ui,
                     name,
                     &mut seed[i],
                     0.005,
+                    anywhere.clone(),
                     "",
                     "0 to 1 across the body's box. The axis stands at the surface point nearest \
                      this, so it may sit outside the body or inside it",
@@ -746,7 +708,7 @@ impl App {
             // rows read "0 to 1" and a value of 1.95 looks like a number that has gone wrong. It
             // has not — a seed outside the body still has a nearest surface point, and that is
             // where the axis stands — but nothing said so, and a drag passes 1 without a nudge.
-            if seed.iter().any(|s| !(0.0..=1.0).contains(s)) {
+            if seed.iter().any(|s| !(0.0..=1.0).contains(&self.resolve(*s))) {
                 ui.label(
                     egui::RichText::new(
                         "the seed is outside the body's box — still fine: the axis stands at the \
@@ -757,36 +719,47 @@ impl App {
             }
         } else {
             number(
+                self,
                 ui,
                 "U:",
                 &mut edited.u,
                 0.005,
+                0.0..=1.0,
                 "",
                 &format!("0 to 1 across the body's box, along {u_axis}. A projection, not the surface's own parameter"),
             );
             number(
+                self,
                 ui,
                 "V:",
                 &mut edited.v,
                 0.005,
+                0.0..=1.0,
                 "",
                 &format!("0 to 1 across the body's box, along {v_axis}"),
             );
         }
-        number(ui, "Length:", &mut edited.length, 0.5, " mm", "How far the line reaches from the surface, along the field's direction");
+        number(
+            self,
+            ui,
+            "Length:",
+            &mut edited.length,
+            0.5,
+            0.001..=1.0e6,
+            " mm",
+            "How far the line reaches from the surface, along the field's direction",
+        );
         if let Some(note) = self.surface_axis_notes.get(&id) {
             ui.colored_label(ui.visuals().warn_fg_color, note.clone());
         }
 
-        // Kept in range where it is made rather than by the widget (see above), and never below a
-        // length a line can have.
-        edited.u = edited.u.clamp(0.0, 1.0);
-        edited.v = edited.v.clamp(0.0, 1.0);
-        edited.length = edited.length.max(0.001);
-
-        if began && self.surface_axis_edit_before.is_none() {
+        // **One history entry per gesture**: the record before the first change of it is kept,
+        // and the entry is written when a frame passes with no change and no button held -- the
+        // hand has come off the drag, or the typed number has been entered.
+        if touched && self.surface_axis_edit_before.is_none() {
             self.surface_axis_edit_before = Some((id, axis));
         }
+        let settled = !touched && !ui.input(|i| i.pointer.any_down());
         if edited != axis {
             // Live: the record and the line follow the hand.
             self.doc.surface_axes.insert(id, edited);
@@ -1020,7 +993,7 @@ impl App {
     /// An axis stood on the surface at `at`, leaving along the field's direction there — a *derived*
     /// axis, with a U, a V and a length rather than points of its own.
     fn axis_normal_at(&mut self, at: Point3<f64>, length: f64) -> bool {
-        self.stand_axis_on_surface_for(at, length, None)
+        self.stand_axis_on_surface_for(at, ParamRef::Literal(length), None)
     }
 
     /// Where the field's surface is under the cursor, or `None`.
@@ -1054,8 +1027,8 @@ impl App {
     }
 
     /// The same, re-pointing `restanding` instead of making a new axis when one is given.
-    fn begin_axis_placement_for(&mut self, kind: AxisKind, restanding: Option<CurveId>) {
-        if kind == AxisKind::Normal && !self.field_is_drawn() {
+    pub(crate) fn begin_axis_placement_for(&mut self, kind: AxisKind, restanding: Option<CurveId>) {
+        if kind != AxisKind::TwoPoints && !self.field_is_drawn() {
             self.warn(
                 "A normal is the field's, and Polygon view draws the cage instead — press Tab \
                  for Field or Overlay, then click the surface",
@@ -1079,6 +1052,12 @@ impl App {
                 "Click the surface this axis should stand on — it keeps its name and its length. \
                  Esc cancels"
             }
+            (AxisKind::Hole, _) => "Hole — click where it goes in. Esc cancels",
+            (AxisKind::Stand(_), _) => {
+                "Click the surface it should stand on — it keeps its length. Esc cancels"
+            }
+            (AxisKind::SurfacePoint, _) => "Point on surface — click where it stands. Esc cancels",
+            (AxisKind::SurfacePlane, _) => "Plane on surface — click where it stands. Esc cancels",
         });
     }
 
@@ -1093,7 +1072,7 @@ impl App {
         let restanding = self.pending_curve.as_ref().and_then(|p| p.restanding);
         let length = restanding
             .and_then(|id| self.doc.surface_axes.get(&id).map(|a| a.length))
-            .unwrap_or(AXIS_NORMAL_LENGTH_MM);
+            .unwrap_or(ParamRef::Literal(AXIS_NORMAL_LENGTH_MM));
         if self.stand_axis_on_surface_for(at, length, restanding) {
             self.pending_curve = None;
         }
@@ -1179,8 +1158,24 @@ impl App {
                 self.warn(format!("no block is called {name:?}"));
                 return;
             };
-            let number = |key: &str, default: f64| {
-                args.get(key).and_then(|v| v.as_f64()).unwrap_or(default)
+            // A number or a variable's name, read as every block verb reads one.
+            let lookup = |t: &str| self.lookup(t);
+            let number = |key: &str, default: f64| -> Result<ParamRef, String> {
+                match args.get(key) {
+                    None => Ok(ParamRef::Literal(default)),
+                    Some(v) => console_keys::param_one("axis", key, v, console_keys::Slot::Number, &lookup),
+                }
+            };
+            let (u, v, length) = match (number("u", 0.5), number("v", 0.5), number("length", SurfaceAxis::DEFAULT_LENGTH_MM)) {
+                (Ok(u), Ok(v), Ok(l)) => (u, v, l),
+                (Err(why), _, _) | (_, Err(why), _) | (_, _, Err(why)) => {
+                    self.warn(why);
+                    return;
+                }
+            };
+            let clamped = |r: ParamRef| match r {
+                ParamRef::Literal(x) => ParamRef::Literal(x.clamp(0.0, 1.0)),
+                other => other,
             };
             let direction = match args.get("dir").and_then(|v| v.as_str()) {
                 None => Axis::Z,
@@ -1192,8 +1187,7 @@ impl App {
                     }
                 },
             };
-            let length = number("length", SurfaceAxis::DEFAULT_LENGTH_MM);
-            if length <= 0.0 {
+            if self.doc.resolve(&length).is_none_or(|l| l <= 0.0) {
                 self.warn("length= must be more than nought");
                 return;
             }
@@ -1224,15 +1218,15 @@ impl App {
                 body,
                 direction,
                 flipped,
-                u: number("u", 0.5).clamp(0.0, 1.0),
-                v: number("v", 0.5).clamp(0.0, 1.0),
+                u: clamped(u),
+                v: clamped(v),
                 length,
                 // **Typed U and V mean the ray**, which is the whole reason the ray is kept: it is
                 // the one that gives a predictable grid on a flat face, and somebody writing
                 // `u=0.25 v=0.5` is asking for exactly that. A `seed=` beside them says the other
                 // thing, and wins -- the U and V are still recorded, so switching the panel to the
                 // ray finds them.
-                seed,
+                seed: seed.map(|s| s.map(ParamRef::Literal)),
             };
             self.make_surface_axis(axis);
             return;
@@ -1341,11 +1335,43 @@ mod tests {
     }
 
     fn stand(body: NodeId, direction: Axis, flipped: bool, u: f64, v: f64) -> SurfaceAxis {
-        SurfaceAxis { body, direction, flipped, u, v, length: 30.0, seed: None }
+        let lit = ParamRef::Literal;
+        SurfaceAxis { body, direction, flipped, u: lit(u), v: lit(v), length: lit(30.0), seed: None }
     }
 
     fn solve(graph: &Graph, axis: &SurfaceAxis) -> Result<[Point3<f64>; 2], String> {
         solve_surface_axis(&Document::new(), graph, axis, &mut LeafCache::default())
+    }
+
+    /// **A variable drives an axis's length and place**: the line reaches as far as the
+    /// parameter says and follows it when it changes, the parameter counts as read while the axis
+    /// names it, and one that cannot be resolved is said rather than read as nought.
+    #[test]
+    fn a_variable_drives_where_an_axis_stands_and_how_far_it_reaches() {
+        let (graph, body) = sphere_graph();
+        let mut doc = Document::new();
+        let reach = doc.add_parameter("reach", 30.0);
+        let across = doc.add_parameter("across", 0.5);
+        let axis = SurfaceAxis {
+            length: ParamRef::Named(reach),
+            u: ParamRef::Named(across),
+            ..stand(body, Axis::Z, false, 0.5, 0.5)
+        };
+        let solved = |doc: &Document| solve_surface_axis(doc, &graph, &axis, &mut LeafCache::default()).expect("solves");
+        let [from, to] = solved(&doc);
+        assert!(((to - from).norm() - 30.0).abs() < 1e-6);
+        assert!(doc.set_parameter_literal(reach, 45.0));
+        let [from, to] = solved(&doc);
+        assert!(((to - from).norm() - 45.0).abs() < 1e-6, "the line follows the variable");
+        assert!(doc.set_parameter_literal(across, 0.75));
+        let [moved, _] = solved(&doc);
+        assert!(moved.x > from.x + 1.0, "U followed its variable: {moved:?} against {from:?}");
+
+        doc.surface_axes.insert(fieldform_scene::CurveId::new(), axis);
+        assert!(doc.parameter_is_read(reach, None), "an axis on a surface reads the parameter");
+        let gone = SurfaceAxis { length: ParamRef::Named(fieldform_scene::ParamId::new()), ..axis };
+        let refused = solve_surface_axis(&doc, &graph, &gone, &mut LeafCache::default()).unwrap_err();
+        assert!(refused.contains("variable"), "{refused}");
     }
 
     /// A click on a sphere makes a seed inside the box, and the axis stands where it was clicked.
@@ -1360,10 +1386,10 @@ mod tests {
         let mut leaves = LeafCache::default();
         // A point on the sphere: radius 20 at the origin, so the +X pole.
         let clicked = Point3::new(20.0, 0.0, 0.0);
-        let axis = surface_axis_through(&doc, &graph, body, clicked, 30.0, &mut leaves)
+        let axis = surface_axis_through(&doc, &graph, body, clicked, ParamRef::Literal(30.0), &mut leaves)
             .expect("a click on the surface places an axis");
 
-        let seed = axis.seed.expect("creation seeds");
+        let seed = axis.seed.expect("creation seeds").map(|s| doc.resolve(&s).expect("a literal"));
         for (i, s) in seed.iter().enumerate() {
             assert!(
                 (-0.01..=1.01).contains(s),
@@ -1392,7 +1418,7 @@ mod tests {
     #[test]
     fn an_axis_whose_body_is_gone_stands_again_as_soon_as_it_names_another() {
         let (graph, body) = sphere_at([0.0; 3]);
-        let stood = SurfaceAxis { seed: Some([0.5, 0.5, 1.2]), ..stand(body, Axis::Z, false, 0.5, 0.5) };
+        let stood = SurfaceAxis { seed: Some([0.5, 0.5, 1.2].map(ParamRef::Literal)), ..stand(body, Axis::Z, false, 0.5, 0.5) };
         let [from, _] = solve(&graph, &stood).expect("it stands while its body is there");
         assert!((from.z - 20.0).abs() < 0.2, "on the sphere's pole: {from:?}");
 
@@ -1414,7 +1440,7 @@ mod tests {
             "on the new sphere's pole: {moved:?}"
         );
         assert!(
-            ((tip - moved).norm() - stood.length).abs() < 1e-6,
+            ((tip - moved).norm() - 30.0).abs() < 1e-6,
             "and keeps the length it had"
         );
     }
@@ -1438,7 +1464,7 @@ mod tests {
 
         // What a click on the +X pole makes.
         let clicked = Point3::new(20.0, 0.0, 0.0);
-        let from_click = surface_axis_through(&doc, &graph, body, clicked, 30.0, &mut leaves)
+        let from_click = surface_axis_through(&doc, &graph, body, clicked, ParamRef::Literal(30.0), &mut leaves)
             .expect("a click places an axis");
         let seed = from_click.seed.expect("a click seeds");
 
@@ -1457,7 +1483,7 @@ mod tests {
         // **Outside the box is allowed and is not clamped**, which is the half a parser is most
         // likely to get wrong: a seed beyond 1 still has a nearest surface point, and refusing it
         // would make the verb narrower than the rows it mirrors.
-        let far = SurfaceAxis { seed: Some([0.5, 0.5, 4.0]), ..from_numbers };
+        let far = SurfaceAxis { seed: Some([0.5, 0.5, 4.0].map(ParamRef::Literal)), ..from_numbers };
         let [from_far, _] = solve(&graph, &far).expect("a far seed still has a nearest point");
         assert!((from_far.z - 20.0).abs() < 0.2, "on the +Z pole: {from_far:?}");
     }
@@ -1483,7 +1509,7 @@ mod tests {
         // The box is -20..20 in each axis, so 0..1 across it puts the +X face at 1.0 and the
         // middle at 0.5. A seed just outside the +X face, level with the centre.
         let seeded = SurfaceAxis {
-            seed: Some([1.1, 0.5, 0.5]),
+            seed: Some([1.1, 0.5, 0.5].map(ParamRef::Literal)),
             ..stand(body, Axis::Z, false, 0.5, 0.5)
         };
         let [from, to] = solve(&graph, &seeded).expect("a seed always has a nearest point");
@@ -1515,7 +1541,7 @@ mod tests {
                 turn: fieldform_scene::no_turn(),
             });
             let axis = SurfaceAxis {
-                seed: Some([0.5, 0.5, 1.1]),
+                seed: Some([0.5, 0.5, 1.1].map(ParamRef::Literal)),
                 ..stand(body, Axis::Z, false, 0.5, 0.5)
             };
             solve(&graph, &axis).expect("stands")
@@ -1620,14 +1646,14 @@ mod tests {
             (Point3::new(20.0, 0.0, 0.0), Axis::X, false),
             (Point3::new(0.0, -20.0, 0.0), Axis::Y, true),
         ] {
-            let axis = surface_axis_through(&doc, &graph, body, point, 30.0, &mut leaves).unwrap();
+            let axis = surface_axis_through(&doc, &graph, body, point, ParamRef::Literal(30.0), &mut leaves).unwrap();
             assert_eq!((axis.direction, axis.flipped), (direction, flipped), "{point:?}");
             let [from, _] = solve_surface_axis(&doc, &graph, &axis, &mut leaves).unwrap();
             assert!((from - point).norm() < 0.05, "{point:?} -> {from:?}");
         }
         // A slanted point still comes back to itself, along whichever axis it faces most.
         let slanted = Point3::from(Vector3::new(1.0, 2.0, -2.0).normalize() * 20.0);
-        let axis = surface_axis_through(&doc, &graph, body, slanted, 30.0, &mut leaves).unwrap();
+        let axis = surface_axis_through(&doc, &graph, body, slanted, ParamRef::Literal(30.0), &mut leaves).unwrap();
         let [from, _] = solve_surface_axis(&doc, &graph, &axis, &mut leaves).unwrap();
         assert!((from - slanted).norm() < 0.05, "{axis:?}: {from:?}");
     }
@@ -1760,7 +1786,7 @@ mod tests {
         let radius = 20.0;
         for dir in [Vector3::x(), Vector3::y(), Vector3::z(), Vector3::new(1.0, 2.0, -2.0).normalize()] {
             let on_surface = Point3::from(dir * radius);
-            let n = field_direction(&field, on_surface, 1e-3).expect("a sphere has a normal");
+            let n = surface_normal(&field, on_surface, 1e-3).expect("a sphere has a normal");
             assert!((n - dir).norm() < 1e-3, "{dir:?}: got {n:?}");
             assert!((n.norm() - 1.0).abs() < 1e-9, "unit length");
         }
@@ -1777,10 +1803,10 @@ mod tests {
                 5.0 * p.z
             }
         }
-        let n = field_direction(&SteepFloor, Point3::new(3.0, -2.0, 0.0), 1e-3).unwrap();
+        let n = surface_normal(&SteepFloor, Point3::new(3.0, -2.0, 0.0), 1e-3).unwrap();
         assert!((n - Vector3::z()).norm() < 1e-9, "{n:?}");
         assert!(
-            field_direction(&SteepFloor, Point3::origin(), 1e-3).unwrap().z > 0.0,
+            surface_normal(&SteepFloor, Point3::origin(), 1e-3).unwrap().z > 0.0,
             "and it points the way the field increases"
         );
 
@@ -1790,6 +1816,6 @@ mod tests {
                 1.0
             }
         }
-        assert!(field_direction(&Flat, Point3::origin(), 1e-3).is_none(), "no direction, no axis");
+        assert!(surface_normal(&Flat, Point3::origin(), 1e-3).is_none(), "no direction, no axis");
     }
 }

@@ -42,7 +42,7 @@ fn single() -> Graph {
     let mut graph = Graph::empty();
     let a = slab(&mut graph, -40.0, 10.0);
     let b = slab(&mut graph, -10.0, 40.0);
-    graph.add(Node::Blend { op: BooleanOp::Union, a: a.into(), b: b.into(), fillet: fillet() });
+    graph.add(Node::Blend { op: BooleanOp::Union, inputs: vec![a.into(), b.into()], fillet: fillet() });
     graph
 }
 
@@ -54,12 +54,12 @@ fn chained() -> Graph {
         centre: fieldform_scene::Place::At([lit(0.0), lit(0.0), lit(4.0)]),
         radius: lit(12.0),
     });
-    let bossed = graph.add(Node::Blend { op: BooleanOp::Union, a: body.into(), b: boss.into(), fillet: fillet() });
+    let bossed = graph.add(Node::Blend { op: BooleanOp::Union, inputs: vec![body.into(), boss.into()], fillet: fillet() });
     let bore = graph.add(Node::Sphere {
         centre: fieldform_scene::Place::At([lit(-28.0), lit(0.0), lit(0.0)]),
         radius: lit(8.0),
     });
-    graph.add(Node::Blend { op: BooleanOp::Difference, a: bossed.into(), b: bore.into(), fillet: fillet() });
+    graph.add(Node::Blend { op: BooleanOp::Difference, inputs: vec![bossed.into(), bore.into()], fillet: fillet() });
     graph
 }
 

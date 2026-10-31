@@ -117,8 +117,7 @@ fn seamed(k: f64, c: Continuity, turn: f64) -> (GraphField, Vector3<f64>) {
     });
     graph.add(Node::Blend {
         op: fieldform_scene::BooleanOp::Union,
-        a: a.into(),
-        b: b.into(),
+        inputs: vec![a.into(), b.into()],
         fillet: fieldform_scene::Fillet { radius: lit(k), continuity: c, second: None },
     });
     let (s, co) = turn.to_radians().sin_cos();

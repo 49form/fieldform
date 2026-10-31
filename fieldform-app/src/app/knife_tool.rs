@@ -12,13 +12,108 @@
 //! picking along the way, and it follows the surface through faces the line passes over.
 
 use super::check_model::{ERROR_COLOR, ERROR_FILL};
+use super::tool_panel::Row;
 use crate::overlay_draw::{PREVIEW_COLOR, PROPAGATED_COLOR};
 use crate::*;
 use fieldform_cage::edit::knife::{self, CutPoint, Plan};
 use fieldform_cage::{FaceId, QuadMesh, VertexId};
 
+/// What a click may resolve to, the panel's Pick type (`cage-tools-instructions.md` §1). `Ctrl`
+/// always forces the nearest vertex regardless, the meaning it already has for a curve's
+/// endpoints while placing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PickType {
+    Vertices,
+    Edges,
+    Both,
+}
+
+impl Default for PickType {
+    fn default() -> Self {
+        PickType::Both
+    }
+}
+
+impl PickType {
+    fn word(self) -> &'static str {
+        match self {
+            PickType::Vertices => "vertices",
+            PickType::Edges => "edges",
+            PickType::Both => "both",
+        }
+    }
+    fn from_word(w: &str) -> Option<Self> {
+        match w {
+            "vertices" => Some(PickType::Vertices),
+            "edges" => Some(PickType::Edges),
+            "both" => Some(PickType::Both),
+            _ => None,
+        }
+    }
+}
+
+/// How a typed or dragged offset is read (`cage-knife-spec.md` §3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OffsetMode {
+    Mm,
+    Fraction,
+}
+
+impl Default for OffsetMode {
+    fn default() -> Self {
+        OffsetMode::Mm
+    }
+}
+
+impl OffsetMode {
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            OffsetMode::Mm => "mm",
+            OffsetMode::Fraction => "fraction",
+        }
+    }
+    pub(crate) fn from_word(w: &str) -> Option<Self> {
+        match w {
+            "mm" => Some(OffsetMode::Mm),
+            "fraction" => Some(OffsetMode::Fraction),
+            _ => None,
+        }
+    }
+}
+
+/// Which faces Cut Through considers (`cage-knife-spec.md` §1.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThroughFaces {
+    All,
+    FrontFacing,
+    Selected,
+}
+
+impl Default for ThroughFaces {
+    fn default() -> Self {
+        ThroughFaces::All
+    }
+}
+
+impl ThroughFaces {
+    fn word(self) -> &'static str {
+        match self {
+            ThroughFaces::All => "all",
+            ThroughFaces::FrontFacing => "front-facing",
+            ThroughFaces::Selected => "selected",
+        }
+    }
+    fn from_word(w: &str) -> Option<Self> {
+        match w {
+            "all" => Some(ThroughFaces::All),
+            "front-facing" | "frontfacing" => Some(ThroughFaces::FrontFacing),
+            "selected" => Some(ThroughFaces::Selected),
+            _ => None,
+        }
+    }
+}
+
 /// The knife's state while armed.
-#[derive(Default)]
 pub(crate) struct Knife {
     /// The points placed so far, every edge crossing between clicks included.
     pub(crate) path: Vec<CutPoint>,
@@ -34,6 +129,34 @@ pub(crate) struct Knife {
     pub(crate) through_paths: Vec<(Vec<CutPoint>, Result<Plan, (String, Vec<FaceId>)>)>,
     /// Where the pointer was this frame, for the rubber line.
     pub(crate) cursor: Option<egui::Pos2>,
+    /// The panel's settings (`cage-tools-instructions.md` §1).
+    pub(crate) pick_type: PickType,
+    pub(crate) offset_mode: OffsetMode,
+    pub(crate) angle_increment: f64,
+    pub(crate) through_faces: ThroughFaces,
+    /// The last placed point, while it is an edge point: the end its offset reads and writes
+    /// from, fixed when it was placed -- nearer the point before it, or the cursor for the
+    /// path's first point (`cage-knife-spec.md` §3).
+    pub(crate) active_ref_end: Option<VertexId>,
+}
+
+impl Default for Knife {
+    fn default() -> Self {
+        Knife {
+            path: Vec::new(),
+            ahead: Vec::new(),
+            plan: None,
+            refused: None,
+            through: None,
+            through_paths: Vec::new(),
+            cursor: None,
+            pick_type: PickType::default(),
+            offset_mode: OffsetMode::default(),
+            angle_increment: 45.0,
+            through_faces: ThroughFaces::default(),
+            active_ref_end: None,
+        }
+    }
 }
 
 /// The faces an edge `(a, b)` lies on: two, or one at a rim.
@@ -73,6 +196,19 @@ fn spell(p: CutPoint) -> String {
     }
 }
 
+
+/// `t` from `edge.0` for a point at `value` -- millimetres or a fraction, per `mode` -- from the
+/// end `ref_end`, clamped to the edge. Offset is length along the **cage** edge, not along the
+/// limit surface: that is the edge the person sees (`cage-knife-spec.md` §3).
+pub(crate) fn t_from_offset(mesh: &QuadMesh, edge: (VertexId, VertexId), ref_end: VertexId, mode: OffsetMode, value: f64) -> f64 {
+    let (a, b) = edge;
+    let len = (mesh.vertex_position(a) - mesh.vertex_position(b)).norm().max(1e-12);
+    let t_from_ref = match mode {
+        OffsetMode::Mm => (value / len).clamp(0.0, 1.0),
+        OffsetMode::Fraction => value.clamp(0.0, 1.0),
+    };
+    if ref_end == a { t_from_ref } else { 1.0 - t_from_ref }
+}
 impl App {
     fn knife(&self) -> Option<&Knife> {
         self.cage_tool.as_ref().filter(|t| t.command.op == "cage.cut").map(|t| &t.knife)
@@ -82,14 +218,17 @@ impl App {
         self.cage_tool.as_mut().filter(|t| t.command.op == "cage.cut").map(|t| &mut t.knife)
     }
 
-    /// The point the hover names: the vertex, or the hovered edge at the tool's fraction along
-    /// it (Shift: its middle).
-    fn knife_hovered_point(&self, aspect: f32, rect: egui::Rect, pointer: Option<egui::Pos2>, shift: bool) -> Option<CutPoint> {
+    /// The point `hover` names: the vertex, or the hovered edge at the tool's fraction along it
+    /// (Shift: its middle) -- gated by the panel's Pick type, which `ctrl` overrides to force the
+    /// nearest vertex regardless. `hover` is `self.hover` for the pointer where it actually is, or
+    /// a re-picked selection at an angle-snapped position (`knife_hover`).
+    fn knife_hovered_point(&self, aspect: f32, rect: egui::Rect, pointer: Option<egui::Pos2>, shift: bool, ctrl: bool, hover: Selection) -> Option<CutPoint> {
         /// How near a vertex the pointer snaps to it, in points: wider than the pick's own
         /// threshold, because a cut aimed near a corner is meant for the corner.
         const SNAP: f32 = 14.0;
         let mesh = self.cage();
         let placement = self.control_placement();
+        let pick_type = self.knife().map(|k| k.pick_type).unwrap_or_default();
         let screen = |v: VertexId| self.camera.project_to_screen(aspect, rect, vertex_pos(mesh, &placement, v));
         // The nearest point on an edge to the pointer, as the fraction along it and how far off.
         let on_edge = |a: VertexId, b: VertexId, pos: egui::Pos2| -> Option<(f64, f32)> {
@@ -110,12 +249,32 @@ impl App {
                 .min_by(|x, y| x.1.total_cmp(&y.1))
                 .map(|(v, _)| v)
         };
-        match (self.hover, pointer) {
-            (Selection::Vertex(v), _) => Some(CutPoint::Vertex(v)),
+        let nearest = |candidates: &[VertexId], pos: egui::Pos2| -> Option<VertexId> {
+            candidates.iter().filter_map(|&v| screen(v).map(|s| (v, (s - pos).length()))).min_by(|x, y| x.1.total_cmp(&y.1)).map(|(v, _)| v)
+        };
+        let allow_vertex = ctrl || pick_type != PickType::Edges;
+        match (hover, pointer) {
+            (Selection::Vertex(v), _) if allow_vertex => Some(CutPoint::Vertex(v)),
+            // Edges only, aimed at a vertex: the nearest point on one of its own edges, not the
+            // vertex itself -- there is nowhere else for the point to be.
+            (Selection::Vertex(v), Some(pos)) => mesh
+                .adjacent_faces(v)
+                .into_iter()
+                .flat_map(|f| {
+                    let c = mesh.face_vertices(f);
+                    (0..4).map(move |i| (c[i], c[(i + 1) % 4]))
+                })
+                .filter(|&(a, b)| a == v || b == v)
+                .filter_map(|(a, b)| on_edge(a, b, pos).map(|(t, off)| ((a, b), t, off)))
+                .min_by(|x, y| x.2.total_cmp(&y.2))
+                .map(|((a, b), t, _)| CutPoint::Edge { edge: (a, b), t: if shift { 0.5 } else { t } }),
             // Near either end of the hovered edge: the vertex, not a sliver beside it.
             (Selection::Edge(a, b), Some(pos)) => {
-                if let Some(v) = snapped(&[a, b], pos) {
+                if allow_vertex && let Some(v) = snapped(&[a, b], pos) {
                     return Some(CutPoint::Vertex(v));
+                }
+                if pick_type == PickType::Vertices {
+                    return nearest(&[a, b], pos).map(CutPoint::Vertex);
                 }
                 let t = if shift { 0.5 } else { on_edge(a, b, pos).map_or(0.5, |(t, _)| t) };
                 Some(CutPoint::Edge { edge: (a, b), t })
@@ -125,8 +284,11 @@ impl App {
             // the face instead of waiting for an edge under it (the owner, 2026-10-24).
             (Selection::Face(f), Some(pos)) => {
                 let c = mesh.face_vertices(f);
-                if let Some(v) = snapped(&c, pos) {
+                if allow_vertex && let Some(v) = snapped(&c, pos) {
                     return Some(CutPoint::Vertex(v));
+                }
+                if pick_type == PickType::Vertices {
+                    return nearest(&c, pos).map(CutPoint::Vertex);
                 }
                 (0..4)
                     .filter_map(|i| {
@@ -268,7 +430,7 @@ impl App {
 
     /// Once a frame while the knife is armed: the segment to the hovered point traced and the
     /// whole cut planned, for the preview.
-    pub(crate) fn knife_hover(&mut self, aspect: f32, rect: egui::Rect, pointer: Option<egui::Pos2>, shift: bool) {
+    pub(crate) fn knife_hover(&mut self, aspect: f32, rect: egui::Rect, pointer: Option<egui::Pos2>, shift: bool, ctrl: bool, alt: bool) {
         if let Some(k) = self.knife_mut() {
             k.cursor = pointer;
         }
@@ -293,7 +455,33 @@ impl App {
             }
             return;
         }
-        let Some(hovered) = self.knife_hovered_point(aspect, rect, pointer, shift) else {
+        let path = self.knife().map(|k| k.path.clone()).unwrap_or_default();
+        // Alt snaps the direction from the path's last point to the cursor, in screen space, to
+        // a multiple of the panel's angle increment (`cage-knife-spec.md` §4): the snapped ray is
+        // then read like any other pointer position, re-picked against the cage.
+        let angle_increment = self.knife().map(|k| k.angle_increment).unwrap_or(45.0).max(1.0);
+        let (hover_sel, pointer) = match (alt, path.last(), pointer) {
+            (true, Some(&last), Some(pos)) => {
+                let mesh = self.cage();
+                let placement = self.control_placement();
+                let w = placement.transform_point(&position(mesh, last));
+                let origin = self.camera.project_to_screen(aspect, rect, Point3::new(w.x as f32, w.y as f32, w.z as f32));
+                match origin {
+                    Some(origin) if (pos - origin).length() > 1.0 => {
+                        let d = pos - origin;
+                        let angle = f64::from(d.y.atan2(d.x).to_degrees());
+                        let snapped_angle = (angle / angle_increment).round() * angle_increment;
+                        let rad = (snapped_angle as f32).to_radians();
+                        let snapped = origin + egui::vec2(rad.cos(), rad.sin()) * d.length();
+                        let sel = pick(self.control(), &self.control_placement(), &self.cage_mesh, &self.camera, aspect, rect, snapped);
+                        (sel, Some(snapped))
+                    }
+                    _ => (self.hover, pointer),
+                }
+            }
+            _ => (self.hover, pointer),
+        };
+        let Some(hovered) = self.knife_hovered_point(aspect, rect, pointer, shift, ctrl, hover_sel) else {
             if let Some(k) = self.knife_mut() {
                 k.ahead.clear();
                 k.plan = None;
@@ -301,7 +489,6 @@ impl App {
             }
             return;
         };
-        let path = self.knife().map(|k| k.path.clone()).unwrap_or_default();
         // Back near where the path started, the hovered point *is* the first point: the loop
         // closes exactly, and the click that lands there commits it (the owner, 2026-10-24).
         let hovered = match (path.first(), pointer) {
@@ -340,9 +527,10 @@ impl App {
     }
 
     /// The paths a Cut Through line from `a` to `b` on screen resolves to: the plane through the
-    /// eye and the line, crossed with every edge of the faces considered (the selected faces, or
-    /// all of them), the crossings within the line's span chained face to face. A face the plane
-    /// crosses more than twice -- a saddle -- is refused by name.
+    /// eye and the line, crossed with every edge of the faces the panel's Cut Through faces
+    /// setting considers (All, Front-facing or Selected), the crossings within the line's span
+    /// chained face to face. A face the plane crosses more than twice -- a saddle -- is refused
+    /// by name.
     pub(crate) fn through_paths(&self, aspect: f32, rect: egui::Rect, a: egui::Pos2, b: egui::Pos2) -> Result<Vec<Vec<CutPoint>>, String> {
         use std::collections::{HashMap, HashSet};
         let mesh = self.cage();
@@ -364,8 +552,12 @@ impl App {
             let w = world(p);
             self.camera.project_to_screen(aspect, rect, Point3::new(w.x as f32, w.y as f32, w.z as f32)).map(|s| (s - a).dot(dir) / dir.length_sq())
         };
-        let selected: Vec<FaceId> = self.selection.parts().iter().filter_map(|s| if let Selection::Face(f) = s { Some(*f) } else { None }).collect();
-        let faces: Vec<FaceId> = if selected.is_empty() { mesh.face_ids().collect() } else { selected };
+        let through_faces = self.knife().map(|k| k.through_faces).unwrap_or_default();
+        let faces: Vec<FaceId> = match through_faces {
+            ThroughFaces::Selected => self.selection.parts().iter().filter_map(|s| if let Selection::Face(f) = s { Some(*f) } else { None }).collect(),
+            ThroughFaces::FrontFacing => mesh.face_ids().filter(|&f| self.knife_face_front_facing(f)).collect(),
+            ThroughFaces::All => mesh.face_ids().collect(),
+        };
         let considered: HashSet<FaceId> = faces.iter().copied().collect();
 
         // One crossing per edge, keyed by the edge; each face's crossings by the edges' keys.
@@ -476,7 +668,7 @@ impl App {
     /// A click: the traced segment joins the path. `true` when the click was the knife's. A click
     /// on empty canvas with no path begun draws a Cut Through line: its first point, then its
     /// second, which is read against the view until Enter cuts it.
-    pub(crate) fn knife_click(&mut self, _shift: bool, pos: Option<egui::Pos2>) -> bool {
+    pub(crate) fn knife_click(&mut self, _shift: bool, pos: Option<egui::Pos2>, aspect: f32, rect: egui::Rect) -> bool {
         let Some(k) = self.knife() else { return false };
         if k.ahead.is_empty() {
             if !k.path.is_empty() {
@@ -508,10 +700,15 @@ impl App {
         let ahead = k.ahead.clone();
         let n = ahead.len();
         let closes = k.path.len() >= 2 && k.path.first() == ahead.last();
+        let prior_last = k.path.last().copied();
         if let Some(k) = self.knife_mut() {
-            k.path.extend(ahead);
+            k.path.extend(ahead.iter().copied());
             k.ahead.clear();
         }
+        // The newly placed point becomes active: its offset is read and written from the end
+        // nearer the point before it, or the cursor for the path's first point
+        // (`cage-knife-spec.md` §3).
+        self.knife_set_active_ref_end(&ahead, prior_last, pos, aspect, rect);
         // A closed loop is a finished cut: committed here, and the next click starts a new path
         // rather than growing one that could only cross itself.
         if closes {
@@ -598,6 +795,7 @@ impl App {
         k.path.pop();
         k.ahead.clear();
         k.plan = None;
+        k.active_ref_end = None;
         let left = k.path.len();
         self.say(format!("Knife: {left} point{} left on the path", if left == 1 { "" } else { "s" }));
     }
@@ -618,8 +816,139 @@ impl App {
         k.ahead.clear();
         k.plan = None;
         k.refused = None;
+        k.active_ref_end = None;
         self.say("Knife: path discarded; Esc again puts the knife down");
         true
+    }
+
+    /// Sets the newly extended path's active point -- the one a typed or dragged offset reads
+    /// and writes -- and its reference end: nearer the point before it (`ahead`'s own
+    /// second-to-last, or the path's previous last point when `ahead` has one element), or nearer
+    /// the cursor for the path's very first point, where there is no previous point at all.
+    fn knife_set_active_ref_end(&mut self, ahead: &[CutPoint], prior_last: Option<CutPoint>, pos: Option<egui::Pos2>, aspect: f32, rect: egui::Rect) {
+        let Some(&last) = ahead.last() else { return };
+        let CutPoint::Edge { edge: (a, b), .. } = last else {
+            if let Some(k) = self.knife_mut() {
+                k.active_ref_end = None;
+            }
+            return;
+        };
+        let prev = if ahead.len() >= 2 { Some(ahead[ahead.len() - 2]) } else { prior_last };
+        let mesh = self.cage();
+        let placement = self.control_placement();
+        let ref_end = match prev {
+            Some(p) => {
+                let target = placement.transform_point(&position(mesh, p));
+                let da = (placement.transform_point(&mesh.vertex_position(a)) - target).norm();
+                let db = (placement.transform_point(&mesh.vertex_position(b)) - target).norm();
+                if da <= db { a } else { b }
+            }
+            None => match pos {
+                Some(pos) => {
+                    let sa = self.camera.project_to_screen(aspect, rect, vertex_pos(mesh, &placement, a));
+                    let sb = self.camera.project_to_screen(aspect, rect, vertex_pos(mesh, &placement, b));
+                    match (sa, sb) {
+                        (Some(sa), Some(sb)) if (sb - pos).length() < (sa - pos).length() => b,
+                        _ => a,
+                    }
+                }
+                None => a,
+            },
+        };
+        if let Some(k) = self.knife_mut() {
+            k.active_ref_end = Some(ref_end);
+        }
+    }
+
+    /// The active point's offset from its reference end, in the panel's current unit, or `None`
+    /// where there is no active edge point to read it from.
+    fn knife_active_offset(&self) -> Option<f64> {
+        let k = self.knife()?;
+        let ref_end = k.active_ref_end?;
+        let CutPoint::Edge { edge: (a, b), t } = *k.path.last()? else { return None };
+        let mesh = self.cage();
+        let len = (mesh.vertex_position(a) - mesh.vertex_position(b)).norm();
+        let t_from_ref = if ref_end == a { t } else { 1.0 - t };
+        Some(match k.offset_mode {
+            OffsetMode::Mm => t_from_ref * len,
+            OffsetMode::Fraction => t_from_ref,
+        })
+    }
+
+    /// `t` from `edge.0` for a point at `value` (mm or a fraction, per `mode`) from `ref_end`,
+    /// clamped to the edge -- offset is length along the **cage** edge (`cage-knife-spec.md` §3).
+    fn knife_t_from_offset(&self, edge: (VertexId, VertexId), ref_end: VertexId, mode: OffsetMode, value: f64) -> f64 {
+        t_from_offset(self.cage(), edge, ref_end, mode, value)
+    }
+
+    /// A typed offset (§4.3, no click needed since Offset is the focused row): moves the active
+    /// point along its own edge to exactly `value`, read from its reference end.
+    fn knife_set_offset(&mut self, value: f64) -> Result<(), String> {
+        let Some(k) = self.knife() else { return Ok(()) };
+        let Some(ref_end) = k.active_ref_end else {
+            return Err("place a point on an edge first".to_string());
+        };
+        let Some(&CutPoint::Edge { edge, .. }) = k.path.last() else {
+            return Err("the active point is a vertex, which has no offset".to_string());
+        };
+        let mode = k.offset_mode;
+        let t = self.knife_t_from_offset(edge, ref_end, mode, value);
+        if let Some(k) = self.knife_mut()
+            && let Some(last) = k.path.last_mut()
+        {
+            *last = CutPoint::Edge { edge, t };
+        }
+        Ok(())
+    }
+
+    /// Whether `pos` is near the active point on screen, within the handle's grab distance --
+    /// the gate that keeps a left-drag starting there from also tumbling the camera.
+    pub(crate) fn knife_active_point_near(&self, aspect: f32, rect: egui::Rect, pos: egui::Pos2) -> bool {
+        const GRAB: f32 = 10.0;
+        let Some(k) = self.knife() else { return false };
+        let Some(last) = k.path.last().copied() else { return false };
+        if !matches!(last, CutPoint::Edge { .. }) {
+            return false;
+        }
+        let mesh = self.cage();
+        let placement = self.control_placement();
+        let w = placement.transform_point(&position(mesh, last));
+        self.camera
+            .project_to_screen(aspect, rect, Point3::new(w.x as f32, w.y as f32, w.z as f32))
+            .is_some_and(|s| (s - pos).length() <= GRAB)
+    }
+
+    /// Left-drag after placing an edge point slides it along its edge; the offset readout updates
+    /// live (`cage-knife-spec.md` §3). The edge itself does not change, only `t` on it.
+    pub(crate) fn knife_drag_active(&mut self, aspect: f32, rect: egui::Rect, pos: egui::Pos2) {
+        let Some(k) = self.knife() else { return };
+        let Some(CutPoint::Edge { edge: (a, b), .. }) = k.path.last().copied() else { return };
+        let mesh = self.cage();
+        let placement = self.control_placement();
+        let (sa, sb) = (
+            self.camera.project_to_screen(aspect, rect, vertex_pos(mesh, &placement, a)),
+            self.camera.project_to_screen(aspect, rect, vertex_pos(mesh, &placement, b)),
+        );
+        let Some((sa, sb)) = sa.zip(sb) else { return };
+        let d = sb - sa;
+        if d.length_sq() < 1.0 {
+            return;
+        }
+        let t = (((pos - sa).dot(d)) / d.length_sq()).clamp(0.0, 1.0) as f64;
+        if let Some(k) = self.knife_mut()
+            && let Some(last) = k.path.last_mut()
+        {
+            *last = CutPoint::Edge { edge: (a, b), t };
+        }
+    }
+
+    /// Whether face `f` faces the camera, for Cut Through's Front-facing setting.
+    fn knife_face_front_facing(&self, f: FaceId) -> bool {
+        let mesh = self.cage();
+        let placement = self.control_placement();
+        let n = fieldform_cage::validate::face_normal(mesh, f);
+        let world_n = placement.transform_vector(&n);
+        world_n.dot(&(-self.camera.forward().cast::<f64>())) > 0.0
     }
 
     pub(crate) fn draw_knife(&self, painter: &egui::Painter, aspect: f32, rect: egui::Rect) {
@@ -691,6 +1020,16 @@ impl App {
                 painter.circle_filled(s, 4.0, PREVIEW_COLOR);
             }
         }
+        // The active point's reference end: a short tick across it, so a typed or dragged
+        // offset is read against the end it is measured from (`cage-knife-spec.md` §3).
+        if let (Some(&last), Some(end)) = (k.path.last(), k.active_ref_end)
+            && let Some(p) = project(&position(mesh, last))
+            && let Some(s) = project(&mesh.vertex_position(end))
+        {
+            let dir = (s - p).normalized();
+            let perp = egui::vec2(-dir.y, dir.x) * 6.0;
+            painter.line_segment([s - perp, s + perp], egui::Stroke::new(2.0_f32, PREVIEW_COLOR));
+        }
         // The point under the pointer, before and between clicks: a ring where the next point
         // would land, so the knife reads as ready wherever it hovers (the owner, 2026-10-24).
         if let Some(&next) = k.ahead.last()
@@ -709,6 +1048,83 @@ impl App {
                 .and_then(|&p| project(&position(mesh, p)))
                 .unwrap_or(rect.left_top() + egui::vec2(12.0, 24.0));
             painter.text(at + egui::vec2(8.0, -8.0), egui::Align2::LEFT_BOTTOM, why, egui::FontId::proportional(12.0), ERROR_COLOR);
+        }
+    }
+
+    /// The knife's panel rows, in the order `cage-tools-instructions.md` §1 lists them: Pick
+    /// type, Offset mode, Offset, Angle increment, Cut Through faces.
+    pub(crate) fn knife_panel_rows(&self) -> Vec<Row> {
+        let Some(k) = self.knife() else { return Vec::new() };
+        let offset_text = self.knife_active_offset().map(echo::number).unwrap_or_else(|| "\u{2014}".to_string());
+        vec![
+            Row { key: "pick_type", text: k.pick_type.word().to_string(), unit: commands::Unit::Word },
+            Row { key: "offset_mode", text: k.offset_mode.word().to_string(), unit: commands::Unit::Word },
+            Row {
+                key: "offset",
+                text: offset_text,
+                unit: if k.offset_mode == OffsetMode::Mm { commands::Unit::Mm } else { commands::Unit::Plain },
+            },
+            Row { key: "angle_increment", text: echo::number(k.angle_increment), unit: commands::Unit::Degrees },
+            Row { key: "cut_through_faces", text: k.through_faces.word().to_string(), unit: commands::Unit::Word },
+        ]
+    }
+
+    /// Confirms a row: a word checked against its choices, a number applied to the setting or,
+    /// for Offset, to the active point.
+    pub(crate) fn knife_panel_set(&mut self, key: &'static str, text: &str) -> Result<(), String> {
+        if self.knife().is_none() {
+            return Ok(());
+        }
+        let text = text.trim();
+        if text.is_empty() {
+            return Ok(());
+        }
+        match key {
+            "pick_type" => {
+                let Some(v) = PickType::from_word(&text.to_ascii_lowercase()) else {
+                    return Err("pick type is one of vertices, edges, both".to_string());
+                };
+                if let Some(k) = self.knife_mut() {
+                    k.pick_type = v;
+                }
+                Ok(())
+            }
+            "offset_mode" => {
+                let Some(v) = OffsetMode::from_word(&text.to_ascii_lowercase()) else {
+                    return Err("offset mode is one of mm, fraction".to_string());
+                };
+                if let Some(k) = self.knife_mut() {
+                    k.offset_mode = v;
+                }
+                Ok(())
+            }
+            "cut_through_faces" => {
+                let Some(v) = ThroughFaces::from_word(&text.to_ascii_lowercase()) else {
+                    return Err("cut through faces is one of all, front-facing, selected".to_string());
+                };
+                if let Some(k) = self.knife_mut() {
+                    k.through_faces = v;
+                }
+                Ok(())
+            }
+            "offset" => {
+                let value: f64 = text.parse().map_err(|_| format!("{text:?} is not a number"))?;
+                if !value.is_finite() {
+                    return Err("that is not a finite number".to_string());
+                }
+                self.knife_set_offset(value)
+            }
+            "angle_increment" => {
+                let value: f64 = text.parse().map_err(|_| format!("{text:?} is not a number"))?;
+                if !(value.is_finite() && value > 0.0) {
+                    return Err("an angle increment is more than nought".to_string());
+                }
+                if let Some(k) = self.knife_mut() {
+                    k.angle_increment = value;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
         }
     }
 }

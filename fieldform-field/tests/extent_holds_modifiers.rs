@@ -371,6 +371,31 @@ fn a_twice_placed_cuboid_s_extent_holds_every_solid_point() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Scale
+
+/// A cuboid stretched by three factors about a frame turned off every axis, so a box that
+/// scaled about the wrong point or along the wrong directions could not pass by symmetry.
+#[test]
+fn a_cuboid_stretched_by_three_factors_has_an_extent_holding_every_solid_point() {
+    for (factors, what) in [([2.0, 0.5, 1.3], "stretched and squeezed"), ([1.5, 1.5, 1.5], "uniform")] {
+        let mut graph = Graph::empty();
+        let body = cuboid(&mut graph, [8.0, -5.0, 3.0], [30.0, 12.0, 6.0]);
+        graph.add(Node::Scale {
+            input: body.into(),
+            factors: factors.map(lit),
+            frame: Frame::At {
+                origin: [lit(20.0), lit(4.0), lit(-7.0)],
+                axis: [lit(1.0), lit(0.6), lit(-0.3)],
+            },
+        });
+        holds(
+            &format!("scale {factors:?} ({what}) about (20,4,-7) along (1,0.6,-0.3)"),
+            measure(&Document::new(), &graph, around_origin(100.0), N),
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Mirror
 
 fn mirrored(centre: [f64; 3], frame: Frame, join: bool) -> Graph {

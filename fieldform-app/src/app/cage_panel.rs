@@ -19,7 +19,7 @@ use fieldform_cage::FaceId;
 /// Where a word row's choices are, so a click cycles them and a typed word is checked.
 fn choices(op: &str, key: &str) -> &'static [&'static str] {
     match (op, key) {
-        ("cage.extrude", "direction") => &["normal", "x", "y", "z"],
+        ("cage.extrude", "direction") => &["normal", "x", "y", "z", "vertex_normals"],
         (_, "mode") => &["region", "individual"],
         _ => &[],
     }
@@ -41,18 +41,62 @@ impl App {
     /// that was also turned.
     pub(crate) fn extrude_distance(&self, session: &CageSession) -> f64 {
         let mesh = self.cage();
-        let dir = self.extrude_direction(session);
         let n = session.cap.len().max(1) as f64;
+        // Along each vertex's own normal, the distance is how many of its per-millimetre steps
+        // the vertex has taken.
+        if !session.cap_dirs.is_empty() {
+            return session
+                .cap
+                .iter()
+                .zip(&session.cap_before)
+                .zip(&session.cap_dirs)
+                .map(|((&v, b), dir)| (mesh.vertex_position(v) - b).dot(dir) / dir.norm_squared().max(1e-18))
+                .sum::<f64>()
+                / n;
+        }
+        let dir = self.extrude_direction(session);
         session.cap.iter().zip(&session.cap_before).map(|(&v, b)| (mesh.vertex_position(v) - b).dot(&dir)).sum::<f64>() / n
+    }
+
+    /// Where cap vertex `i` stands for a straight extrude of `distance`.
+    fn cap_target(&self, session: &CageSession, i: usize, distance: f64) -> Point3<f64> {
+        let step = session.cap_dirs.get(i).copied().unwrap_or_else(|| self.extrude_direction(session));
+        session.cap_before[i] + step * distance
+    }
+
+    /// With the direction `vertex_normals`: the per-millimetre step of each cap vertex, taken from
+    /// the lift the primitive itself would make of the mesh as it was, so the panel and the kept
+    /// line mean the same thing by the words.
+    fn read_cap_dirs(&mut self) {
+        let Some(session) = self.cage_session.as_ref() else { return };
+        if session.command.op != "cage.extrude" || session.args.get("direction").map(|v| v.text()).as_deref() != Some("vertex_normals") {
+            if let Some(session) = self.cage_session.as_mut() {
+                session.cap_dirs.clear();
+            }
+            return;
+        }
+        let mode = if session.args.get("mode").map(|v| v.text()).as_deref() == Some("individual") {
+            fieldform_cage::edit::extrude::Mode::Individual
+        } else {
+            fieldform_cage::edit::extrude::Mode::Region
+        };
+        let before = session.before.restore();
+        let dirs = fieldform_cage::edit::extrude::lift(&before, &session.faces, mode).ok().map(|lift| {
+            let offsets: std::collections::HashMap<VertexId, Vector3<f64>> =
+                fieldform_cage::edit::extrude::extrude_offsets(&lift, fieldform_cage::edit::extrude::Direction::VertexNormals, 1.0).into_iter().collect();
+            session.cap.iter().map(|v| offsets.get(v).copied().unwrap_or_else(Vector3::zeros)).collect::<Vec<_>>()
+        });
+        if let Some(session) = self.cage_session.as_mut() {
+            session.cap_dirs = dirs.unwrap_or_default();
+        }
     }
 
     /// Whether every cap vertex sits exactly at the straight extrude of `distance`: then the kept
     /// line can say the distance alone, and no positions.
     pub(crate) fn extrude_is_straight(&self, session: &CageSession, distance: f64) -> bool {
         let mesh = self.cage();
-        let dir = self.extrude_direction(session);
         let eps = fieldform_cage::validate::epsilon_length(mesh);
-        session.cap.iter().zip(&session.cap_before).all(|(&v, b)| (mesh.vertex_position(v) - (b + dir * distance)).norm() <= eps)
+        session.cap.iter().enumerate().all(|(i, &v)| (mesh.vertex_position(v) - self.cap_target(session, i, distance)).norm() <= eps)
     }
 
     /// The rows: an extrude's distance read off the cap, then its direction and mode; an inset's
@@ -108,9 +152,8 @@ impl App {
     /// command on the session's stack, so it folds into the kept step like a drag does.
     fn place_cap(&mut self, distance: f64) {
         let Some(session) = self.cage_session.as_ref() else { return };
-        let dir = self.extrude_direction(session);
         let cap = session.cap.clone();
-        let target: Vec<Point3<f64>> = session.cap_before.iter().map(|b| b + dir * distance).collect();
+        let target: Vec<Point3<f64>> = (0..cap.len()).map(|i| self.cap_target(session, i, distance)).collect();
         let mesh = self.cage();
         let current: Vec<Point3<f64>> = cap.iter().map(|&v| mesh.vertex_position(v)).collect();
         if current.iter().zip(&target).all(|(c, t)| (c - t).norm() < 1e-12) {
@@ -170,6 +213,7 @@ impl App {
             session.cap_before = cap_before;
             session.normal = normal;
         }
+        self.read_cap_dirs();
         self.selection.clear();
         for f in faces {
             self.selection.toggle(Selection::Face(f));
@@ -190,13 +234,15 @@ impl App {
             if !words.contains(&word.as_str()) {
                 return Err(format!("{key} is one of {}", words.join(", ")));
             }
+            // The distance as the old direction reads it, before the direction changes.
+            let was = self.cage_session.as_ref().map(|s| self.extrude_distance(s)).unwrap_or(0.0);
             if let Some(session) = self.cage_session.as_mut() {
                 session.args = session.args.clone().with(key, Value::Str(word));
             }
             if op == "cage.extrude" && key == "direction" {
                 // The same distance, along the new direction.
-                let d = self.cage_session.as_ref().map(|s| self.extrude_distance(s)).unwrap_or(0.0);
-                self.place_cap(d);
+                self.read_cap_dirs();
+                self.place_cap(was);
             } else {
                 self.relift();
             }

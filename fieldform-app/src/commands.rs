@@ -437,6 +437,7 @@ const VIEW_QUALITY: &[&str] = &["View", "Display quality"];
 const CREATE: &[&str] = &["Create"];
 const PRIMITIVES: &[&str] = &["Create", "Primitives"];
 const SWEEP: &[&str] = &["Create", "Sweep"];
+const FEATURES: &[&str] = &["Create", "Features"];
 const MODIFY: &[&str] = &["Modify"];
 /// The cage tools, in a menu of their own (the owner, 2026-10-24): what edits the cage's
 /// topology, what grows a selection along it, and what checks it.
@@ -453,6 +454,7 @@ const SUBMENUS: &[(&[&str], u8)] = &[
     (VIEW_QUALITY, 5),
     (PRIMITIVES, 0),
     (SWEEP, 0),
+    (FEATURES, 0),
 ];
 
 // ---------------------------------------------------------------------------- the params
@@ -480,6 +482,35 @@ const CAPSULE_P: &[Param] = &[
     p("end_radius", Unit::Mm),
     p("from", Unit::Mm),
     p("to", Unit::Mm),
+];
+const COIL_P: &[Param] = &[
+    p("diameter", Unit::Mm),
+    p("turns", Unit::Plain),
+    p("pitch", Unit::Mm),
+    p("height", Unit::Mm),
+    p("wire", Unit::Mm),
+    p("section", Unit::Word),
+    p("hand", Unit::Word),
+    p("origin", Unit::Mm),
+];
+const THREAD_P: &[Param] = &[
+    p("designation", Unit::Word),
+    p("major", Unit::Mm),
+    p("pitch", Unit::Mm),
+    p("length", Unit::Mm),
+    p("clearance", Unit::Mm),
+    p("hand", Unit::Word),
+    p("origin", Unit::Mm),
+];
+const HOLE_P: &[Param] = &[
+    p("target", Unit::Word),
+    p("hole", Unit::Word),
+    p("diameter", Unit::Mm),
+    p("depth", Unit::Mm),
+    p("tip", Unit::Word),
+    p("designation", Unit::Word),
+    p("at", Unit::Mm),
+    p("dir", Unit::Plain),
 ];
 const TPMS_P: &[Param] = &[
     p("cell", Unit::Word),
@@ -707,8 +738,19 @@ fn build() -> Vec<Command> {
         // then the ways a curve becomes a solid; then the entries that are each one thing.
         op("create.point", "point", "Point").menu(PRIMITIVES, 0).session(POINT_P)
             .hint("A position to measure from; encloses nothing and draws nothing"),
+        op("create.surfacepoint", "surfacepoint", "Point on surface").menu(PRIMITIVES, 0).when(field_drawn).session(&[])
+            .aliases(&["pointon"])
+            .hint("Click a body: a point stands there, slides over the surface when dragged, and stays when the body changes elsewhere"),
+        op("point.fix", "fix", "Fix point")
+            .hint("Leaves a point on a surface where it is, whatever the body does"),
+        op("point.live", "live", "Make point live")
+            .hint("Solves a point on a surface again whenever the part changes"),
         op("create.plane", "plane", "Plane").menu(PRIMITIVES, 0).session(PLANE_P)
             .hint("A half-space, for cutting with — infinite until you do"),
+        // Below the plane, as the point on a surface is below the point (the owner, 2026-10-31).
+        op("create.surfaceplane", "surfaceplane", "Plane on surface").menu(PRIMITIVES, 0).when(field_drawn).session(&[])
+            .aliases(&["planeon"])
+            .hint("Click a body: a plane stands there, square to its surface, and slides over it when dragged"),
         // **The modelling keys are a first assignment, asked for and approved by the owner 2026-10-17** in place
         // of §9.1's "the team assigns them": the word's first letter where it is free (E, R, S, L,
         // C, B, P, M, O, T), Shift with it for the second command of a letter (Shift+S shell,
@@ -740,8 +782,6 @@ fn build() -> Vec<Command> {
             .hint("Between two points, a radius at each — zero at one end for a point"),
         op("create.torus", "torus", "Torus").menu(PRIMITIVES, 1).session(TORUS_P).aliases(&["ring"])
             .hint("A ring in the XY plane"),
-        op("create.capsule", "capsule", "Capsule").menu(PRIMITIVES, 1).session(CAPSULE_P)
-            .hint("Between two points, a radius at each, with rounded ends"),
         // **Named for what it does, not for what it takes**: the ways a curve becomes a solid.
         // A closed loop is filled and an open curve is given a thickness, so one entry each.
         op("create.extrude", "extrude", "Extrude").menu(SWEEP, 0).keys(&["E"]).session(EXTRUDE_P).inputs(PROFILE)
@@ -768,6 +808,20 @@ fn build() -> Vec<Command> {
             .aliases(&["tube"])
             .hint("Sweeps a curve into a tube. Makes a straight one to sweep if the document has \
                    none."),
+        // **Features** (the owner, 2026-10-28): things a part is given rather than shapes it is
+        // built from -- a spring, a hole, a thread -- in a submenu of their own under Sweep.
+        op("create.capsule", "capsule", "Capsule").menu(FEATURES, 0).session(CAPSULE_P)
+            .hint("Between two points, a radius at each, with rounded ends"),
+        op("create.coil", "coil", "Coil").menu(FEATURES, 0).session(COIL_P).aliases(&["spring", "helix"])
+            .hint("A wire wound about an axis: a diameter, two of turns, pitch and height, a round \
+                   or square section"),
+        op("create.hole", "hole", "Hole").menu(FEATURES, 0).when(field_drawn).session(HOLE_P)
+            .aliases(&["drill"])
+            .hint("Click where it goes in: a drilled hole, already cut from that body — simple, \
+                   counterbored, countersunk or tapped, blind or through"),
+        op("create.thread", "thread", "Thread").menu(FEATURES, 0).session(THREAD_P)
+            .hint("A threaded rod, metric coarse by name (M2 to M24) or by major diameter and \
+                   pitch; subtract it for a tapped hole, with a clearance for fit"),
         // Below the submenus, each being one thing rather than a family.
         op("create.cage", "cage", "Cage").menu(CREATE, 1)
             .aliases(&["subd", "control mesh"])
@@ -883,7 +937,8 @@ fn build() -> Vec<Command> {
                    last point back, Esc discards the path. Or `knife points=3-4@0.25,7-8@0.5`."),
         op("cage.weld", "weld", "Weld").menu(SUBD, 0).when(cage_control).tool()
             .hint("Click the vertex to move, then the vertex it moves onto; Shift on the second \
-                   meets halfway. Or `weld pairs=3-7,4-8 at=midpoint`."),
+                   meets halfway. With Boundary set to zip, the second click zips the whole open \
+                   rim onto the other. Or `weld pairs=3-7,4-8 at=midpoint`, or `weld zip=3-7`."),
         // Growing a selection along the cage's structure: a double-click on an edge is the loop,
         // Alt and a double-click the ring.
         op("select.loop", "selectloop", "Select edge loop").menu(SUBD, 1).when(cage_control)
@@ -926,7 +981,8 @@ fn build() -> Vec<Command> {
         op("modify.turn", "turn", "Turn").session(TURN_P).inputs(BODY).aliases(&["rotate"])
             .hint("Turns a block by three angles about a point."),
         op("modify.scale", "scale", "Scale").session(SCALE_P).inputs(BODY).aliases(&["resize"])
-            .hint("Scales a block about a point."),
+            .hint("Scales a block about a point: `scale by=2` folds into its placement; \
+                   `scale by=1.5,0.7,1` stretches it along three axes as a block of its own."),
         op("create.line", "line", "Line").session(&[])
             .hint("A straight curve: `line p0=0,0,0 p1=40,0,0` places one now; `line` alone starts \
                    clicking."),

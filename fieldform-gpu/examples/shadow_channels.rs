@@ -39,8 +39,8 @@ fn main() {
         let blends: Vec<NodeId> = graph.nodes().filter(|(_, n)| matches!(n, Node::Blend { .. })).map(|(id, _)| id).collect();
         for id in blends {
             if let Some(node) = graph.node_mut(id) {
-                if let Node::Blend { op, a, b, .. } = node.clone() {
-                    *node = Node::Boolean { op, inputs: vec![a, b] };
+                if let Node::Blend { op, inputs, .. } = node.clone() {
+                    *node = Node::Boolean { op, inputs };
                 }
             }
         }
