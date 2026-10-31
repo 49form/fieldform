@@ -45,6 +45,13 @@ repository = "https://github.com/49form/fieldform"
 [profile.release]
 debug = true
 overflow-checks = true
+# Do not add `trim-paths` here: it is still unstable in this cargo (1.97.1) and the manifest is
+# rejected outright, so adding it breaks every build rather than only the release. A dependency's
+# panic locations are `file!()` strings compiled into the executable, and out of the registry they
+# are absolute -- a release carried 1282 copies of the build machine's home directory that way.
+# `tools/release/publish-release.sh` passes `--remap-path-prefix` for the two release builds
+# instead, computing the prefix from the environment so no username is written down here, and
+# then reads both executables back to prove it worked.
 
 [profile.test]
 opt-level = 1
