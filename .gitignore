@@ -25,3 +25,5 @@ desktop.ini
 
 # Local assistant and worktree state
 /.claude/
+# The release build lives in a target directory of its own (tools/release/publish-release.sh): a trimmed OpenCASCADE is built there once and the shared target/OCCT is never touched.
+/target-release
