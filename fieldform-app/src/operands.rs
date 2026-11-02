@@ -69,6 +69,9 @@ pub(crate) fn operand_refusal(
                 Some("a point encloses no volume, so a boolean has nothing to combine with it")
             }
             Node::Shell { .. } => Some("a point has no interior, so there is no wall to build"),
+            Node::Infill { .. } => {
+                Some("a point encloses no volume, so there is nothing to fill or to fill with")
+            }
             Node::Morph { .. } => Some("a morph mixes two solids, and a point has no volume"),
             Node::Twist { .. } => Some("there is nothing in a point to wind"),
             Node::Attract { .. } => Some("a point has no material to draw toward anything"),

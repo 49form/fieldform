@@ -527,6 +527,18 @@ fn every_kind_with_every_edge() -> Vec<Case> {
     let (input, t) = (n(), n());
     case("a shell", Node::Shell { input: input.into(), thickness: driven(t) }, vec![input, t]);
 
+    let (input, fill, r) = (n(), n(), n());
+    case(
+        "an infill with a driven join",
+        Node::Infill {
+            input: input.into(),
+            wall: lit(2.0),
+            fill: fill.into(),
+            join: Fillet::of(driven(r)),
+        },
+        vec![input, fill, r],
+    );
+
     let (input, lo, hi) = (n(), n(), n());
     case(
         "a ramp reading a block",
@@ -609,6 +621,7 @@ fn kind(node: &Node) -> &'static str {
         Node::Mirror { .. } => "mirror",
         Node::Scale { .. } => "scale",
         Node::Shell { .. } => "shell",
+        Node::Infill { .. } => "infill",
         Node::Ramp { .. } => "ramp",
         Node::Offset { .. } => "offset",
         Node::Transform { .. } => "transform",
@@ -621,7 +634,7 @@ fn kind(node: &Node) -> &'static str {
 fn the_sample_holds_every_kind() {
     let held: std::collections::BTreeSet<&str> =
         every_kind_with_every_edge().iter().map(|case| kind(&case.node)).collect();
-    assert_eq!(held.len(), 33, "a kind of node has no case: {held:?}");
+    assert_eq!(held.len(), 34, "a kind of node has no case: {held:?}");
 }
 
 /// **A node's inputs are its operands, then what drives its parameters, then what it is pointed

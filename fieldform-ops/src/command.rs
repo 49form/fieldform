@@ -248,7 +248,8 @@ impl CommandStack {
 }
 
 /// The history as a tool session found it: how many entries it held, and its redo list, set
-/// aside until the session is kept or taken back.
+/// aside until the session is kept or taken back. The default is an empty history's.
+#[derive(Default)]
 pub struct StackMark {
     done: usize,
     undone: Vec<Box<dyn Command>>,

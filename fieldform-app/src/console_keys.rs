@@ -111,6 +111,12 @@ const fn switch(word: &'static str) -> Key {
 
 const TARGET: Key = key("target", &["input"]);
 
+/// The words of `infill` that describe the lattice it makes, which `fill=` has no use for.
+pub const INFILL_LATTICE_KEYS: &[&str] = &[
+    "cell", "map", "cell_size", "cell_radius", "cell_height", "arc", "arc_count", "azimuth", "polar",
+    "phase", "thickness", "offset", "density", "radius", "origin", "axis", "jitter", "seed",
+];
+
 /// The table. Keys are the block's serialized field names wherever one exists; where the
 /// instructions chose a shorter word (`rate`, `r`, `arc`) both are read and both cover the field.
 pub const VERBS: &[Verb] = &[
@@ -136,6 +142,9 @@ pub const VERBS: &[Verb] = &[
     Verb { op: "create.surfacepoint", keys: Keys::Declared { reads: &[], not_read: &[] } },
     Verb { op: "create.surfaceplane", keys: Keys::Declared { reads: &[], not_read: &[] } },
     Verb { op: "point.fix", keys: Keys::Declared { reads: &[switch("target")], not_read: &[] } },
+    Verb { op: "draw.sketch", keys: Keys::Declared { reads: &[switch("target"), switch("off")], not_read: &[] } },
+    Verb { op: "curve.degree", keys: Keys::Declared { reads: &[switch("degree"), switch("target")], not_read: &[] } },
+    Verb { op: "curve.degree_menu", keys: Keys::Declared { reads: &[], not_read: &[] } },
     Verb { op: "point.live", keys: Keys::Declared { reads: &[switch("target")], not_read: &[] } },
     Verb {
         op: "create.plane",
@@ -382,6 +391,40 @@ pub const VERBS: &[Verb] = &[
         keys: Keys::Declared { reads: &[TARGET, key("thickness", &["thickness"])], not_read: &[] },
     },
     Verb {
+        op: "modify.infill",
+        keys: Keys::Declared {
+            reads: &[
+                TARGET,
+                key("wall", &["wall"]),
+                key("fill", &["fill"]),
+                key("join", &["join"]),
+                key("g", &["join"]),
+                key("second", &["join"]),
+                // The lattice a new infill owns, in the words `tpms` reads them by, so the echo
+                // and the panel agree (D9). They set that block and no field of this one.
+                switch("cell"),
+                switch("map"),
+                switch("cell_size"),
+                switch("cell_radius"),
+                switch("cell_height"),
+                switch("arc"),
+                switch("arc_count"),
+                switch("azimuth"),
+                switch("polar"),
+                switch("phase"),
+                switch("thickness"),
+                switch("offset"),
+                switch("density"),
+                switch("radius"),
+                switch("origin"),
+                switch("axis"),
+                switch("jitter"),
+                switch("seed"),
+            ],
+            not_read: &[],
+        },
+    },
+    Verb {
         op: "modify.twist",
         keys: Keys::Declared {
             reads: &[
@@ -507,6 +550,8 @@ pub const VERBS: &[Verb] = &[
     // is another way of writing `sphere 'ball'`, and here it is the thing being set. The grammar
     // used to decide, and swallowed `name=` for every verb — which is why
     // `environment name=zebra` listed the environments instead of choosing one.
+    Verb { op: "view.panel", keys: Keys::Declared { reads: &[switch("show"), switch("map")], not_read: &[] } },
+    Verb { op: "view.find", keys: Keys::Declared { reads: &[switch("name")], not_read: &[] } },
     Verb { op: "view.environment", keys: Keys::Declared { reads: &[switch("name")], not_read: &[] } },
     // The V typed (`block-ownership-spec.md` §5.1, §5.2, §11): `variable 'Sphere'` and
     // `inline 'Sphere'`. The name is the row acted on, so it is read as the verb's own, which is
@@ -660,11 +705,11 @@ pub const VERBS: &[Verb] = &[
     // w=...` (and `curve3`, whose degree is in the word).
     Verb {
         op: "create.line",
-        keys: Keys::Declared { reads: &[switch("p0"), switch("p1"), switch("p")], not_read: &[] },
+        keys: Keys::Declared { reads: &[switch("p0"), switch("p1"), switch("p"), switch("on")], not_read: &[] },
     },
     Verb {
         op: "create.curve",
-        keys: Keys::Declared { reads: &[switch("degree"), switch("p"), switch("w")], not_read: &[] },
+        keys: Keys::Declared { reads: &[switch("degree"), switch("p"), switch("w"), switch("on")], not_read: &[] },
     },
 ];
 
@@ -718,6 +763,7 @@ pub fn reach_of(node: &Node) -> Reach {
         Node::Pattern { .. } => Reach::Ops(&["modify.pattern"]),
         Node::Mirror { .. } => Reach::Ops(&["modify.mirror"]),
         Node::Shell { .. } => Reach::Ops(&["modify.shell"]),
+        Node::Infill { .. } => Reach::Ops(&["modify.infill"]),
         Node::Ramp { .. } => Reach::Ops(&["create.ramp"]),
         Node::Offset { .. } => Reach::Ops(&["modify.offset"]),
         Node::Transform { .. } => Reach::Ops(&["modify.move", "modify.turn", "modify.scale"]),
@@ -726,7 +772,7 @@ pub fn reach_of(node: &Node) -> Reach {
     }
 }
 
-fn verb(op: &str) -> Option<&'static Verb> {
+pub(crate) fn verb(op: &str) -> Option<&'static Verb> {
     VERBS.iter().find(|v| v.op == op)
 }
 
@@ -747,6 +793,11 @@ const ABOUT: &[(&str, &str)] = &[
          its name, or a parameter's number back into the one field holding it",
     ),
 ];
+
+/// The sentence `help` leads with for `op`, where its word does not say what it is for.
+pub(crate) fn about(op: &str) -> Option<&'static str> {
+    ABOUT.iter().find(|(o, _)| *o == op).map(|(_, about)| *about)
+}
 
 /// Whether `op` reads a `name` key of its own, so `name=` is its argument rather than a name for
 /// whatever it made. Five verbs do; see their rows.
@@ -2130,6 +2181,54 @@ pub fn shell_with_keys(mut node: Node, args: &Args, lookup: &dyn Fn(&str) -> Loo
     Ok(node)
 }
 
+/// An infill with `wall=`, `fill=` and the join's `join=`, `g=` and `second=` applied.
+///
+/// **A wall below nought is refused, where a shell takes one as written and makes it positive.**
+/// That is the spec's ruling and it is the safer of the two: nought means something here, plain
+/// infill with no skin, so a sign typed by mistake is not as harmless as it is on a shell.
+pub fn infill_with_keys(mut node: Node, args: &Args, lookup: &dyn Fn(&str) -> Lookup) -> Result<Node, String> {
+    let word = "infill";
+    let Node::Infill { wall, fill, join, .. } = &mut node else {
+        return Err("`infill` makes an infill".to_string());
+    };
+    if let Some(v) = args.get("wall") {
+        let number = param_one(word, "wall", v, Slot::Number, lookup)?;
+        if let ParamRef::Literal(t) = number
+            && t < 0.0
+        {
+            return Err(format!(
+                "`infill wall=` is measured inward from the body, so nought is the least it can be, not {t}"
+            ));
+        }
+        *wall = number;
+    }
+    if let Some(slot) = operand_named(word, "fill", args, lookup)? {
+        *fill = slot;
+    }
+    // A join may follow a ramp, as a blend's radius may, since that is what it lowers to.
+    let radius = args.get("join").map(|v| param_one(word, "join", v, Slot::NumberOrField, lookup)).transpose()?;
+    let second = args.get("second").map(|v| param_one(word, "second", v, Slot::Number, lookup)).transpose()?;
+    let shape = args.get("g").map(|v| continuity(word, v)).transpose()?;
+    match radius {
+        Some(ParamRef::Literal(r)) if r <= 0.0 => *join = Fillet::hard(),
+        Some(radius) => join.radius = radius,
+        None => {}
+    }
+    if let Some(shape) = shape {
+        if join.is_plainly_hard() {
+            return Err("`infill g=` goes with a join, `join=`".to_string());
+        }
+        join.continuity = shape;
+    }
+    if let Some(second) = second {
+        if join.continuity != Continuity::Chamfer {
+            return Err("`infill second=` is a chamfer's second leg — say g=chamfer with it".to_string());
+        }
+        join.second = Some(second);
+    }
+    Ok(node)
+}
+
 /// An offset with `distance=` applied -- the one modifier whose number a field may drive.
 pub fn offset_with_keys(mut node: Node, args: &Args, lookup: &dyn Fn(&str) -> Lookup) -> Result<Node, String> {
     let Node::Offset { distance, .. } = &mut node else { return Err("`offset` makes an offset".to_string()) };
@@ -2259,8 +2358,11 @@ pub fn points(verb: &str, word: &str, value: &Value) -> Result<Vec<nalgebra::Poi
                 one.split(',').map(|p| p.trim().parse::<f64>().ok().filter(|v| v.is_finite())).collect();
             match parts {
                 Some(p) if p.len() == 3 => Ok(nalgebra::Point3::new(p[0], p[1], p[2])),
+                // Two numbers is a point across a plane: the one `on=` names, or the one being
+                // drawn on, which is where a sketch's points are typed.
+                Some(p) if p.len() == 2 => Ok(nalgebra::Point3::new(p[0], p[1], 0.0)),
                 _ => Err(format!(
-                    "`{verb} {word}=` is points of three numbers separated by `;`, like 0,0,0;10,0,0 \u{2014} not {one:?} (a curve's points are numbers, not parameters)"
+                    "`{verb} {word}=` is points of three numbers separated by `;`, like 0,0,0;10,0,0 \u{2014} or two across a plane \u{2014} not {one:?} (a curve's points are numbers, not parameters)"
                 )),
             }
         })
@@ -2713,6 +2815,13 @@ pub(crate) mod tests {
             Node::Morph { a: Operand::filled(id), b: Operand::filled(other), t: lit(0.5) },
             Node::Offset { input: Operand::filled(id), distance: lit(2.0) },
             Node::Shell { input: Operand::filled(id), thickness: lit(1.0) },
+            Node::Infill {
+                input: Operand::filled(id),
+                wall: lit(2.0),
+                fill: Operand::filled(other),
+                join: Fillet { radius: lit(1.0), continuity: Continuity::Chamfer, second: Some(lit(0.5)) },
+            },
+            Node::Infill { input: Operand::filled(id), wall: lit(2.0), fill: Operand::filled(other), join: Fillet::hard() },
             Node::Twist { input: Operand::filled(id), degrees_per_mm: lit(1.0), frame: frame.clone() },
             Node::Mirror { input: Operand::filled(id), frame: frame.clone(), join: true },
             Node::Scale { input: Operand::filled(id), factors: p(1.5, 0.7, 1.0), frame: frame.clone() },
@@ -2813,6 +2922,50 @@ pub(crate) mod tests {
                 smooth: fieldform_scene::LoftSmooth::G1,
             },
         ]
+    }
+
+    /// What kind of value each key takes, read off the sample blocks: the shape of the one field
+    /// the key covers. A key that covers several fields, or a field opened out of a frame, is
+    /// left out rather than guessed (`mcp-server-spec.md` P7). Feeds `key_types::TYPES`.
+    pub(crate) fn derived_key_types() -> std::collections::BTreeMap<(String, String), &'static str> {
+        use serde_json::Value as J;
+        let mut seen: std::collections::BTreeMap<(String, String), BTreeSet<&'static str>> = Default::default();
+        for node in samples() {
+            let Reach::Ops(ops) = reach_of(&node) else { continue };
+            let value = serde_json::to_value(&node).expect("a sample serializes");
+            let object = value.as_object().expect("a node is an object");
+            for op in ops.iter() {
+                let Some(Verb { keys: Keys::Declared { reads, .. }, .. }) = verb(op) else { continue };
+                for k in reads.iter() {
+                    let [field] = k.covers else { continue };
+                    let Some(v) = object.get(*field) else { continue };
+                    // A number slot is a `ParamRef`, which serializes as a one-key object
+                    // (`{"literal": 5}`, or a parameter or ramp), so it counts as a number.
+                    let number = |v: &J| {
+                        v.is_number()
+                            || v.as_object().is_some_and(|o| {
+                                o.len() == 1 && o.keys().all(|k| matches!(k.as_str(), "literal" | "named" | "field"))
+                            })
+                    };
+                    let ty = match v {
+                        J::Bool(_) => "flag",
+                        J::String(_) => "word",
+                        J::Number(_) => "number",
+                        v if number(v) => "number",
+                        J::Array(a) if a.len() == 3 && a.iter().all(number) => "vector3",
+                        J::Array(a) if a.len() == 2 && a.iter().all(number) => "pair",
+                        J::Array(_) => "list",
+                        J::Object(_) => "structured",
+                        J::Null => continue,
+                    };
+                    seen.entry((op.to_string(), k.word.to_string())).or_default().insert(ty);
+                }
+            }
+        }
+        // A key whose blocks disagree is not given a type.
+        seen.into_iter()
+            .filter_map(|(k, v)| (v.len() == 1).then(|| (k, v.into_iter().next().unwrap())))
+            .collect()
     }
 
     /// The serialized keys of a node, with a nested frame or pair of ends opened one level, so

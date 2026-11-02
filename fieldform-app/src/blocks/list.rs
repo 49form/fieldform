@@ -781,6 +781,34 @@ pub(crate) struct ProfileRows {
     pub(crate) loops: Vec<Vec<CurveId>>,
 }
 
+/// The block list on its way down to a row, after something chosen elsewhere.
+///
+/// **The list follows the viewport, because a selection you cannot find is half a selection.** A
+/// block is drawn inside the block that reads it, every row starts closed, and a plane three
+/// booleans deep is highlighted in a row nobody can see. So a selection that did not come from
+/// the list opens every row above it and scrolls to it ([`App::follow_selection`]). It opens rows
+/// and never closes one, so what somebody had open stays open.
+///
+/// **Held for some frames rather than done once**, because a row's contents are drawn only as it
+/// opens: each level down exists a frame or two after the one above it, and the row itself moves
+/// until the last has finished sliding.
+pub(crate) struct Reveal {
+    /// The row being gone to.
+    pub(crate) target: RowKey,
+    /// The rows above it, every one, since a shared block has a row in each of its readers.
+    pub(crate) open: std::collections::HashSet<RowKey>,
+    /// Frames left before it gives up, or once `reached`, before it lets go.
+    pub(crate) left: u32,
+    /// Whether the row has been drawn yet.
+    pub(crate) reached: bool,
+}
+
+/// Frames a [`Reveal`] allows for each row it has to open: a row slides for a twelfth of a second.
+pub(crate) const REVEAL_FRAMES_PER_ROW: u32 = 8;
+
+/// Frames a [`Reveal`] stays on a row it has reached, while the rows above finish opening.
+pub(crate) const REVEAL_SETTLE_FRAMES: u32 = 12;
+
 /// What a curve's row becomes once loops are folded: its own row, the profile row it heads, or
 /// nothing, because it is drawn inside a row headed by another curve.
 ///

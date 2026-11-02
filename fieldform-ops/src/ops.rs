@@ -820,6 +820,57 @@ impl Command for SetSurfacePoint {
     }
 }
 
+/// A sketch's record made, edited or removed (`Document::sketches`): which plane a curve lies on
+/// and its points across it. The record alone, as [`SetSurfacePoint`] is: the world points it
+/// derives are the curve's own, set by the curve's commands or by the re-laying that follows any
+/// change.
+pub struct SetSketch {
+    curve: CurveId,
+    before: Option<fieldform_scene::Sketch>,
+    after: Option<fieldform_scene::Sketch>,
+}
+
+impl SetSketch {
+    pub fn new(curve: CurveId, before: Option<fieldform_scene::Sketch>, after: Option<fieldform_scene::Sketch>) -> Self {
+        Self { curve, before, after }
+    }
+
+    pub fn insert(curve: CurveId, sketch: fieldform_scene::Sketch) -> Self {
+        Self::new(curve, None, Some(sketch))
+    }
+
+    pub fn remove(curve: CurveId, sketch: fieldform_scene::Sketch) -> Self {
+        Self::new(curve, Some(sketch), None)
+    }
+
+    fn apply(&self, doc: &mut Document, state: &Option<fieldform_scene::Sketch>) {
+        match state {
+            Some(sketch) => {
+                doc.sketches.insert(self.curve, sketch.clone());
+            }
+            None => {
+                doc.sketches.remove(&self.curve);
+            }
+        }
+    }
+}
+
+impl Command for SetSketch {
+    fn name(&self) -> &str {
+        "sketch.set"
+    }
+
+    fn execute(&mut self, doc: &mut Document) -> Result<(), OpError> {
+        self.apply(doc, &self.after.clone());
+        Ok(())
+    }
+
+    fn undo(&mut self, doc: &mut Document) -> Result<(), OpError> {
+        self.apply(doc, &self.before.clone());
+        Ok(())
+    }
+}
+
 /// An axis stood on a body's surface made, edited or removed (`Document::surface_axes`).
 ///
 /// The record alone, as [`SetRelation`] is: the two points it derives are ordinary control points,

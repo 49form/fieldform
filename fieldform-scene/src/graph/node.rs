@@ -579,13 +579,17 @@ pub enum Node {
         /// root, so it leaves the body list and cannot be shown, hidden or handed to a boolean
         /// on its own.
         ///
-        /// So `false` is what the tool now builds: the block holds copies one to `count - 1`,
-        /// and instance zero stays a body of its own. **The picture does not change** — the
-        /// same `count` instances are on screen — the body list simply gains the row that used
-        /// to disappear, and hiding it now leaves a gap in the ring rather than doing nothing.
+        /// So `false` holds copies one to `count - 1` alone, and the body is left out unless its
+        /// eye is turned on beside them. `true` is the whole count, and is what a document
+        /// missing the field is read as.
         ///
-        /// `true` is what every pattern written before this existed meant, which is why it is
-        /// what a document missing the field is read as.
+        /// **Reversed by the owner on 2026-11-01: the tool builds `true`.** It built `false` from
+        /// 2026-10-02, to keep the body a row of its own, on the reasoning that the picture was
+        /// the same `count` instances either way. The picture was; the shape was not. The block
+        /// alone was one short, so a row of three subtracted cut two holes and left the body
+        /// standing as a pin in the third, which every measure of the part counted and nothing
+        /// reported. A count that is only true of the screen is the worse failure. What it cost:
+        /// the body is inside the row, so it is reached from there rather than listed as a body.
         join: bool,
         /// How the copies meet each other.
         ///
@@ -603,8 +607,8 @@ pub enum Node {
         /// pattern block is unioning them by default — feels like maybe it should not be", and
         /// answered *yes, it should*: the fold is what makes a count affordable (12 and 40 copies
         /// cost the same per reading), `join` keeps the original a body of its own, and this is how
-        /// the copies are rounded when they should be. The tool builds `join: false` and
-        /// [`Fillet::hard`]; `a_pattern_holding_only_its_copies_leaves_the_body_out` pins it.
+        /// the copies are rounded when they should be. The tool builds [`Fillet::hard`], and
+        /// `a_pattern_holding_only_its_copies_leaves_the_body_out` pins what `join: false` means.
         fillet: Fillet,
         /// Spacing, symmetry, a partial angle, a second direction and the copies to leave out —
         /// see [`PatternOptions`]. Last, so the fields above keep their places.
@@ -682,6 +686,34 @@ pub enum Node {
     Shell {
         input: Operand,
         thickness: ParamRef,
+    },
+    /// A body with a solid skin, and its inside filled with something else.
+    ///
+    /// One block, because the skin, the offset and the clip mean nothing apart, and a person
+    /// doing this is answering one question: how thick a wall. What it fills with is a block of
+    /// its own, since a lattice *does* mean something apart, and keeps its own panel in the slot.
+    ///
+    /// It has no arithmetic of its own. Both compilers read it through
+    /// `fieldform_field::with_infills_lowered`, which rewrites it into the three blocks it is:
+    /// the body, minus the inward offset of the body with the fill taken out of it. That is
+    /// `max(F, smin(L, -F - t))`, with the outer `max` last, so no join can grow the part: on the
+    /// body's own surface the inner term is at most `-t`.
+    ///
+    /// The wall is measured inward, as a [`Node::Shell`]'s is, so the outside dimensions stay the
+    /// ones the body was built to.
+    Infill {
+        /// The body being filled.
+        input: Operand,
+        /// How thick the skin is, in millimetres, measured inward. One number: a ramp is refused
+        /// by name, as a shell's is. Nought is plain infill, with no skin at all.
+        wall: ParamRef,
+        /// What fills the inside: a lattice by default, and any body the block is pointed at,
+        /// since the arithmetic does not care.
+        fill: Operand,
+        /// How the fill meets the inside of the skin. The [`Fillet`] a blend takes (D9), and
+        /// ignored at a wall of nought, where there is no skin to meet and rounding would flare
+        /// every lattice wall where the outer surface cuts it.
+        join: Fillet,
     },
     /// A field read as a *number*, mapped onto a range — the one thing that may drive a
     /// parameter.
@@ -1033,6 +1065,10 @@ impl Node {
             Node::Morph { t, .. } => out.push(t),
             Node::Offset { distance, .. } => out.push(distance),
             Node::Shell { thickness, .. } => out.push(thickness),
+            Node::Infill { wall, join, .. } => {
+                out.push(wall);
+                out.extend(join.params());
+            }
             Node::Twist { degrees_per_mm, frame, .. } => {
                 out.push(degrees_per_mm);
                 out.extend(frame.params());
@@ -1208,6 +1244,10 @@ impl Node {
             Node::Morph { t, .. } => out.push(t),
             Node::Offset { distance, .. } => out.push(distance),
             Node::Shell { thickness, .. } => out.push(thickness),
+            Node::Infill { wall, join, .. } => {
+                out.push(wall);
+                out.extend(join.params_mut());
+            }
             Node::Twist { degrees_per_mm, frame, .. } => {
                 out.push(degrees_per_mm);
                 out.extend(frame.params_mut());
@@ -1364,6 +1404,8 @@ impl Node {
             | Node::Mesh(_)
             | Node::Unknown(_) => {}
             Node::Morph { a, b, .. } => out.extend([a, b]),
+            // The body first, so a walk that reads operands in order reads it before its fill.
+            Node::Infill { input, fill, .. } => out.extend([input, fill]),
             Node::Boolean { inputs, .. } | Node::Blend { inputs, .. } => out.extend(inputs.iter()),
             Node::Transform { input, .. }
             | Node::Offset { input, .. }
@@ -1472,6 +1514,7 @@ impl Node {
             | Node::Mesh(_)
             | Node::Unknown(_) => Vec::new(),
             Node::Morph { a, b, .. } => vec![a, b],
+            Node::Infill { input, fill, .. } => vec![input, fill],
             Node::Boolean { inputs, .. } | Node::Blend { inputs, .. } => inputs.iter_mut().collect(),
             Node::Transform { input, .. }
             | Node::Offset { input, .. }
@@ -1609,6 +1652,7 @@ impl Node {
     pub fn fillet(&self) -> Option<&Fillet> {
         match self {
             Node::Blend { fillet, .. } | Node::Pattern { fillet, .. } => Some(fillet),
+            Node::Infill { join, .. } => Some(join),
             _ => None,
         }
     }
@@ -1617,6 +1661,7 @@ impl Node {
     pub fn fillet_mut(&mut self) -> Option<&mut Fillet> {
         match self {
             Node::Blend { fillet, .. } | Node::Pattern { fillet, .. } => Some(fillet),
+            Node::Infill { join, .. } => Some(join),
             _ => None,
         }
     }

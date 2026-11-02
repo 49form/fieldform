@@ -756,26 +756,31 @@ fn radial_direction(q: vec3<f32>) -> vec3<f32> {
 }
 
 // Columns are the frame's u, v, w: across, across, and along the segment.
+// **Without a branch, for the driver's sake and nobody else's.** Every cylinder, capsule and cone
+// reads this for every field reading, so a part's copies of it are hundreds once it is all inlined
+// into the march: 258 on the 41 cylinders of `document_cost`'s phone, where three `if`s here cost
+// more than the rest of the shader. Measured on an RTX A500 by that example, cold:
+//
+// |  | compile | draft 720 | still |
+// |---|---|---|---|
+// | with `if`s | 19.1 s | 63.8 ms | 112.9 ms |
+// | `select` | 8.1 s | 41.7 ms | 80.7 ms |
+//
+// It is the march's loop that charges for it. The same treatment of `edged3`, a distance with 60
+// copies, and of the cylinder and cuboid normals, read 8.2 s and 7.9 s: those are not worth it.
 fn segment_frame(a: vec3<f32>, b: vec3<f32>) -> mat3x3<f32> {
     let along = b - a;
     let len = length(along);
-    if len < 1e-9 {
-        return mat3x3<f32>(
-            vec3<f32>(1.0, 0.0, 0.0),
-            vec3<f32>(0.0, 1.0, 0.0),
-            vec3<f32>(0.0, 0.0, 1.0),
-        );
-    }
-    let w = along / len;
+    let empty = len < 1e-9;
+    let w = select(along / len, vec3<f32>(0.0, 0.0, 1.0), empty);
     // Cross with whichever axis `w` leans on least, so the product is never near zero.
-    var least = vec3<f32>(0.0, 0.0, 1.0);
-    if abs(w.x) <= abs(w.y) && abs(w.x) <= abs(w.z) {
-        least = vec3<f32>(1.0, 0.0, 0.0);
-    } else if abs(w.y) <= abs(w.z) {
-        least = vec3<f32>(0.0, 1.0, 0.0);
-    }
-    let u = normalize(cross(w, least));
-    return mat3x3<f32>(u, cross(w, u), w);
+    let least = select(
+        select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), abs(w.y) <= abs(w.z)),
+        vec3<f32>(1.0, 0.0, 0.0),
+        abs(w.x) <= abs(w.y) && abs(w.x) <= abs(w.z),
+    );
+    let u = select(normalize(cross(w, least)), vec3<f32>(1.0, 0.0, 0.0), empty);
+    return mat3x3<f32>(u, select(cross(w, u), vec3<f32>(0.0, 1.0, 0.0), empty), w);
 }
 
 fn segment_local(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> vec3<f32> {

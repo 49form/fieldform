@@ -51,9 +51,10 @@ use nalgebra::{Point2, Point3, Vector2, Vector3};
 /// cheaper. **Since 2026-10-25 it is a ceiling**: where every section has the same corners, the
 /// vertices follow the boundary's turn rather than its length ([`run_counts`]), so two squares
 /// are four vertices and a curved run gets what keeps its chords within [`LOFT_SAG_MM`]. Sections
-/// whose corner counts differ still spread this many evenly, since a square lofted into a
-/// circle needs its runs met by points at the same share of the way round. Corners are kept
-/// exactly whatever the count.
+/// whose corner counts differ still spread this many, since a square lofted into a circle needs
+/// its runs met by points at the same share of the way round. Corners are kept exactly whatever
+/// the count, and so are the ends of long straight runs, or the fillets between them are lost
+/// ([`Loop::corners`]).
 pub(crate) const LOFT_SAMPLES: usize = 64;
 
 /// The turn at a vertex that makes it a corner the correspondence keeps and matches, in degrees.
@@ -246,11 +247,28 @@ fn centroid_of(points: &[Point3<f64>]) -> Point3<f64> {
     )
 }
 
+/// How many even spacings a straight run has to span before its two ends are kept exactly.
+///
+/// One would do in principle: a chord longer than the spacing has nothing inside it to sample,
+/// and it is its ends that hold the shape. It is one and a half so that a polygon of
+/// [`LOFT_SAMPLES`] sides, whose every side *is* the spacing, is not decided by rounding.
+const STRAIGHT_RUN_SPACINGS: f64 = 1.5;
+
+/// The turn in radians below which a vertex lies on a straight: a line tessellated into pieces
+/// has these, and a curve at a degree of turn does not.
+const FLAT_TURN: f64 = 1e-6;
+
+/// The turn in radians a span has to hold before turn is worth reading at all, which keeps a
+/// straight span with rounding noise in it from being spaced by the noise.
+const SOME_TURN: f64 = 1e-3;
+
 /// A closed polygon, read by arc length.
 struct Loop {
     points: Vec<Point2<f64>>,
     /// Arc length from vertex 0 to each vertex, and the whole perimeter last.
     arc: Vec<f64>,
+    /// The absolute turn at each vertex, in radians.
+    turns: Vec<f64>,
 }
 
 impl Loop {
@@ -282,23 +300,108 @@ impl Loop {
             total += (kept[(i + 1) % kept.len()] - kept[i]).norm();
         }
         arc.push(total);
-        Self { points: kept, arc }
+        let n = kept.len();
+        let turns = (0..n)
+            .map(|i| {
+                let before = kept[i] - kept[(i + n - 1) % n];
+                let after = kept[(i + 1) % n] - kept[i];
+                (before.x * after.y - before.y * after.x).atan2(before.dot(&after)).abs()
+            })
+            .collect();
+        Self { points: kept, arc, turns }
     }
 
     fn perimeter(&self) -> f64 {
         *self.arc.last().unwrap_or(&0.0)
     }
 
-    /// The vertices where the boundary turns by more than [`CORNER_DEGREES`], in order.
+    /// The vertices the correspondence keeps exactly, in order: where the boundary turns by more
+    /// than [`CORNER_DEGREES`], and **where a long straight run ends, however gently.**
+    ///
+    /// The second half is what a rounded corner needs. A 3 mm fillet on a metre of outline turns
+    /// a degree a vertex, so none of its vertices is a corner by the first test, and the even
+    /// spacing then stepped over it: at sixty-four points, 14 mm apart, a 90 degree arc 5 mm long
+    /// came out as whatever chord the spacing happened to land on, a chamfer of a different size
+    /// at each corner of the same shape, with nothing anywhere to say so. A straight run has
+    /// nothing inside it to sample, so the shape is held by its two ends, and keeping those
+    /// makes every fillet a run of its own that [`run_counts`] can spend on.
     fn corners(&self) -> Vec<usize> {
         let n = self.points.len();
         let limit = CORNER_DEGREES.to_radians();
-        (0..n)
-            .filter(|&i| {
-                let before = self.points[i] - self.points[(i + n - 1) % n];
-                let after = self.points[(i + 1) % n] - self.points[i];
-                let turn = (before.x * after.y - before.y * after.x).atan2(before.dot(&after));
-                turn.abs() > limit
+        let mut kept: Vec<bool> = self.turns.iter().map(|t| *t > limit).collect();
+        // Consecutive bent vertices bound a straight run, through any flat ones between them.
+        let bent: Vec<usize> = (0..n).filter(|&i| self.turns[i] > FLAT_TURN).collect();
+        let total = self.perimeter();
+        let long = STRAIGHT_RUN_SPACINGS * total / LOFT_SAMPLES as f64;
+        for w in 0..bent.len() {
+            let (a, b) = (bent[w], bent[(w + 1) % bent.len()]);
+            if (self.arc[b] - self.arc[a]).rem_euclid(total) > long {
+                kept[a] = true;
+                kept[b] = true;
+            }
+        }
+        (0..n).filter(|&i| kept[i]).collect()
+    }
+
+    /// The turn segment `i` carries for spacing: half of each end's, since a turn sits at a
+    /// vertex and the spacing reads along segments. A kept corner gives none, because it has its
+    /// vertex already and is no reason to crowd the runs either side of it.
+    fn segment_turn(&self, i: usize) -> f64 {
+        let n = self.points.len();
+        let limit = CORNER_DEGREES.to_radians();
+        let soft = |t: f64| if t > limit { 0.0 } else { t };
+        (soft(self.turns[i]) + soft(self.turns[(i + 1) % n])) * 0.5
+    }
+
+    /// Where the given shares of the `length` millimetres from `from` fall, as arc positions, for
+    /// `shares` ascending in `0..=1`.
+    ///
+    /// **Length and turn count half each**, so a run or a whole boundary gets its vertices where
+    /// it curves without its long sides going bare: a uniform arc reads the same either way and
+    /// comes out evenly spaced, and a tight fillet between two gentle curves, which no test for a
+    /// straight can find, gets half the budget's share of its turn however short it is.
+    fn spaced(&self, from: f64, length: f64, shares: &[f64]) -> Vec<f64> {
+        let n = self.points.len();
+        let total = self.perimeter();
+        if n == 0 || total <= 0.0 || length <= 0.0 {
+            return shares.iter().map(|_| from).collect();
+        }
+        // The span cut into its pieces of segment, each with its length and the turn it holds.
+        let start = from.rem_euclid(total);
+        let mut i = match self.arc[..n].binary_search_by(|a| a.total_cmp(&start)) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        };
+        let mut pieces: Vec<(f64, f64)> = Vec::with_capacity(n + 1);
+        let (mut left, mut into) = (length, start - self.arc[i]);
+        while left > 1e-12 && pieces.len() <= n {
+            let run = self.arc[i + 1] - self.arc[i];
+            let piece = (run - into).min(left);
+            pieces.push((piece, if run > 0.0 { self.segment_turn(i) * piece / run } else { 0.0 }));
+            left -= piece;
+            into = 0.0;
+            i = (i + 1) % n;
+        }
+        let spanned: f64 = pieces.iter().map(|p| p.0).sum();
+        let turned: f64 = pieces.iter().map(|p| p.1).sum();
+        let weight = |p: &(f64, f64)| {
+            p.0 / spanned.max(1e-12) + if turned > SOME_TURN { p.1 / turned } else { 0.0 }
+        };
+        let whole: f64 = pieces.iter().map(weight).sum();
+        // One walk along the pieces, since the shares ascend.
+        let (mut p, mut before, mut walked) = (0, 0.0, 0.0);
+        shares
+            .iter()
+            .map(|share| {
+                let wanted = share * whole;
+                while p + 1 < pieces.len() && before + weight(&pieces[p]) < wanted {
+                    before += weight(&pieces[p]);
+                    walked += pieces[p].0;
+                    p += 1;
+                }
+                let here = weight(&pieces[p]);
+                let t = if here > 0.0 { ((wanted - before) / here).clamp(0.0, 1.0) } else { 0.0 };
+                from + walked + pieces[p].0 * t
             })
             .collect()
     }
@@ -330,12 +433,13 @@ impl Loop {
 /// NURBS loft follows: where every section has the same number of corners, corner `j` of each
 /// is matched to corner `j` of the next — the cyclic shift chosen so the matched corners move
 /// least in frame coordinates, so nothing twists that was not drawn twisted — and the run between
-/// two corners is sampled at the same fractions of its own length in every section, so corners
-/// land on corners and straight runs stay straight. Where the counts differ, or no section has
-/// a corner, every section keeps its own corners exactly and spreads the rest of the budget
-/// evenly round its perimeter, with its start chosen to move least against the section before
-/// it; corner `j` then runs to whatever lies at the same share of the way round, which is what
-/// lofting a square into a circle means.
+/// two corners is sampled at the same shares of its own length and turn in every section
+/// ([`Loop::spaced`]), so corners land on corners and straight runs stay straight. Where the counts
+/// differ, or no section has a corner, every section keeps its own corners exactly and spreads
+/// the rest of the budget round its perimeter by the same measure, with its start chosen to move
+/// least against the section before it; corner `j` then runs to whatever lies at the same share of
+/// the way round, which is what lofting a square into a circle means. "Corner" here is
+/// [`Loop::corners`]' word, which takes in the ends of long straight runs.
 ///
 /// Frame coordinates throughout: the frame is rotation-minimising, so "the same place" at two
 /// stations is the place a person would point at.
@@ -378,10 +482,8 @@ fn by_corners(loops: &[Loop], corners: &[Vec<usize>], samples: usize) -> Vec<Vec
             let mut out = Vec::with_capacity(counts.iter().sum());
             for j in 0..c {
                 let from = loops[k].arc[corners[k][(j + shifts[k]) % c]];
-                let length = run_length(k, j);
-                for i in 0..counts[j] {
-                    out.push(loops[k].at(from + length * i as f64 / counts[j] as f64));
-                }
+                let shares: Vec<f64> = (0..counts[j]).map(|i| i as f64 / counts[j] as f64).collect();
+                out.extend(loops[k].spaced(from, run_length(k, j), &shares).into_iter().map(|s| loops[k].at(s)));
             }
             out
         })
@@ -465,17 +567,18 @@ fn run_counts(
 }
 
 /// [`correspond`] where the corner counts differ: each section keeps its own corners and
-/// spreads the rest evenly, starting where it moves least against the section before.
+/// spreads the rest by [`Loop::spaced`], starting where it moves least against the section before.
 fn by_arc(loops: &[Loop], corners: &[Vec<usize>], samples: usize) -> Vec<Vec<Point2<f64>>> {
     // A section's vertices from a start `s0` millimetres round: its corners where they are, and
-    // the rest at even fractions of the perimeter from the start, all in arc order from it.
+    // the rest at even shares of the perimeter from the start, all in arc order from it.
     let sampled = |k: usize, s0: f64| -> Vec<Point2<f64>> {
         let total = loops[k].perimeter().max(1e-12);
         let even = samples - corners[k].len();
+        let shares: Vec<f64> = (0..even).map(|i| (i as f64 + 0.5) / even as f64).collect();
         let mut at: Vec<f64> = corners[k]
             .iter()
             .map(|&i| (loops[k].arc[i] - s0).rem_euclid(total))
-            .chain((0..even).map(|i| total * (i as f64 + 0.5) / even as f64))
+            .chain(loops[k].spaced(s0, total, &shares).into_iter().map(|s| s - s0))
             .collect();
         at.sort_by(|a, b| a.total_cmp(b));
         at.into_iter().map(|s| loops[k].at(s0 + s)).collect()
@@ -970,6 +1073,139 @@ mod tests {
             if mid.y > 1e-6 {
                 assert!(20.0 - mid.norm() <= LOFT_SAG_MM + 1e-9, "sag {}", 20.0 - mid.norm());
             }
+        }
+    }
+
+    /// A rectangle with its corners rounded, as a drawn outline arrives: each side one long
+    /// segment, each corner a degree of turn a vertex.
+    fn rounded(half_x: f64, half_y: f64, radius: f64) -> Vec<Point2<f64>> {
+        let centres = [(1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0)];
+        let mut out = Vec::new();
+        for (c, (sx, sy)) in centres.into_iter().enumerate() {
+            let at = (half_x - radius) * sx;
+            let bt = (half_y - radius) * sy;
+            for step in 0..=90 {
+                let a = (c as f64 * 90.0 - 90.0 + step as f64).to_radians();
+                out.push(Point2::new(at + radius * a.cos(), bt + radius * a.sin()));
+            }
+        }
+        out
+    }
+
+    /// The farthest any point of `drawn` lies from the closed polygon `kept`.
+    fn furthest_from(drawn: &[Point2<f64>], kept: &[Point2<f64>]) -> f64 {
+        drawn
+            .iter()
+            .map(|p| {
+                (0..kept.len())
+                    .map(|i| {
+                        let (a, b) = (kept[i], kept[(i + 1) % kept.len()]);
+                        let d = b - a;
+                        let t = ((p - a).dot(&d) / d.norm_squared().max(1e-18)).clamp(0.0, 1.0);
+                        (a + d * t - p).norm()
+                    })
+                    .fold(f64::INFINITY, f64::min)
+            })
+            .fold(0.0, f64::max)
+    }
+
+    /// **A rounded corner survives however long the sides beside it are.** A 305 x 216 mm
+    /// outline with 3 mm fillets, which is a corner 5 mm long on 900 mm of boundary. Even spacing
+    /// stepped over all four: they came out as chamfers up to 3.9 mm deep and no two alike.
+    /// Each fillet is a run of its own now, so the outline stays within the sag and costs a
+    /// third of the ceiling rather than all of it.
+    #[test]
+    fn a_rounded_corner_survives_however_long_the_sides_beside_it_are() {
+        let (big, small) = (rounded(152.6, 108.2, 3.0), rounded(150.3, 105.8, 3.0));
+        let out = correspond(&[big.clone(), small.clone()]);
+        assert_eq!(out[0].len(), out[1].len());
+        assert!(out[0].len() <= 32, "four sides and four fillets are not sixty-four vertices: {}", out[0].len());
+        for (drawn, kept) in [(&big, &out[0]), (&small, &out[1])] {
+            let worst = furthest_from(drawn, kept);
+            assert!(worst <= LOFT_SAG_MM, "the outline sits {worst} mm off what was drawn");
+        }
+        // Every corner of one section runs to the same corner of the other.
+        for (a, b) in out[0].iter().zip(&out[1]) {
+            assert!((a - b).norm() < 4.0, "{a:?} runs to {b:?}");
+        }
+    }
+
+    /// **And when the corner counts differ.** A rounded outline lofted into a circle has nothing
+    /// to match its fillets to, so it takes the arc path, and that path has to find them too. The
+    /// control is the circle, which must come out as evenly as it always did.
+    #[test]
+    fn a_rounded_corner_survives_a_loft_into_a_circle() {
+        let outline = rounded(152.6, 108.2, 3.0);
+        let ring: Vec<Point2<f64>> = (0..720)
+            .map(|i| {
+                let a = TAU * i as f64 / 720.0;
+                Point2::new(100.0 * a.cos(), 100.0 * a.sin())
+            })
+            .collect();
+        let out = correspond(&[outline.clone(), ring.clone()]);
+        assert_eq!(out[0].len(), out[1].len());
+        let worst = furthest_from(&outline, &out[0]);
+        assert!(worst <= 0.1, "the outline sits {worst} mm off what was drawn");
+        let chords: Vec<f64> = (0..out[1].len())
+            .map(|i| (out[1][(i + 1) % out[1].len()] - out[1][i]).norm())
+            .collect();
+        let (short, long) = (chords.iter().cloned().fold(f64::INFINITY, f64::min), chords.iter().cloned().fold(0.0, f64::max));
+        assert!(long / short < 1.05, "a circle stays even: {short} to {long}");
+    }
+
+    /// **A fillet between two curves has no straight to give it away.** Two gentle arcs of 300 mm
+    /// joined tangentially by a 2 mm one: nothing here is a corner, and only the turn says the
+    /// tight arc is there.
+    #[test]
+    fn a_tight_arc_between_gentle_ones_is_kept_without_a_straight_to_find_it_by() {
+        let leaf = |gentle: f64, tight: f64| -> Vec<Point2<f64>> {
+            let half = 30.0f64.to_radians();
+            let mut out = Vec::new();
+            let centre = (gentle - tight) * half.cos();
+            for (sign, base) in [(1.0, 0.0), (-1.0, 180.0)] {
+                for step in 0..60 {
+                    let a = (-30.0 + step as f64).to_radians() + f64::from(base).to_radians();
+                    out.push(Point2::new(
+                        gentle * a.cos() - sign * centre,
+                        gentle * a.sin(),
+                    ));
+                }
+                for step in 0..120 {
+                    let a = (30.0 + step as f64).to_radians() + f64::from(base).to_radians();
+                    out.push(Point2::new(
+                        tight * a.cos(),
+                        tight * a.sin() + sign * (gentle - tight) * half.sin(),
+                    ));
+                }
+            }
+            out
+        };
+        let a = leaf(300.0, 2.0);
+        let out = correspond(&[a.clone(), leaf(290.0, 2.0)]);
+        let worst = furthest_from(&a, &out[0]);
+        assert!(worst <= 0.15, "the outline sits {worst} mm off what was drawn");
+    }
+
+    /// **The field shows it, not only the polygon.** Through a whole loft of two rounded outlines
+    /// the four corners of a section read within the sag of nought, where the true point of each
+    /// fillet was left 1.2 to 3.9 mm outside the solid.
+    #[test]
+    fn a_lofted_rounded_rectangle_keeps_all_four_corners_alike() {
+        let lift = |points: Vec<Point2<f64>>, z: f64| -> Vec<Point3<f64>> {
+            points.into_iter().map(|p| Point3::new(p.x, p.y, z)).collect()
+        };
+        let lofted = Lofted::new(
+            &[lift(rounded(152.6, 108.2, 3.0), 0.0), lift(rounded(150.3, 105.8, 3.0), 133.0)],
+            straight(133.0),
+            Vector3::x(),
+            Smooth::Linear,
+        )
+        .expect("two outlines loft");
+        let inset = 3.0 * (1.0 - std::f64::consts::FRAC_1_SQRT_2);
+        for (sx, sy) in [(1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)] {
+            let p = Point3::new(sx * (152.6 - inset), sy * (108.2 - inset), 0.001);
+            let d = lofted.distance(p);
+            assert!(d.abs() <= LOFT_SAG_MM, "the fillet at ({sx}, {sy}) reads {d}");
         }
     }
 

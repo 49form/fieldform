@@ -81,6 +81,7 @@ pub use attract::{
 };
 pub use curve_field::{CurveField, DEFAULT_TOLERANCE_MM};
 pub use extent::Extent;
+pub use graph_field::{InfillCavity, infill_cavity, with_infills_lowered};
 pub use graph_field::{
     AXIS_FLOOR, CompileError, GraphField, LeafCache, approximate_blends,
     carries_true_distance, driven_blend_divisor, driven_lattice_divisor, driven_morph_divisor,
@@ -150,7 +151,11 @@ pub use primitive::{Cuboid, Edge, EdgedCuboid, SkewedBox, Sphere};
 pub(crate) use primitive::{EdgedCone, EdgedCylinder};
 pub(crate) use primitive::{Capsule, Cone, Cylinder, Plane, Point, Torus};
 pub use simplify::{Simplified, improve_shape, relax, simplify, weld};
-pub use tessellate::{Cancel, Progress, Stage, Tessellated, tessellate};
+pub use adaptive::LeafEstimate;
+pub use tessellate::{
+    Cancel, Estimate, Progress, Stage, Stopped, Tessellated, estimate, surface_leaves, tessellate,
+    tessellate_within,
+};
 pub use sdf::{CageField, ClosestPoint, MeshError, MeshField};
 pub use spine::{Nearest, Spine};
 pub use lofted::{derived_centerline_cubic, LoftError, Lofted};

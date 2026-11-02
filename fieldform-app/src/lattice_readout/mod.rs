@@ -1217,7 +1217,11 @@ pub(crate) fn changes_the_cells(consumer: &Node, from: NodeId) -> bool {
         // They clip, place or join: material changes only where two operands meet, which a
         // per-cell figure does not describe, and the hover says that rather than calling them
         // rigid -- a pattern's union can be rounded, and overlapping copies are not one cell.
-        Node::Boolean { .. } | Node::Blend { .. } | Node::Pattern { .. } | Node::Mirror { .. } => {
+        Node::Boolean { .. }
+        | Node::Blend { .. }
+        | Node::Pattern { .. }
+        | Node::Mirror { .. }
+        | Node::Infill { .. } => {
             false
         }
         // It reads the lattice as a number.
@@ -1292,6 +1296,7 @@ fn block_name(doc: &Document, id: NodeId, node: &Node) -> String {
     match node {
         Node::Offset { .. } => "Offset",
         Node::Shell { .. } => "Shell",
+        Node::Infill { .. } => "Infill",
         Node::Twist { .. } => "Twist",
         Node::Morph { .. } => "Morph",
         Node::Attract { .. } => "Attract",

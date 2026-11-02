@@ -212,7 +212,7 @@ impl App {
     /// why this answers an `Operand` rather than a block: a line that says `none` has said *do
     /// not* guess, and a caller that fell back to the selection would be doing something other
     /// than what it was told.
-    fn named_target(
+    pub(crate) fn named_target(
         &mut self,
         word: &str,
         args: &Args,
@@ -238,7 +238,7 @@ impl App {
     ///
     /// Free of `self` so a test can hold the rule without a window and a device, as
     /// [`Self::refusal_of`] is.
-    fn target_operand(
+    pub(crate) fn target_operand(
         named: Option<fieldform_scene::Operand>,
         selected: Option<NodeId>,
         bodies: &[NodeId],
@@ -2324,6 +2324,11 @@ impl App {
                     let local = curve.control_points()[i];
                     curve.set_control_point(i, self.into_drawing_plane(local));
                 }
+                // On a plane block, it is a sketch there: laid as it stands, which is on the plane.
+                if let Some((sketch, laid)) = self.sketching_on().and_then(|p| self.sketch_of(&curve, p)) {
+                    curve = laid;
+                    self.doc.sketches.insert(id, sketch);
+                }
                 self.doc.curves.insert(id, curve);
                 // Placed now, as everything written past the history is
                 // (`block-ownership-spec.md` §4.1).
@@ -2425,6 +2430,36 @@ impl App {
             self.begin_curve_placement(degree);
             return;
         };
+        // `on=<plane>`: the points are across that plane -- u, v, and a third number ignored --
+        // and the curve is a sketch on it. Without it, points are in world, and a curve typed flat
+        // on the plane being sketched on is a sketch there too.
+        let on = match args.get("on") {
+            None => None,
+            Some(v) => {
+                let Some(plane) = v.as_str().and_then(|name| self.node_named(name)) else {
+                    self.warn(format!("`{verb} on=` names a plane, not {:?}", v.text()));
+                    return;
+                };
+                if !matches!(self.part_graph().node(plane), Some(Node::Plane { .. })) {
+                    self.warn(format!("`{verb} on=`: {} is not a plane", self.body_label(plane)));
+                    return;
+                }
+                Some(plane)
+            }
+        };
+        let points: Vec<Point3<f64>> = match on.map(|p| self.plane_laid(p)) {
+            Some(Ok(frame)) => points.iter().map(|p| frame.lay([p.x, p.y])).collect(),
+            Some(Err(why)) => {
+                self.warn(format!("`{verb} on=`: {why}"));
+                return;
+            }
+            None => points,
+        };
+        let plane = on.or_else(|| {
+            let plane = self.sketching_on()?;
+            let frame = self.plane_laid(plane).ok()?;
+            points.iter().all(|p| frame.local_of(*p).1.abs() <= fieldform_scene::ON_PLANE_MM).then_some(plane)
+        });
         let id = CurveId::new();
         let mut curve = match single_span(id, degree_asked, points) {
             Ok(curve) => curve,
@@ -2441,7 +2476,8 @@ impl App {
         // Not a graph edit, so it ends any gesture a value drag had open: the next graph edit
         // would otherwise take this entry for the drag's and replace it.
         self.gesture = None;
-        if let Err(e) = self.stack.execute(&mut self.doc, Box::new(SetCurve::insert(curve))) {
+        let insert = self.insert_curve_command(curve, plane);
+        if let Err(e) = self.stack.execute(&mut self.doc, insert) {
             self.warn(e.to_string());
             return;
         }
@@ -2452,12 +2488,13 @@ impl App {
         // Now rather than on the next frame: a script runs every line in one, and the next
         // line may name the profile this curve just closed.
         self.refresh_profiles();
+        let on_plane = plane.map(|p| format!(" on {}", self.body_label(p))).unwrap_or_default();
         self.say(if degree_asked == 1 {
-            format!("Added a line, {name}")
+            format!("Added a line, {name}{on_plane}")
         } else if weights.iter().any(|w| (*w - 1.0).abs() > 1e-12) {
-            format!("Added a weighted degree {degree_asked} curve, {name}")
+            format!("Added a weighted degree {degree_asked} curve, {name}{on_plane}")
         } else {
-            format!("Added a degree {degree_asked} curve, {name}")
+            format!("Added a degree {degree_asked} curve, {name}{on_plane}")
         });
     }
 
@@ -3169,12 +3206,10 @@ impl App {
             // number is honest for it. A pattern is born with a literal and named afterwards.
             count: ParamRef::Literal(f64::from(count)),
             kind,
-            // **The copies, and only the copies** -- the same rule Mirror follows, and asked
-            // for by the same reasoning. A block holding instance zero swallows the body it
-            // patterns: one row, one eye, and no way to look at the body on its own or hand it
-            // to a boolean. The picture is unchanged, because instance zero is still on screen
-            // -- as its own body, beside the block.
-            join: false,
+            // **The whole count, in one block.** A row of three is three: subtract it, offset
+            // it or hand it to anything else and all three go. `join=false` is copies one to
+            // `count - 1` alone, for the part that wants the first left out.
+            join: true,
             fillet: Fillet::hard(),
             options,
         };
@@ -3186,6 +3221,7 @@ impl App {
             }
         };
         let filleted = matches!(&node, Node::Pattern { join: true, fillet, .. } if !matches!(fillet.radius, ParamRef::Literal(r) if r <= 0.0));
+        let holds_the_body = matches!(&node, Node::Pattern { join: true, .. });
         // What the status line says about the step: the block's own, which a typed `step=0,30,0`
         // sets, and not the tool's single-number memory, which it does not.
         let step_said = match &node {
@@ -3209,46 +3245,32 @@ impl App {
         self.pattern_count = count_asked;
         self.pattern_radial = radial;
         self.pattern_step_mm = step_mm;
-        // Consumed by the pattern, so no longer a root -- and a block that is not a root draws
-        // only when it is asked for. Asked for here, because it was on screen a moment ago and
-        // nothing this operation did should take it off.
-        //
-        // **It is not named, and that is the change.** This used to give it one, because a name
-        // was what let a consumed block into the operand lists the owner reaches for next. Two
-        // things undid that: `operand_choices_in` and `pair_candidates_in` no longer ask, so the
-        // name bought nothing; and naming was then what lifted a block out of the block it is
-        // drawn inside, so writing one on the user's behalf was the app deciding a question that
-        // is theirs. Neither a name nor the eye moves a row now (`block-ownership-spec.md` §2.2):
-        // the pattern adopts its target, which draws from inside the pattern's row.
-        //
-        // Through the eye, asked of the graph the edit writes, so the flag it reaches is the one a
-        // consumed block's eye means; and in the graph edit's own undo entry, after it, so a redo
-        // of the pattern draws the target again rather than leaving that to an entry of its own
-        // (§7.3).
-        // Nothing to keep drawn where the slot is empty: there is no target whose row the eye
-        // stands for until something is put in it.
-        match target.source() {
-            Some(target) => {
-                let keep_drawn = eye_command(&graph, target, true);
-                self.set_part_graph_with(graph, vec![Box::new(keep_drawn)]);
-                self.clear_hidden(target);
-            }
-            None => self.set_part_graph(graph),
+        // The body is inside the row now, so its eye goes with its row, as `apply_boolean` says.
+        // It is not named: the pattern adopts its target, which is reached from the pattern's row
+        // like any other block inside another, and naming one is the user's to ask for.
+        self.set_part_graph(graph);
+        if let Some(target) = target.source() {
+            self.clear_hidden(target);
         }
         self.select_body(Some(node));
         self.mark_changed();
         self.view_mode = ViewMode::Field;
         self.rebuild_render_resources();
-        // "Still beside it" is only true of a block that was there, so an empty slot says what
-        // it is waiting for instead -- and says it, never warns it, so a script runs on.
+        // Only a block that was there can be counted, so an empty slot says what it is waiting
+        // for instead -- and says it, never warns it, so a script runs on.
         match target.source() {
             None => self.say("A pattern with an empty slot — put a block in it to repeat"),
             Some(target) => {
                 let original = self.body_label(target);
-                self.say(if radial {
-                    format!("{count} around the axis — {original} is still beside it")
+                let holds = if holds_the_body {
+                    format!("{original} is the first of them")
                 } else {
-                    format!("{count}, {step_said} — {original} is still beside it")
+                    format!("copies only, {original} left out")
+                };
+                self.say(if radial {
+                    format!("{count} around the axis — {holds}")
+                } else {
+                    format!("{count}, {step_said} — {holds}")
                 });
             }
         }

@@ -14,13 +14,24 @@ mod cage_mesh;
 mod render;
 mod traced;
 mod outputs;
+mod memory;
 mod menu_hover;
 mod preview;
 mod split_axis;
+mod sketch;
 mod surface_point;
 mod hole_tool;
 mod console_keys;
 mod commands;
+#[cfg_attr(not(test), allow(dead_code))] // carried to by the transport, which comes next
+mod agent;
+mod key_types;
+mod key_defaults;
+mod examples;
+#[cfg_attr(not(test), allow(dead_code))] // read by the agent host, which a later phase adds
+mod catalogue;
+#[cfg_attr(not(test), allow(dead_code))]
+mod outcome;
 mod block_edit;
 mod echo;
 mod palette;
@@ -29,6 +40,7 @@ mod marking;
 mod settings;
 mod expect;
 mod names;
+mod infill_presets;
 mod lattice_readout;
 mod camera;
 mod view_cube;
@@ -43,8 +55,10 @@ mod operands;
 mod pick;
 mod display_quality;
 mod app;
+mod graph_view;
 
 use split_axis::AxisKind;
+use outcome::LineError;
 
 use cage_mesh::CageMesh;
 use eframe::{egui, egui_wgpu};
@@ -122,7 +136,8 @@ use blocks::list::{
     filtered_choices, folded_curve_row_in, grip_mark, joint_choices, joint_points_in,
     joint_relation_between, make_variable, nest_rows, points_hidden_with_rows,
     names_in_a_row, profile_v_curve_in, put_back_inside, put_number_back, rename_block,
-    variable_item, Block, BlockRow, Clipboard, ProfileRows, Row, RowKey,
+    variable_item, Block, BlockRow, Clipboard, ProfileRows, Reveal, Row, RowKey,
+    REVEAL_FRAMES_PER_ROW, REVEAL_SETTLE_FRAMES,
 };
 use pick::pick;
 #[cfg(test)]
@@ -1282,6 +1297,17 @@ const INSPECTOR_DEFAULT_WIDTH: f32 = 360.0;
 /// for 69 ms at 192. Doubling the cells quarters the error and roughly triples the time, so
 /// this is the knee rather than a round number.
 const MEASURE_CELLS: usize = 128;
+
+/// The tolerance a field is compiled at to be measured or sampled rather than drawn.
+///
+/// **Fine enough that no section answers from its display grid.** A bake reads a quarter of the
+/// tolerance outside its outline on every wall, and whether a section bakes depends on its size:
+/// at 0.05 mm every extrude under about a hundred millimetres across was, so `sample` put a
+/// 17 mm pad 0.0125 mm proud while a 100 mm plate beside it read exact. The picture finishes on
+/// the outline itself, so it never showed. At a thousandth only a section under about two
+/// millimetres bakes, and then a quarter of a micron proud. The number `expect` already
+/// measured at, so a script's check and the console's reading are of one field.
+const MEASURE_TOLERANCE_MM: f64 = 1e-3;
 
 /// A fresh phase of the given banding, sized for a cell of `cell_mm`.
 ///
@@ -2775,6 +2801,10 @@ fn plane_of_face(region: CubeRegion) -> Option<DrawingPlane> {
 /// `an_arbitrary_plane_is_stood_up_the_way_a_cube_face_is` holds the two together, because two
 /// rules for one question is how a plane picked from the menu ends up rolled differently from
 /// the same plane picked off the ViewCube.
+/// How square to its plane a view has to be for the grid to show: within three degrees, which is
+/// nearer than a hand orbits by accident and further than a snap ever lands off.
+const GRID_SQUARE_COS: f32 = 0.998_63;
+
 fn up_for_normal(normal: Vector3<f32>) -> Vector3<f32> {
     if normal.x.abs() < 1e-6 && normal.y.abs() < 1e-6 {
         Vector3::y()
@@ -3297,7 +3327,7 @@ fn step_option_controls(ui: &mut egui::Ui, o: &mut fieldform_io::StepOptions) {
             ui.label("Linear deflection:");
             ui.add(
                 egui::DragValue::new(&mut o.linear_deflection_mm)
-                    .speed(0.005)
+                    .speed(0.005).max_decimals(4)
                     .range(0.001..=10.0)
                     .suffix(" mm"),
             );
@@ -3311,7 +3341,7 @@ fn step_option_controls(ui: &mut egui::Ui, o: &mut fieldform_io::StepOptions) {
             ui.label("Angular deflection:");
             ui.add(
                 egui::DragValue::new(&mut o.angular_deflection_deg)
-                    .speed(0.25)
+                    .speed(0.25).max_decimals(4)
                     .range(3.0..=60.0)
                     .suffix("\u{b0}"),
             );
@@ -3327,7 +3357,7 @@ fn step_option_controls(ui: &mut egui::Ui, o: &mut fieldform_io::StepOptions) {
             ui.label("Sewing tolerance:");
             ui.add(
                 egui::DragValue::new(&mut o.sew_tolerance_mm)
-                    .speed(0.005)
+                    .speed(0.005).max_decimals(4)
                     .range(0.0..=5.0)
                     .suffix(" mm"),
             );
@@ -3484,6 +3514,8 @@ struct App {
     cage_tool: Option<app::cage_tools::CageTool>,
     cage_session: Option<app::cage_tools::CageSession>,
     surface_check: Option<app::check_model::SurfaceCheck>,
+    /// Each infill block's cavity report, worked out off the interface thread.
+    infill_cavities: std::collections::HashMap<NodeId, blocks::infill::CavityRun>,
     amber_until: Option<std::time::Instant>,
     check_due: std::time::Instant,
     /// The console: what is being typed, and what came back.
@@ -3555,6 +3587,9 @@ struct App {
     slide: Option<surface_point::Slide>,
     /// Whether the press that is down landed on a surface point's dot, which it then slides.
     press_on_surface_point: bool,
+    /// The projection the view had before Sketch on plane made it orthographic, given back when
+    /// the sketch stops. `None` outside a sketch.
+    sketch_projection_before: Option<Projection>,
     /// An axis's record as it was when a drag of its U, V or length began, so that the drag lands on
     /// the history as one entry when it ends.
     surface_axis_edit_before: Option<(CurveId, fieldform_scene::SurfaceAxis)>,
@@ -3577,6 +3612,13 @@ struct App {
     /// and a half-typed name is not a name until it is committed. The buffer lives here rather
     /// than in the node so that Escape can abandon it without having written anything.
     renaming: Option<(RowKey, String)>,
+    /// The block list on its way to a row chosen somewhere else. See [`Reveal`].
+    reveal: Option<Reveal>,
+    /// The selection the block list has already followed, so that it follows each one once and
+    /// a row chosen in the list itself is not scrolled out from under the pointer.
+    followed: Option<RowKey>,
+    /// The same for the graph view, whose node for a curve is not the curve's row.
+    graph_followed: Option<NodeId>,
     /// The reference field being typed in, and what is in it so far.
     ///
     /// Presentation state for the reason `renaming` is: half a block's name is not a reference, so
@@ -3658,6 +3700,18 @@ struct App {
     /// How many of those reports were warnings, so a script can tell whether the line it just
     /// ran was refused. See [`Script`].
     console_warnings: usize,
+    /// While a line runs through [`App::run_line`], everything it reported, in order.
+    agent: agent::AgentState,
+    /// The MCP listener, when `--agent-host` started one (`mcp-server-spec.md` §3.2).
+    agent_host: Option<agent::server::Host>,
+    /// Allow agent (`mcp-server-spec.md` §9.1): whether this session publishes an endpoint a
+    /// client may attach to. Off by default and kept per person.
+    allow_agent: bool,
+    /// An endpoint other than the account's own, so a test never meets a running application's.
+    agent_endpoint: Option<String>,
+    line_capture: Option<Vec<(bool, String)>>,
+    /// The structured form of the refusal the line in flight met, set where it is refused.
+    line_error: Option<LineError>,
     /// A script waiting to run, from `--run` on the command line or the `run` verb.
     script: Option<Script>,
     /// Whether a script's lines are being run this frame, so `run` inside one is refused.
@@ -3734,6 +3788,8 @@ struct App {
     /// Where the viewport's context menu was opened, which is where "Paste here" pastes.
     viewport_menu_at: Option<egui::Pos2>,
     selected_curve: Option<CurveId>,
+    /// The notebook's second view (`notebook-graph-view-spec.md`): camera, expansion and pins only.
+    graph_view: graph_view::GraphView,
     /// Which of [`Self::selected_curve`]'s control points are picked, by index.
     ///
     /// Indices rather than ids, and that is the point rather than a shortcut. A control point
@@ -4323,6 +4379,7 @@ impl App {
             cage_tool: None,
             cage_session: None,
             surface_check: None,
+            infill_cavities: std::collections::HashMap::new(),
             amber_until: None,
             check_due: std::time::Instant::now(),
             console_progress: None,
@@ -4337,6 +4394,12 @@ impl App {
             drawing_plane: DrawingPlane::None,
             console_reports: 0,
             console_warnings: 0,
+            agent: Default::default(),
+            agent_host: None,
+            allow_agent: false,
+            agent_endpoint: None,
+            line_capture: None,
+            line_error: None,
             script: Script::from_command_line(),
             script_running: false,
             expect_results: Vec::new(),
@@ -4378,6 +4441,7 @@ impl App {
             surface_point_edit_before: None,
             slide: None,
             press_on_surface_point: false,
+            sketch_projection_before: None,
             surface_axis_edit_before: None,
             gizmo_drag: None,
             gizmo_hover: None,
@@ -4404,6 +4468,7 @@ impl App {
             viewport_hover: None,
             viewport_menu_at: None,
             selected_curve: None,
+            graph_view: graph_view::GraphView::default(),
             selected_points: Vec::new(),
             // 5 mm is a plausible starting pipe for hardware-scale work and is visible at
             // the default framing; it is a starting point, not a constraint.
@@ -4416,6 +4481,9 @@ impl App {
             surface_display: Vec::new(),
             surface_prints: Vec::new(),
             renaming: None,
+            reveal: None,
+            followed: None,
+            graph_followed: None,
             ref_edit: None,
             completing_a_move: None,
             hosted: None,
@@ -4488,6 +4556,10 @@ impl App {
             display_quality: start_quality,
             quality_chosen: start_chosen,
         };
+        app.start_agent_host(&cc.egui_ctx);
+        if !cfg!(test) && app.agent_host.is_none() && display_quality::load_saved_allow_agent() {
+            app.set_allow_agent(true, &cc.egui_ctx);
+        }
         // Before anything else it says, because it is the frame of reference for all of it.
         app.say(adapter_said);
         // A kept rung is said once, because it is the one setting that outlives a session: a
@@ -4558,6 +4630,9 @@ impl App {
         // Before everything else here, because a point's position is in the graph and all of what
         // follows reads it. See `refresh_surface_points`.
         self.refresh_surface_points();
+        // And the sketches after them, since a plane may stand on a point: a curve's points are
+        // what an extrude compiles from. See `refresh_sketches`.
+        self.refresh_sketches();
         // **Curve ends catch up here, because this is what runs when the part changes.**
         // It was called on binding an end, on editing a variable and on opening a document —
         // and not when the *point itself* moved, which is the one case anybody would try first.
@@ -4842,6 +4917,7 @@ impl App {
             "modify.shell" => {
                 self.apply_shell(args);
             }
+            "modify.infill" => self.apply_infill(args),
             // `delete target=Sphere_0` names what goes, as the echo of a delete has to: a line that
             // deleted "the selection" would delete whatever the replay happened to have selected.
             "edit.delete_body" => match args.get("target").map(|v| v.text()) {
@@ -4903,11 +4979,29 @@ impl App {
                     self.say(cage_absence_reason(self));
                 }
             }
+            // One command for the viewport and the graph: whichever the panel shows is framed.
+            "view.frame_selection" if self.doc.graph_layout.shown => {
+                self.graph_view.request_frame(self.selected_body);
+            }
+            "view.frame_all" if self.doc.graph_layout.shown => self.graph_view.request_frame(None),
+            "view.frame_all" => match self.scene_bounds() {
+                Some((center, radius)) => self.camera.frame(center, radius),
+                None => self.warn("Nothing to frame"),
+            },
+            "view.panel" => self.panel_from_console(args),
+            "view.find" => self.find_from_console(args),
+            "view.graph_layout" => {
+                self.doc.graph_layout.pins.clear();
+                self.say("Graph laid out again");
+            }
             "view.frame_selection" => match self.framing_bounds() {
                 Some((center, radius)) => self.camera.frame(center, radius),
                 None => self.warn("Nothing to frame"),
             },
             "draw.plane" => self.set_drawing_plane(args),
+            "draw.sketch" => self.sketch_on_command(args),
+            "curve.degree" => self.curve_degree_command(args),
+            "curve.degree_menu" => self.open_degree_menu(),
             "part.set_material" => self.set_material_from_console(args),
             "part.critical" => self.critical_from_console(args),
             "part.verify" => self.verify_from_console(),
@@ -5041,7 +5135,10 @@ impl App {
                             self.after_document_change();
                         }
                     }
-                    Err(e) => self.warn(e.to_string()),
+                    Err(e) => {
+                        self.line_error = Some(outcome::from_op_error(&e));
+                        self.warn(e.to_string());
+                    }
                 }
             }
         }
@@ -5080,6 +5177,15 @@ impl App {
     /// Called after the document has been written or read, so the two agree again.
     fn mark_saved(&mut self) {
         self.saved_revision = self.revision;
+    }
+
+    /// Called when another document has taken this one's place. Nothing is pending, so it is
+    /// clean, but the revision still moves: it also says *which* document this is, and whoever
+    /// holds the old number has read something that is gone.
+    fn mark_replaced(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+        self.document_moved();
+        self.mark_saved();
     }
 
     /// Anything that changes the document invalidates the derived meshes, and may have
@@ -5932,6 +6038,62 @@ impl App {
         best.map(|(id, _)| id)
     }
 
+    /// The corners of the square drawn for a plane, in world: the one geometry the drawing and
+    /// the picking share, so a click on the square is a click on what is seen.
+    fn plane_square(&self, origin: Point3<f64>, facing: Rotation3<f64>) -> [Point3<f64>; 4] {
+        let (lo, hi) = self.pick_bounds();
+        let scene = (hi - lo).norm();
+        // Sized from the scene, and from the view when the scene has no size to give — a part
+        // that is nothing but a plane, or an empty document. Either way the square is a drawing
+        // aid, so it is deliberately bigger than what it cuts.
+        let span = if scene > 1e-6 {
+            scene * 0.6
+        } else {
+            self.camera.view_half_height(origin.cast::<f32>()) as f64
+        };
+        let u = facing * Vector3::x() * span;
+        let v = facing * Vector3::y() * span;
+        [origin + u + v, origin - u + v, origin - u - v, origin + u - v]
+    }
+
+    /// The plane whose square is under `pos`: by its outline, within a control point's reach,
+    /// and with `inside` by its area too.
+    ///
+    /// **The outline on a press, the area only where nothing else is.** A plane standing on a
+    /// face lies over that face, so a click anywhere on it would otherwise take every click meant
+    /// for the body under it; the outline is the plane's own and nothing else's. A click that hits
+    /// no body is free to mean the square it landed in (the owner, 2026-10-31: "if there's a plane
+    /// you can click on it, you should be able to select it").
+    fn plane_at(&self, aspect: f32, rect: egui::Rect, pos: egui::Pos2, inside: bool) -> Option<NodeId> {
+        const THRESHOLD: f32 = 8.0;
+        let mut best: Option<(NodeId, f32)> = None;
+        for (id, origin, facing) in self.plane_frames() {
+            let screen: Vec<egui::Pos2> = self
+                .plane_square(origin, facing)
+                .iter()
+                .filter_map(|p| self.camera.project_to_screen(aspect, rect, p.cast::<f32>()))
+                .collect();
+            if screen.len() != 4 {
+                continue;
+            }
+            let on_outline = (0..4)
+                .map(|i| distance_to_segment(pos, screen[i], screen[(i + 1) % 4]))
+                .fold(f32::INFINITY, f32::min);
+            let distance = if on_outline <= THRESHOLD {
+                on_outline
+            } else if inside && view_cube::point_in_convex_polygon(pos, &screen) {
+                // Behind every outline hit, and the smaller square first among areas.
+                THRESHOLD + 1.0 + (screen[0].distance(screen[2]))
+            } else {
+                continue;
+            };
+            if best.is_none_or(|(_, b)| distance < b) {
+                best = Some((id, distance));
+            }
+        }
+        best.map(|(id, _)| id)
+    }
+
     /// The end of another curve that `p` should snap to, if one is near enough.
     ///
     /// **Ends only, and never the curve's own.** A profile is closed by bringing two ends
@@ -6327,8 +6489,8 @@ impl App {
     }
 
     /// [`Self::set_part_graph`], with `then` in the same undo entry after the graph edit
-    /// ([`record_graph_edit_then`]): for an act the graph edit is only half of, as the eye Pattern
-    /// and Mirror turn on for the body they consume is (`block-ownership-spec.md` §7.3).
+    /// ([`record_graph_edit_then`]): for an act the graph edit is only half of, as the eye Mirror
+    /// turns on for the body it consumes is (`block-ownership-spec.md` §7.3).
     ///
     /// The bookkeeping is every graph edit's, since this is one: the splash, the end of a material
     /// drag, and the stamp on what it made. With anything to follow, never the next instant of a
@@ -6908,7 +7070,7 @@ impl App {
             ui.label("Angle:");
             ui.add(
                 egui::DragValue::new(&mut self.draft.angle_deg)
-                    .speed(0.1)
+                    .speed(0.1).max_decimals(4)
                     .range(0.0..=45.0)
                     .suffix("\u{b0}"),
             )
@@ -6916,7 +7078,7 @@ impl App {
             ui.label("Tolerance:");
             ui.add(
                 egui::DragValue::new(&mut self.draft.tolerance_deg)
-                    .speed(0.05)
+                    .speed(0.05).max_decimals(4)
                     .range(0.01..=10.0)
                     .suffix("\u{b0}"),
             )
@@ -7501,6 +7663,9 @@ impl App {
             ),
             Some(Node::Shell { input, .. }) => {
                 format!("Shell ({})", self.operand_label_in(graph, input))
+            }
+            Some(Node::Infill { input, .. }) => {
+                format!("Infill ({})", self.operand_label_in(graph, input))
             }
             // Never listed as a body — `roots` leaves it out — so this is only reached when a
             // panel names the node driving something.
@@ -8734,6 +8899,14 @@ impl App {
         let numbers = |r: &ParamRef| Some(self.resolve(*r));
         let (translation, rotation) =
             fieldform_field::resolve_frame(&self.doc, self.part_graph(), &frame, &numbers).ok()?;
+        // **And only square to the plane.** A grid seen from an angle reads as a grid on
+        // something else -- a sketch's plane left behind when the view was turned to the world's
+        // front (the owner, 2026-10-31) -- and a grid is for the view you measure off, which is
+        // the square one. Not drawn means not snapped to, as everywhere.
+        let normal = (rotation * Vector3::z()).cast::<f32>();
+        if self.camera.forward().dot(&normal).abs() < GRID_SQUARE_COS {
+            return None;
+        }
         // The window follows the pivot: its foot on the plane is the centre.
         let poi = self.camera.last_poi.cast::<f64>();
         let local = rotation.inverse() * (poi.coords - translation);
@@ -9257,6 +9430,13 @@ impl App {
                 }
                 continue;
             }
+            // **Esc stops a sketch**, when nothing begun since takes the key first: a curve being
+            // placed, a drag, a tool. Each of those is the thing most recently begun, and Esc
+            // means the most recent thing.
+            if !shortcut.modifiers.any() && key == egui::Key::Escape && self.escape_stops_sketching() {
+                ui.ctx().input_mut(|i| i.consume_key(egui_modifiers, key));
+                continue;
+            }
             if let Some(binding) = self.keymap.lookup(&shortcut) {
                 let (op, args) = (binding.op.clone(), binding.args.clone());
                 ui.ctx().input_mut(|i| i.consume_key(egui_modifiers, key));
@@ -9305,6 +9485,11 @@ impl App {
         // **Keys by selection** (R9): with cage vertices, edges or faces picked, the letter that
         // extrudes a profile extrudes the cage, the one that deletes a body deletes faces, and so
         // on -- the same letters, meaning the cage while the cage is what is selected.
+        // K is the exception: the knife needs no selection to start, so on the cage it is the
+        // knife always, and Split is what K means only off the cage (the owner, 2026-10-28).
+        if self.control == ControlMesh::Cage && op == "modify.split" {
+            return "cage.cut".to_string();
+        }
         if self.control == ControlMesh::Cage && !self.selection.is_empty() {
             let faces = self.selection.parts().iter().any(|s| matches!(s, Selection::Face(_)));
             if let Some(cage_op) = commands::cage_element_op(&op, faces) {
@@ -9439,6 +9624,7 @@ impl eframe::App for App {
         self.autosave();
         self.drive_snap(ui.ctx());
         self.drive_script(ui.ctx());
+        self.drive_agent();
         self.help_windows(ui.ctx());
         self.keys_panel(ui.ctx());
         self.check_model_panel(ui.ctx());
@@ -9496,6 +9682,18 @@ impl eframe::App for App {
                     .clicked()
                 {
                     self.dispatch("view.cycle_mode", &Args::new());
+                }
+                // **Visible and stoppable** (`mcp-server-spec.md` §9.1): while a client is
+                // connected the person sees it, and one click puts it out.
+                if let Some(host) = &self.agent_host
+                    && host.clients() > 0
+                    && ui
+                        .button(egui::RichText::new("agent connected").color(egui::Color32::from_rgb(230, 160, 40)))
+                        .on_hover_text("An agent is connected and can edit this document. Click to disconnect it.")
+                        .clicked()
+                {
+                    host.disconnect_all();
+                    self.say("Agent disconnected.");
                 }
             });
 
@@ -9709,6 +9907,27 @@ impl eframe::App for App {
             {
                 pressed_curve = self.curve_at(aspect, rect, pos);
             }
+            // **A plane's outline takes the press behind a curve and ahead of the bodies**, for the
+            // reason a curve does: reference geometry drawn over the model, one pixel wide. Its
+            // area is the body pick's to decline first (see the click below).
+            if pressed_curve.is_none()
+                && pressed_control_point.is_none()
+                && !press_over_cube
+                && !nav_mods
+                && !placing
+                && !self.press_on_gizmo
+                && !self.press_on_surface_point
+                && !boxing
+                && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
+                && let Some(pos) = response.interact_pointer_pos()
+                && let Some(plane) = self.plane_at(aspect, rect, pos, false)
+            {
+                self.press_on_curve = true;
+                self.clear_point_selection();
+                self.selected_curve = None;
+                self.select_body(Some(plane));
+                self.say(format!("Selected {}", self.body_label(plane)));
+            }
             if let Some(id) = pressed_curve {
                 self.press_on_curve = true;
                 let name = self.doc.curve(id).map(|c| c.name.clone()).unwrap_or_default();
@@ -9894,6 +10113,14 @@ impl eframe::App for App {
                     // `select_body_under` already clears the body when the trace hits nothing,
                     // which is the same rule: a click on empty space selects empty space.
                     self.select_body_under(origin, dir);
+                    // A click on no body, inside a plane's square, is a click on the plane.
+                    if self.selected_body.is_none()
+                        && let Some(pos) = response.interact_pointer_pos()
+                        && let Some(plane) = self.plane_at(aspect, rect, pos, true)
+                    {
+                        self.select_body(Some(plane));
+                        self.say(format!("Selected {}", self.body_label(plane)));
+                    }
                 }
             }
 
@@ -10001,7 +10228,9 @@ impl eframe::App for App {
                     }
                     if response.dragged_by(egui::PointerButton::Primary) {
                         if let Some(pos) = response.interact_pointer_pos() {
-                            self.continue_move(aspect, rect, pos);
+                            let ends = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
+                            let grid = ui.input(|i| i.modifiers.shift);
+                            self.continue_move(aspect, rect, pos, grid, ends);
                         }
                     }
                 }
@@ -10095,7 +10324,8 @@ impl eframe::App for App {
             {
                 // Ctrl rounds a depth to whole millimetres, the way it rounds a curve's points.
                 let snap = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
-                self.continue_gizmo(aspect, rect, pos, snap);
+                let grid = ui.input(|i| i.modifiers.shift);
+                self.continue_gizmo(aspect, rect, pos, snap, grid);
             }
             // Escape abandons the gesture. Checked before the release below, so a drag
             // cancelled with the button still down is not then committed by letting go.
@@ -10578,19 +10808,8 @@ impl eframe::App for App {
 
             // Every plane, as a finite square standing in for an infinite one.
             let selected_plane = self.selected_plane().map(|(id, _, _)| id);
-            // Once, not once per plane: every plane wants the same answer -- how big the scene is.
-            let (lo, hi) = self.pick_bounds();
             for (id, origin, facing) in self.plane_frames() {
                 let here = Some(id) == selected_plane;
-                let scene = (hi - lo).norm();
-                // Sized from the scene, and from the view when the scene has no size to give
-                // — a part that is nothing but a plane, or an empty document. Either way the
-                // square is a drawing aid, so it is deliberately bigger than what it cuts.
-                let span = if scene > 1e-6 {
-                    scene * 0.6
-                } else {
-                    self.camera.view_half_height(origin.cast::<f32>()) as f64
-                };
                 // **Centred on the plane's own origin.** It used to be centred on the scene,
                 // projected onto the plane -- so the square stayed over the model wherever the
                 // origin went, and the origin was the one thing it did not show. Two reports,
@@ -10602,16 +10821,12 @@ impl eframe::App for App {
                 // moving was the square, which was not drawn there.
                 //
                 // The origin is what the plane turns about and what it sits on, so it is the
-                // middle of the square.
-                let centre = origin;
-                // The plane's own X and Y, so the square is drawn the way the plane is turned
-                // rather than the way an arbitrary choice of "some direction not along the
-                // normal" happens to fall. That choice is what made a roll invisible, and it
-                // also made the square jump as a plane was tilted past the axis it was picked
-                // against.
-                let u = facing * Vector3::x() * span;
-                let v = facing * Vector3::y() * span;
-                let corners = [centre + u + v, centre - u + v, centre - u - v, centre + u - v];
+                // middle of the square, and the plane's own X and Y are its sides, so the square
+                // is drawn the way the plane is turned rather than the way an arbitrary choice of
+                // "some direction not along the normal" happens to fall. That choice is what made
+                // a roll invisible, and it also made the square jump as a plane was tilted past
+                // the axis it was picked against. One geometry with the picking: `plane_square`.
+                let corners = self.plane_square(origin, facing);
                 let screen: Vec<egui::Pos2> = corners
                     .iter()
                     .filter_map(|p| {
@@ -10700,6 +10915,15 @@ impl eframe::App for App {
                     show_view_cube(ui, &mut self.camera, rect, &mut self.show_grid)
                 {
                     if let Some(plane) = plane_of_face(region) {
+                        // **A face click leaves a sketch, and says so.** It used to swap the
+                        // plane being sketched on for a world plane through the origin without
+                        // a word, so the next curve, and the grid and its snap, were quietly on
+                        // that one (the owner, 2026-10-31: "snaps to some other grid"). Leaving
+                        // is what clicking a face means — "look at the world from here" — and
+                        // Sketch on turns square to the plane again.
+                        if self.sketching() {
+                            self.leave_sketch_keeping_view();
+                        }
                         // The cube has already swung the camera, and it did so with the face's
                         // own *sign*: clicking BOTTOM looks up from below. Swinging again from
                         // the plane would use the unsigned axis and flip that to a top view, so

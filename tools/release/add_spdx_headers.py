@@ -13,7 +13,7 @@ import argparse, pathlib, subprocess, sys
 LAYER = {
     "fieldform-cage": "MPL-2.0", "fieldform-subd": "MPL-2.0", "fieldform-field": "MPL-2.0",
     "fieldform-scene": "MPL-2.0", "fieldform-ops": "MPL-2.0", "fieldform-io": "MPL-2.0",
-    "fieldform-gpu": "MPL-2.0", "fieldform-app": "GPL-3.0-only", "fieldform-import": "GPL-3.0-only",
+    "fieldform-gpu": "MPL-2.0", "fieldform-app": "GPL-3.0-only", "fieldform-import": "GPL-3.0-only", "fieldform-mcp": "MPL-2.0",
 }
 EXTS = {".rs", ".wgsl"}
 

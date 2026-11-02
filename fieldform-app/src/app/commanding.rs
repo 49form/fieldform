@@ -28,6 +28,10 @@ impl App {
             idle_occlusion: self.idle_occlusion,
             draft_on: self.draft.enabled,
             grid_on: self.show_grid,
+            graph_shown: self.doc.graph_layout.shown,
+            plane_selected: self.selected_plane().is_some(),
+            curve_selected: self.selected_curve.is_some(),
+            sketching: self.sketching(),
             view_mode: match self.view_mode {
                 ViewMode::Polygon => "polygon",
                 ViewMode::Field => "field",

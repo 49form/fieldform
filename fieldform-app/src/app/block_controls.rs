@@ -729,6 +729,9 @@ impl App {
             Node::Shell { input, thickness } => {
                 self.shell_controls(ui, id, input, thickness)
             }
+            Node::Infill { input, wall, fill, join } => {
+                self.infill_controls(ui, id, input, wall, fill, join)
+            }
             Node::Offset { input, distance } => {
                 self.offset_controls(ui, id, input, distance)
             }
@@ -1768,6 +1771,26 @@ impl App {
                 .weak(),
             );
         }
+        // The same act as North on the plane's marking menu, through the registry so it echoes.
+        // Again while sketching turns the view square to the plane again, which is what is wanted
+        // once the plane has been moved; Stop is its own button.
+        let sketching_here = self.drawing_plane == DrawingPlane::Node(id);
+        ui.horizontal(|ui| {
+            if ui
+                .button("Sketch on this plane")
+                .on_hover_text(
+                    "The view turns square to this plane and goes orthographic, and every curve you \
+                     draw lands on it. Esc with nothing pending stops and brings the projection back.",
+                )
+                .clicked()
+                && let Some(command) = crate::commands::by_id("draw.sketch")
+            {
+                self.invoke_command(command);
+            }
+            if sketching_here && ui.button("Stop").on_hover_text("Back to drawing in the world, with the projection the sketch began from").clicked() {
+                self.run_command("sketch off=true");
+            }
+        });
         ui.separator();
         let new_origin = self.place_fields(ui, id, "At:", origin);
         // Where it is, then which way it faces, then what it is -- the order every
@@ -2096,6 +2119,7 @@ impl App {
             "Thicker than the body is anywhere and nothing is left to hollow, which \
              is a real answer rather than an error",
         );
+        self.wall_minimum_note(ui, picked, new_thickness);
         if new_thickness != thickness || picked != input {
             self.replace_node(
                 id,

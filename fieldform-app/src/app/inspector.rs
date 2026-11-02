@@ -543,7 +543,7 @@ impl App {
                         {
                             let rate = scrub_rate(ui, value, speed);
                             let field =
-                                egui::DragValue::new(&mut value).speed(rate).suffix(suffix);
+                                egui::DragValue::new(&mut value).speed(rate).max_decimals(4).suffix(suffix);
                             match grain {
                                 Grain::Continuous => field,
                                 // **The range goes through to the widget here, not only to the
@@ -891,6 +891,33 @@ impl App {
     ///
     /// Chosen through `set_environment` rather than by assignment, so the first use of a room
     /// still bakes its maps and says so.
+    /// Allow agent (`mcp-server-spec.md` §9.1): off until a person turns it on, and then kept.
+    /// A session started with `--agent-host` already belongs to an agent, so it has no choice to
+    /// make and the row says whose it is.
+    fn allow_agent_row(&mut self, ui: &mut egui::Ui) {
+        if self.agent_host.as_ref().is_some_and(|h| h.mode == agent::server::HostMode::Launch) {
+            ui.label(egui::RichText::new("This session was started by an agent.").weak());
+            return;
+        }
+        let mut allow = self.allow_agent;
+        let changed = ui
+            .checkbox(&mut allow, "Allow agent")
+            .on_hover_text(
+                "Lets an MCP client attached to this session read and edit the open document.                  Every line it runs is written in the console, and it works only in the                  document's folder. Turn it off to disconnect it.",
+            )
+            .changed();
+        if changed {
+            let ctx = ui.ctx().clone();
+            self.set_allow_agent(allow, &ctx);
+            if !cfg!(test)
+                && !self.script_running
+                && let Err(why) = display_quality::save_allow_agent(self.allow_agent)
+            {
+                self.say(format!("Allow agent is {} for this session only: {why}", if self.allow_agent { "on" } else { "off" }));
+            }
+        }
+    }
+
     fn environment_row(&mut self, ui: &mut egui::Ui) {
         let current = self.environment;
         let mut next = None;
@@ -1021,6 +1048,7 @@ impl App {
                 // to do and what should have happened before either guess.
                 egui::Panel::bottom("display_settings").show_inside(ui, |ui| {
                 ui.separator();
+                self.allow_agent_row(ui);
                 // **One heading over all of it, and shut until it is wanted.** These are the
                 // settings for *looking* at the part rather than for what the part is — the
                 // finish, the room it is lit by, the mesh, the draft overlay — and open they
@@ -1071,7 +1099,21 @@ impl App {
                         self.draft_controls(ui);
                     });
                 });
-                egui::ScrollArea::vertical().id_salt("blocks").show(ui, |ui| {
+                // **Outside the scroll area, so it is at the top whichever view is shown.** The
+                // notebook and the graph are two views of one document; switching is not an edit.
+                ui.horizontal(|ui| {
+                    for (word, on) in [("notebook", false), ("graph", true)] {
+                        if ui.selectable_label(self.doc.graph_layout.shown == on, if on { "Graph" } else { "Notebook" }).clicked() {
+                            self.dispatch("view.panel", &Args::new().with("show", Value::Str(word.into())));
+                        }
+                    }
+                });
+                egui::ScrollArea::vertical().id_salt("blocks").scroll_source(if self.doc.graph_layout.shown { egui::scroll_area::ScrollSource::NONE } else { egui::scroll_area::ScrollSource::ALL }).show(ui, |ui| {
+
+                if self.doc.graph_layout.shown {
+                    self.graph_panel(ui);
+                    return;
+                }
 
                 // --- what this part is made of ---
                 //
@@ -1115,6 +1157,7 @@ impl App {
                 // `Document::nesting_in` reads it from the stored ownership — kept from one frame
                 // to the next by `list_readings`, and taken once here for the arrangement and for
                 // the rows drawn from it.
+                self.follow_selection(ui.ctx());
                 let list = self.list_readings();
                 let nesting = &list.nesting;
                 let rows = self.nested_blocks(nesting);

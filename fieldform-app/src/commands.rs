@@ -211,6 +211,14 @@ pub struct Ctx {
     pub idle_occlusion: bool,
     pub draft_on: bool,
     pub grid_on: bool,
+    /// The blocks panel shows the graph rather than the notebook.
+    pub graph_shown: bool,
+    /// A plane block is selected, or a placement holding one.
+    pub plane_selected: bool,
+    /// A curve is selected.
+    pub curve_selected: bool,
+    /// The drawing plane is a plane block: a sketch is under way.
+    pub sketching: bool,
     /// `polygon`, `field` or `overlay`.
     pub view_mode: &'static str,
     /// The display quality's label, lowercased.
@@ -287,8 +295,18 @@ fn field_drawn(c: &Ctx) -> Result<(), &'static str> {
 fn cage_control(c: &Ctx) -> Result<(), &'static str> {
     if c.cage_control { Ok(()) } else { Err("Works on the cage; a surface is being edited") }
 }
+fn graph_shown(c: &Ctx) -> Result<(), &'static str> {
+    if c.graph_shown { Ok(()) } else { Err("The blocks are shown as a list; `view show=graph` first") }
+}
 fn section_on(c: &Ctx) -> Result<(), &'static str> {
     if c.section_on { Ok(()) } else { Err("Turn Section on first") }
+}
+// Or a sketch under way, so the same entry stops one whatever is selected by then.
+fn a_plane_selected(c: &Ctx) -> Result<(), &'static str> {
+    if c.plane_selected || c.sketching { Ok(()) } else { Err("Select a plane first") }
+}
+fn a_curve_selected(c: &Ctx) -> Result<(), &'static str> {
+    if c.curve_selected { Ok(()) } else { Err("Select a curve first") }
 }
 fn occlusion_possible(c: &Ctx) -> Result<(), &'static str> {
     if c.occlusion_possible {
@@ -434,6 +452,7 @@ const EDIT: &[&str] = &["Edit"];
 const VIEW: &[&str] = &["View"];
 const VIEW_MODE: &[&str] = &["View", "Display mode"];
 const VIEW_QUALITY: &[&str] = &["View", "Display quality"];
+const VIEW_PANEL: &[&str] = &["View", "Blocks as"];
 const CREATE: &[&str] = &["Create"];
 const PRIMITIVES: &[&str] = &["Create", "Primitives"];
 const SWEEP: &[&str] = &["Create", "Sweep"];
@@ -452,6 +471,7 @@ pub const MENUS: &[&str] = &["File", "Edit", "View", "Create", "Modify", "Sub-D"
 const SUBMENUS: &[(&[&str], u8)] = &[
     (VIEW_MODE, 4),
     (VIEW_QUALITY, 5),
+    (VIEW_PANEL, 7),
     (PRIMITIVES, 0),
     (SWEEP, 0),
     (FEATURES, 0),
@@ -528,6 +548,14 @@ const BOOLEAN_P: &[Param] =
 const MORPH_P: &[Param] = &[p("a", Unit::Word), p("b", Unit::Word), p("t", Unit::Plain)];
 const OFFSET_P: &[Param] = &[p("target", Unit::Word), p("distance", Unit::Mm)];
 const SHELL_P: &[Param] = &[p("target", Unit::Word), p("thickness", Unit::Mm)];
+const INFILL_P: &[Param] = &[
+    p("target", Unit::Word),
+    p("wall", Unit::Mm),
+    p("cell", Unit::Word),
+    p("cell_size", Unit::Mm),
+    p("phase", Unit::Word),
+    p("join", Unit::Mm),
+];
 const TWIST_P: &[Param] = &[
     p("target", Unit::Word),
     p("degrees_per_mm", Unit::Plain),
@@ -733,6 +761,30 @@ fn build() -> Vec<Command> {
             .keys(&["F"])
             .hint("Fits the view to the selection, or to everything when nothing is selected."),
 
+        // A, as the graph view's spec asks, and Home; in the viewport it fits the whole scene.
+        op("view.frame_all", "frameall", "Frame all").menu(VIEW, 6)
+            .keys(&["A", "Home"])
+            .hint("Fits the view to everything, in the viewport or in the graph."),
+        // The blocks panel's second view (`notebook-graph-view-spec.md` §2). One setting with two
+        // values, so grouped like the display modes. The console has no bare word, so it is
+        // `view show=graph` rather than the spec's `view graph`.
+        op("view.panel", "view", "Blocks as")
+            .hint("`view show=graph` draws the blocks as a graph, `view show=notebook` as the list; \
+                   `map=on|off` the minimap."),
+        cmd("view.panel.notebook", "view.panel", "view", "Notebook").args(&[("show", "notebook")])
+            .menu(VIEW_PANEL, 0).checked(|c| !c.graph_shown)
+            .hint("The blocks as a list, nested inside the blocks that read them."),
+        cmd("view.panel.graph", "view.panel", "view", "Graph").args(&[("show", "graph")])
+            .menu(VIEW_PANEL, 0).checked(|c| c.graph_shown)
+            .hint("The same blocks as nodes and wires, laid out left to right."),
+        op("view.find", "find", "Find in graph").menu(VIEW, 6).keys(&["Ctrl+F"])
+            .when(graph_shown)
+            .hint("`find 'ball'` lights the graph's nodes whose name contains the text and brings them \
+                   into view; Ctrl+F puts the keyboard in the field, and an empty name clears."),
+        op("view.graph_layout", "relayout", "Re-layout graph")
+            .when(graph_shown)
+            .hint("Forgets where nodes were dragged to in the graph, and lays it out again."),
+
         // -------------------------------------------------------------------------- Create
         // **In the order a part gets built**: reference geometry, then a curve, then solids;
         // then the ways a curve becomes a solid; then the entries that are each one thing.
@@ -828,9 +880,9 @@ fn build() -> Vec<Command> {
             .hint("A control cage whose limit surface is the body. Puts the document's cage back \
                    if its body was deleted."),
         op("create.tpms", "tpms", "TPMS").menu(CREATE, 1).keys(&["T"]).session(TPMS_P)
-            .aliases(&["lattice", "gyroid", "infill"])
+            .aliases(&["lattice", "gyroid"])
             .hint("A triply periodic minimal surface. Gyroid to begin with; the cell is changeable \
-                   in the block. Intersect it with a body to infill."),
+                   in the block. Modify > Infill fills a body with one."),
         // Beside the cage rather than in Primitives, because it is a number, not a shape.
         op("create.ramp", "ramp", "Ramp").menu(CREATE, 1).session(RAMP_P)
             .aliases(&["gradient", "grade"])
@@ -883,6 +935,11 @@ fn build() -> Vec<Command> {
             .session(SHELL_P).inputs(BODY).aliases(&["hollow"])
             .hint("Hollows the selected body out to a wall thickness, measured inward so the \
                    outside dimensions do not change."),
+        op("modify.infill", "infill", "Infill").menu(MODIFY, 1).when(a_body)
+            .session(INFILL_P).inputs(BODY)
+            .aliases(&["lattice infill", "lightweight", "fill with lattice"])
+            .hint("Gives the selected body a solid skin and fills the inside with a lattice. The \
+                   outside dimensions do not change. The lattice is a block of its own."),
         op("modify.split", "split", "Split").menu(MODIFY, 1).keys(&["K"]).when(a_body)
             .session(&[]).inputs(SPLIT_IN).aliases(&["cut", "divide"])
             .hint("Cuts the selected body in two along a plane — one is made through its middle if \
@@ -991,6 +1048,34 @@ fn build() -> Vec<Command> {
                    `axis through=Cylinder`, `axis normal=true` on a surface."),
         op("draw.plane", "draw", "Drawing plane").aliases(&["sketch plane", "workplane"])
             .hint("The plane clicks land on: `draw on=xy`."),
+        // **A curve's degree, from the marking menu** (the owner, 2026-10-31, sketching): North-West
+        // on a curve or a profile opens a second ring of degrees, each of which is this one
+        // command with its number. `degree degree=3` is the line; the block's row still does it.
+        op("curve.degree_menu", "degrees", "Degree\u{2026}").when(a_curve_selected)
+            .hint("Opens the ring of degrees for the selected curve: 1, 2, 3, 5 or 7."),
+        op("curve.degree", "degree", "Degree").when(a_curve_selected)
+            .hint("Sets the selected curve's degree: `degree degree=3`. Raising keeps the shape and adds \
+                   points; lowering approximates it, and says so."),
+        cmd("curve.degree.1", "curve.degree", "degree", "1").args(&[("degree", "1")]).when(a_curve_selected)
+            .hint("Degree 1: a straight line between its two points."),
+        cmd("curve.degree.2", "curve.degree", "degree", "2").args(&[("degree", "2")]).when(a_curve_selected)
+            .hint("Degree 2: one bend, three points — an arc with the right weights."),
+        cmd("curve.degree.3", "curve.degree", "degree", "3").args(&[("degree", "3")]).when(a_curve_selected)
+            .hint("Degree 3: the usual cubic, four points."),
+        cmd("curve.degree.5", "curve.degree", "degree", "5").args(&[("degree", "5")]).when(a_curve_selected)
+            .hint("Degree 5: six points, for a curve that has to be smooth through more."),
+        cmd("curve.degree.7", "curve.degree", "degree", "7").args(&[("degree", "7")]).when(a_curve_selected)
+            .hint("Degree 7: eight points."),
+        // **Sketch on a plane block is one act** (the owner, 2026-10-31): the plane becomes the
+        // drawing plane, the view turns to look squarely down it with the plane's own X across the
+        // screen, and the projection goes orthographic, which is what brings the grid and its snap.
+        // The ViewCube's faces deliberately leave the projection alone; this is a stronger statement
+        // of intent. North on a plane's marking menu, a button in its block, and this entry.
+        op("draw.sketch", "sketch", "Sketch on plane").menu(VIEW, 2).when(a_plane_selected).checked(|c| c.sketching)
+            .aliases(&["sketch on", "stop sketching", "draw on plane"])
+            .hint("Draws on the selected plane: the view turns square to it and goes orthographic, and \
+                   every curve you draw lands on it. Again turns square to it again; Esc with nothing \
+                   pending, or `sketch off`, stops and brings the projection back."),
         op("view.cycle_mode", "mode", "Cycle display mode").keys(&["Tab"])
             .hint("Cage, field, field + cage, in turn."),
         op("view.toggle_visibility", "hide", "Hide / show").menu(VIEW, 3).keys(&["H"])
@@ -1342,6 +1427,9 @@ mod tests {
             ("H", m(false, false), "view.toggle_visibility"),
             ("Tab", m(false, false), "view.cycle_mode"),
             ("F", m(false, false), "view.frame_selection"),
+            ("A", m(false, false), "view.frame_all"),
+            ("Home", m(false, false), "view.frame_all"),
+            ("F", m(true, false), "view.find"),
             ("D", m(true, false), "edit.duplicate"),
             ("H", Modifiers { ctrl: false, shift: false, alt: true }, "view.show_all"),
             ("X", m(false, false), "view.section"),
@@ -1371,8 +1459,9 @@ mod tests {
         // The fifteen it had with F for `/`, and the palette's Space, Duplicate's Ctrl+D and Show
         // all's Alt+H from §9.1's table; Shift+R for repeat, F2 for rename, the owner's thirteen
         // modelling keys, and Ctrl+R and I for the cage's Insert Edge and Inset (R9) -- which
-        // brings the modelling keys to the fifteen the cap allows.
-        assert_eq!(km.bindings().len(), 35, "no binding added or lost beyond those");
+        // brings the modelling keys to the fifteen the cap allows; and A and Home for Frame all, the
+        // graph view's spec (`view.frame_all` frames the viewport too); and Ctrl+F for the graph's Find.
+        assert_eq!(km.bindings().len(), 38, "no binding added or lost beyond those");
         assert!(km.lookup(&Shortcut::new("Slash", m(false, false))).is_none(), "F replaced /");
     }
 
@@ -1403,6 +1492,7 @@ mod tests {
             ("curve", "create.curve"), ("pipe", "create.pipe"), ("boolean", "create.boolean"),
             ("offset", "modify.offset"), ("mirror", "modify.mirror"), ("twist", "modify.twist"),
             ("attract", "modify.attract"), ("pattern", "modify.pattern"), ("shell", "modify.shell"),
+            ("infill", "modify.infill"),
             ("refine", "cage.refine"), ("split", "modify.split"), ("axis", "construct.axis"),
             ("morph", "modify.morph"), ("new", "file.new"), ("draw", "draw.plane"),
             ("section", "view.section"), ("open", "file.open"), ("save", "file.save"),

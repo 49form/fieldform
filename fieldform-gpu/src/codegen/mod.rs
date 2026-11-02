@@ -207,6 +207,10 @@ pub enum CodegenError {
         "the generated shader did not compile, which is this build's fault rather than the          document's: {0}"
     )]
     Invalid(String),
+    /// What the field's own compile refuses, in its words: the lowering both of them read said
+    /// no, and a shader for it would be a second opinion on a document already turned down.
+    #[error("{0}")]
+    Refused(String),
 }
 
 /// A generated shader, plus everything the caller has to bind for it to run.
@@ -595,7 +599,15 @@ fn only_the_same_bodies(before: &Graph, mut lowered: Graph) -> Graph {
 /// The body is **shared**, not copied: one node read twice at the same point, which is a single
 /// SSA slot in the generated source. A copy would emit the whole body twice and double the
 /// shader for a wall.
-fn expand_shells(graph: &Graph) -> Graph {
+///
+/// **The thickness is resolved here rather than left to the parameter buffer.** The cavity needs
+/// the wall's negative, and a slot in that buffer holds a parameter's own value with nowhere to
+/// say "minus": left as a name, the offset grew the body by the wall instead of shrinking it, the
+/// difference of the two was empty, and a shell with a named thickness drew nothing while every
+/// measurement of it read correctly. It costs no recompile. An edit to a parameter invalidates the
+/// kept program, the text comes out the same, and the new number reaches the shader as a buffer
+/// write, the way a pattern's derived numbers already do.
+fn expand_shells(document: &fieldform_scene::Document, graph: &Graph) -> Graph {
     let shells: Vec<NodeId> = graph
         .nodes()
         .filter(|(_, n)| matches!(n, Node::Shell { .. }))
@@ -608,18 +620,15 @@ fn expand_shells(graph: &Graph) -> Graph {
     let mut out = graph.clone();
     for id in shells {
         let Some(Node::Shell { input, thickness }) = out.node(id).cloned() else { continue };
-        // Negated, because the cavity is the body shrunk and `Offset` subtracts. A named
-        // thickness keeps its name here, since nothing multiplies it — unlike a pattern's step,
-        // this is one number used once.
+        // Negated, because the cavity is the body shrunk and `Offset` subtracts.
         let cavity = out.add(Node::Offset {
             input,
-            distance: match thickness {
-                ParamRef::Literal(v) => ParamRef::Literal(-v),
-                // A named or driven thickness cannot be negated without resolving it, and both
-                // are refused before a shader is generated — a shell's thickness is not
-                // driveable, and a named one resolves through the parameter buffer where this
-                // sign flip cannot reach. Left as-is so the refusal is what a caller meets.
-                other => other,
+            distance: match document.resolve(&thickness) {
+                Some(v) => ParamRef::Literal(-v),
+                // A thickness with no number: a ramp, which is refused before a shader is
+                // generated, or an expression that failed, which the compile refuses by name.
+                // Left as it is so that refusal is what a caller meets.
+                None => thickness,
             },
         });
         // The shell node *becomes* the difference, so everything referring to it still does and
@@ -1152,6 +1161,22 @@ fn generate_inner(
             run_floor,
         );
     }
+    // **An infill is the blocks it is made of**, from the function the field reads, so the two
+    // have one sign to get right between them and no shader code of its own.
+    if let Some(lowered) = fieldform_field::with_infills_lowered(document, graph)
+        .map_err(|why| CodegenError::Refused(why.to_string()))?
+    {
+        return generate_inner(
+            document,
+            &lowered,
+            morph_divisors,
+            guard_bodies,
+            cull_bodies,
+            prune_patterns,
+            mask_operands,
+            run_floor,
+        );
+    }
     // **A pattern is no longer lowered away.** It used to be rewritten into one placement per
     // instance, so the shader carried the body once per copy: a hundred copies emitted it a
     // hundred times, and this codebase has already met the end of that road, where two thousand
@@ -1184,7 +1209,8 @@ fn generate_inner(
     }
     let numbers = |r: &ParamRef| -> Option<f64> { document.resolve(r) };
     let turned = fieldform_field::with_turns_flattened(document, graph, &numbers);
-    let lowered = only_the_same_bodies(&turned, expand_shells(&expand_frames(document, &turned)));
+    let lowered =
+        only_the_same_bodies(&turned, expand_shells(document, &expand_frames(document, &turned)));
     let graph = &lowered;
     // Same refusal as the CPU path, for the same reason: a node this build could not read
     // has no honest lowering, and emitting a shader that quietly leaves it out would put the
@@ -1415,6 +1441,8 @@ fn generate_inner(
             Node::Shell { .. } => {
                 unreachable!("lowered into a difference before any point was assigned")
             }
+            // The one left unlowered is a block with a hole in it, by `with_infills_lowered`.
+            Node::Infill { .. } => return Err(CodegenError::EmptySlot(id)),
             Node::Sweep { outline, spine, section, law, rims } => {
                 emit.sweep(outline, spine, section, law, rims)?
             }
@@ -4887,6 +4915,7 @@ fn normal_function(
             Node::Shell { .. } => {
                 unreachable!("lowered into a difference before any point was assigned")
             }
+            Node::Infill { .. } => unreachable!("refused in the value pass, which runs first"),
             Node::Sweep { outline, spine, law, rims, .. } => {
                 let first = match outline {
                     fieldform_scene::Outline::Closed { .. } => CurveUse::Profile(id),

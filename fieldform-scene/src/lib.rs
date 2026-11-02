@@ -41,6 +41,7 @@ mod material;
 mod mesh;
 mod ownership;
 pub mod relation;
+mod sketch;
 mod surface_axis;
 mod surface_point;
 mod output;
@@ -49,10 +50,11 @@ mod unit;
 pub use curve::{Curve, CurveData, CurveError, JOINED_MM};
 pub use relation::{CurveEnd, End, JointContinuity, Relation, RelationError, RelationRecord};
 pub use surface_axis::{ResolvedSurfaceAxis, SurfaceAxis};
+pub use sketch::{Laid, Sketch, ON_PLANE_MM};
 pub use surface_point::{across, Facing, Guide, GuideFrame, Solved, SurfacePoint};
 pub use import::StepOptions;
 pub use document::{
-    Document, ExpressionError, EyeFlag, ImportSettings, ImportSource, InputKind, InputPort,
+    Document, ExpressionError, EyeFlag, GraphLayout, ImportSettings, ImportSource, InputKind, InputPort,
     ListReadings, Nesting, NodeMeta, ParamValue, Parameter, ParameterError, Part, RenameError,
 };
 pub use expression::{Expression, ParseError};

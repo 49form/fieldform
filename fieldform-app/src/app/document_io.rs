@@ -27,6 +27,7 @@ impl App {
         // say, and it keeps the rule without an exception to remember.
         doc.settle_ownership();
 
+        self.note_document_replaced();
         self.active_cage = *doc.cages.keys().next().expect("with_cage inserts one");
         self.active_part = active_part;
         self.doc = doc;
@@ -54,7 +55,7 @@ impl App {
         self.rebuild_render_resources();
         // Clean rather than dirty: an empty document has nothing worth saving, and marking it
         // dirty would prompt on the way out of a document nobody edited.
-        self.mark_saved();
+        self.mark_replaced();
         self.camera = OrbitCamera::default();
         self.say("New document");
     }
@@ -99,6 +100,7 @@ impl App {
                     return;
                 };
 
+                self.note_document_replaced();
                 self.doc = doc;
                 self.active_part = part;
                 self.active_cage = cage;
@@ -156,7 +158,7 @@ impl App {
                 self.rebuild_curve_display();
                 self.rebuild_render_resources();
                 // What is in memory is exactly what was read, so nothing is pending.
-                self.mark_saved();
+                self.mark_replaced();
                 if let Some((center, radius)) = self.scene_bounds() {
                     self.camera.frame(center, radius);
                 }
@@ -442,7 +444,9 @@ impl App {
     /// So a command that would ask is refused by name instead, with the key that replaces it.
     /// The refusal is what a `--keep-going` run carries on past and what `--exit` counts.
     pub(crate) fn may_open_a_dialog(&mut self, verb: &str, instead: &str) -> bool {
-        if self.script.is_none() {
+        // `script_running` as well as `script`: an agent's call is script mode with no script
+        // behind it, and asking only about the file left its lines free to open a dialog.
+        if self.script.is_none() && !self.script_running {
             return true;
         }
         self.warn(format!(
@@ -473,6 +477,17 @@ impl App {
             Some((path, _)) => file_name(path),
             None => "This document".to_string(),
         };
+        // **An agent is refused rather than discarded for.** A script made its own document, so
+        // losing it costs nothing. An agent may be working in a person's, in their window, and a
+        // dialog there stops the call until somebody happens to answer it, or for good when nobody
+        // does. So it is told to save, which it can do without asking anyone anything.
+        if self.script_running {
+            self.warn(format!(
+                "{named} has unsaved changes, and nobody can be asked before {before} \u{2014} \
+                 save it first with `saveas file=<path>`"
+            ));
+            return false;
+        }
         // Yes/No/Cancel rather than Save/Discard/Cancel: rfd only relabels buttons on Windows
         // with its `common-controls-v6` feature, and a dialog that might not appear is worse
         // than one whose buttons are named by the question. So the question is phrased to make

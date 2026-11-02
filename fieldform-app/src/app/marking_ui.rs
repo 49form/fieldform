@@ -67,6 +67,13 @@ impl App {
         self.marking = Some(MarkingMenu { at, subject, dragging: false });
     }
 
+    /// Degree…, asked for from the palette or a key rather than from the ring: the ring of degrees
+    /// opens at the middle of the viewport, where a menu with no click to anchor it goes.
+    pub(crate) fn open_degree_menu(&mut self) {
+        let at = self.viewport_rect.map_or(egui::pos2(300.0, 300.0), |r| r.center());
+        self.marking = Some(MarkingMenu { at, subject: Subject::Degree, dragging: false });
+    }
+
     /// Draws the marking menu, if it is open, and runs what is picked.
     ///
     /// **One foreground widget over the whole menu**, so egui gives the menu its own clicks and
@@ -162,6 +169,10 @@ impl App {
                 self.open_palette(Some(on_offer));
             }
             Some(i) => match entry(i) {
+                // Degree… opens its ring where this one was, rather than running anything.
+                Some((c, Ok(()))) if c.id == "curve.degree_menu" => {
+                    self.marking = Some(MarkingMenu { at: menu.at, subject: Subject::Degree, dragging: false });
+                }
                 Some((c, Ok(()))) => self.invoke_command(c),
                 // A dimmed slot does nothing, and the menu stays open on it.
                 _ => self.marking = Some(menu),

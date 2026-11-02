@@ -727,6 +727,9 @@ fn extent_of(
         // below `g` only where the body does, since the wall's value is the larger of the body's
         // and the inward face's.
         Node::Shell { input, .. } => return below(input, g),
+        // The same argument: the value is the larger of the body's and something else's, so it
+        // reads below `g` only where the body does, and the body's box holds all of it.
+        Node::Infill { input, .. } => return below(input, g),
         // Not a shape, so it has no extent — and nothing asks, since a ramp is never a body.
         // `Empty` rather than `Unbounded` so that a stray one cannot widen a part's box.
         Node::Ramp { .. } => Extent::Empty,

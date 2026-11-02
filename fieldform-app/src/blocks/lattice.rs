@@ -1118,8 +1118,35 @@ impl App {
         if lines.is_empty() {
             return;
         }
+        self.lattice_readout_rows(ui, &lines);
+        // Offered wherever a published fit describes this cell and phase on a map whose cells
+        // are cubes -- including a solid below its floor or a wall past its limit, which is
+        // exactly when a number that does build is worth being offered.
+        let offered = match editing {
+            Node::Lattice { cell, map: CellMap::Rectangular { .. }, phase, .. } => {
+                fieldform_field::default_row(
+                    fieldform_field::CellKind::from(*cell),
+                    phase.banding(),
+                    fieldform_field::PropertyClass::Modulus,
+                )
+                .is_some()
+            }
+            _ => false,
+        };
+        if offered {
+            self.lattice_target_rows(ui, id, editing, new_phase);
+        }
+    }
+
+    /// The readout as rows, wherever a lattice's figures are shown: its own panel, and the
+    /// panel of the infill it fills.
+    pub(crate) fn lattice_readout_rows(
+        &self,
+        ui: &mut egui::Ui,
+        lines: &[lattice_readout::ReadoutLine],
+    ) {
         let warn = ui.visuals().warn_fg_color;
-        for line in &lines {
+        for line in lines {
             ui.horizontal_top(|ui| {
                 row_label(ui, line.label);
                 let text = egui::RichText::new(&line.text).small();
@@ -1151,23 +1178,6 @@ impl App {
             if let Some(note) = &line.note {
                 under(ui, egui::RichText::new(note).small().weak());
             }
-        }
-        // Offered wherever a published fit describes this cell and phase on a map whose cells
-        // are cubes -- including a solid below its floor or a wall past its limit, which is
-        // exactly when a number that does build is worth being offered.
-        let offered = match editing {
-            Node::Lattice { cell, map: CellMap::Rectangular { .. }, phase, .. } => {
-                fieldform_field::default_row(
-                    fieldform_field::CellKind::from(*cell),
-                    phase.banding(),
-                    fieldform_field::PropertyClass::Modulus,
-                )
-                .is_some()
-            }
-            _ => false,
-        };
-        if offered {
-            self.lattice_target_rows(ui, id, editing, new_phase);
         }
     }
 
@@ -1229,7 +1239,7 @@ impl App {
                         lattice_readout::End::OutMax => "Target, Out-max:",
                     },
                 );
-                ui.add(egui::DragValue::new(&mut percent).speed(0.05).suffix(" %"))
+                ui.add(egui::DragValue::new(&mut percent).speed(0.05).max_decimals(4).suffix(" %"))
                     .on_hover_text("Percent of the solid's own modulus");
                 match &answer {
                     Ok(a) => match &a.default.number {

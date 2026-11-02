@@ -398,6 +398,15 @@ const STILL_FRAMES: u32 = 8;
 /// At 128 the atlas is about 34 MB as RGBA floats and takes roughly 0.9 seconds to build.
 const BAKE_RESOLUTION: usize = 128;
 
+/// The fewest cells an imported mesh is settled at, along its longest edge.
+///
+/// **A cage's grid can be coarse and a mesh's cannot.** A cage is smooth by construction and
+/// carries its own normal beside the distance, so a coarse grid still shades like the model. A
+/// mesh of a machined part is all edges and small features, and it was read at the same 64 cells:
+/// 2.5 mm on a 141 mm test artifact, so its 4 mm pins came out as soft lumps and its smallest
+/// features not at all, with the field underneath correct to the tessellation.
+const MESH_BAKE_RESOLUTION: usize = 256;
+
 /// How long the input has to be quiet before a draft is replaced by a settled bake, and before
 /// an interactive frame gives way to a still.
 ///
@@ -1011,6 +1020,8 @@ pub struct TracedView {
     /// The draft is what a hand can be answered with, and everything above it is what a worker
     /// is for. Display quality picks the settled row, so the wait this removes grows with it.
     baking: Option<Baking>,
+    /// The pipelines of the shapes drawn most recently, for an undo or an eye turned back.
+    shelf: fieldform_gpu::PipelineShelf,
     /// Narrow bands already baked, kept across rebuilds.
     ///
     /// A bake is a pure function of one leaf's geometry, its own box, the resolution and the
@@ -2020,7 +2031,16 @@ impl TracedView {
     /// file wants the one the person would have waited for. The same question the viewport already
     /// answers for itself by stopping — asked out loud, so nothing has to guess at a frame count.
     pub fn is_settled(&self) -> bool {
-        !self.is_stale()
+        // **A shader still with the driver is not a finished picture, whatever the last one's
+        // count says.** The old shader goes on drawing the shape before the change until the new
+        // one lands, so nothing reads stale and its still is complete. A snapshot taken then was a
+        // faithful picture of a document that had moved on: every detail the last edit cut was
+        // missing from it, while the field itself found each one.
+        //
+        // Only the one this view is waiting on: an older compile left running has nothing to do
+        // with what is on screen once a kept shader has answered the rebuild that replaced it.
+        self.compiling.as_ref().is_none_or(|c| !compile_is_current(c.serial, self.asked))
+            && !self.is_stale()
             && self.built == Some(Quality::Final)
             // How many this still wants is on the key the last frame was drawn from, which is
             // also the only place that knows what  asked for.

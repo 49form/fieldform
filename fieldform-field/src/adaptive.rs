@@ -160,12 +160,17 @@ impl Tree {
         }
     }
 
-    /// How many leaves carry surface. Test-only for the same reason as `leaf_depths`.
-    #[cfg(test)]
+    /// How many leaves carry surface.
+    ///
+    /// The tests read it to see how far a tolerance refined, and `surface_leaf_count` is the
+    /// exact count the memory estimate is measured against — counted by walking rather than
+    /// through `leaf_depths`, which only the tests compile.
     fn surface_leaves(&self) -> usize {
-        let mut d = Vec::new();
-        self.leaf_depths(&mut d);
-        d.len()
+        match self {
+            Tree::Empty { .. } => 0,
+            Tree::Leaf(_) => 1,
+            Tree::Branch(kids) => kids.iter().map(Tree::surface_leaves).sum(),
+        }
     }
 
     fn is_branch(&self) -> bool {
@@ -432,17 +437,7 @@ pub(crate) fn build_cancellable(
     tol: &MeshTolerance,
     cancel: &crate::Cancel,
 ) -> (Tree, Cell) {
-    let (lo, hi) = bounds;
-    let extent = hi - lo;
-    let size = extent.x.max(extent.y).max(extent.z);
-    // Centred, so the room a non-cubic box gains is shared rather than added to one side.
-    let centre = Point3::from((lo.coords + hi.coords) * 0.5);
-    let half = size * 0.5;
-    let root = Cell {
-        lo: Point3::new(centre.x - half, centre.y - half, centre.z - half),
-        size,
-        depth: 0,
-    };
+    let root = root_cell(bounds);
     // Infinite when the field declares nothing, which leaves the rule below switched off.
     let feature = field.feature_size().unwrap_or(f64::INFINITY);
     let mut tree = descend(field, &root, tol, feature, cancel);
@@ -464,19 +459,60 @@ fn descend(
     if cancel.is_cancelled() {
         return Tree::Empty { inside: false };
     }
+    match decide(field, cell, tol, feature) {
+        Decided::Branch => branch(field, cell, tol, feature, cancel),
+        Decided::Done(tree) => {
+            // Charged for what it holds, so a run past its memory stops itself here rather than
+            // the allocator ending the process a few million leaves later.
+            if let Tree::Leaf(leaf) = &tree
+                && !cancel.charge(leaf_bytes(leaf))
+            {
+                return Tree::Empty { inside: false };
+            }
+            tree
+        }
+    }
+}
+
+/// What one cell of the tree becomes: finished here, or divided.
+enum Decided {
+    Done(Tree),
+    Branch,
+}
+
+/// The heap a leaf holds: its box and its two vectors, with the allocator's bookkeeping on each.
+fn leaf_bytes(leaf: &Leaf) -> usize {
+    const PER_ALLOCATION: usize = 16;
+    std::mem::size_of::<Leaf>()
+        + leaf.vertices.capacity() * std::mem::size_of::<Point3<f64>>()
+        + leaf.normals.capacity() * std::mem::size_of::<Vector3<f64>>()
+        + 3 * PER_ALLOCATION
+}
+
+/// The heap a branch holds: its eight children's slots.
+const BRANCH_BYTES: usize = 8 * std::mem::size_of::<Tree>() + 16;
+
+/// Decides one cell, without descending into its children — the whole of the rule a cell is
+/// judged by, so that the tree and the memory estimate's walk over it cannot disagree.
+fn decide(
+    field: &(dyn ScalarField + Sync),
+    cell: &Cell,
+    tol: &MeshTolerance,
+    feature: f64,
+) -> Decided {
     // Whether the surface can be in here at all, from the field's own interval bound. This is
     // the step that makes an octree cheaper than a grid rather than merely differently shaped.
     let (lo_v, hi_v) = field.interval(cell.lo, cell.hi());
     if lo_v > 0.0 {
-        return Tree::Empty { inside: false };
+        return Decided::Done(Tree::Empty { inside: false });
     }
     if hi_v < 0.0 {
-        return Tree::Empty { inside: true };
+        return Decided::Done(Tree::Empty { inside: true });
     }
 
     let too_small = cell.size * 0.5 < tol.min_cell_mm;
     if cell.depth < FORCED_DEPTH && !too_small {
-        return branch(field, cell, tol, feature, cancel);
+        return Decided::Branch;
     }
 
     match hermite(field, cell) {
@@ -486,7 +522,7 @@ fn descend(
         // taking the guess below would lose them all at once, by where the grid fell. Only the
         // field's own declaration switches this on: a solid with no thin features keeps the
         // guess, and with it the cost the note below measured.
-        None if !too_small && cell.size > feature => branch(field, cell, tol, feature, cancel),
+        None if !too_small && cell.size > feature => Decided::Branch,
         // The interval said the surface might be here and no corner changed sign, so either it
         // misses this cell or it passes through too thinly to touch an edge.
         //
@@ -510,7 +546,7 @@ fn descend(
             let value = field.distance(centre);
             let normal = crate::mesh::surface_normal(field, centre, cell.size * 1e-3);
             let guess = centre - normal * value;
-            Tree::Leaf(Box::new(Leaf {
+            Decided::Done(Tree::Leaf(Box::new(Leaf {
                 #[cfg(test)]
                 cell: *cell,
                 vertices: vec![Point3::new(
@@ -525,7 +561,7 @@ fn descend(
                 // No corner changed sign, so every corner is on the same side and the cell
                 // reports that honestly. Nothing here invents a crossing.
                 inside: [value <= 0.0; 8],
-            }))
+            })))
         }
         Some(h) => {
             let ambiguous = !is_manifold(h.inside);
@@ -533,16 +569,16 @@ fn descend(
             let sags = h.sag > tol.chord_mm;
             let long = tol.max_edge_mm > 0.0 && cell.size > tol.max_edge_mm;
             if !too_small && (ambiguous || turns || sags || long) {
-                return branch(field, cell, tol, feature, cancel);
+                return Decided::Branch;
             }
-            Tree::Leaf(Box::new(Leaf {
+            Decided::Done(Tree::Leaf(Box::new(Leaf {
                 #[cfg(test)]
                 cell: *cell,
                 vertices: h.vertices,
                 normals: h.normals,
                 of_edge: h.of_edge,
                 inside: h.inside,
-            }))
+            })))
         }
     }
 }
@@ -554,6 +590,9 @@ fn branch(
     feature: f64,
     cancel: &crate::Cancel,
 ) -> Tree {
+    if !cancel.charge(BRANCH_BYTES) {
+        return Tree::Empty { inside: false };
+    }
     let kids = cell.children();
     Tree::Branch(Box::new(std::array::from_fn(|c| {
         descend(field, &kids[c], tol, feature, cancel)
@@ -810,6 +849,8 @@ impl<'a> Node<'a> {
 
 /// What the traversal builds.
 struct Contour {
+    /// The run's token, which the buffers below are charged to as they grow.
+    cancel: crate::Cancel,
     positions: Vec<Point3<f64>>,
     normals: Vec<Vector3<f64>>,
     triangles: Vec<[u32; 3]>,
@@ -819,24 +860,38 @@ struct Contour {
 }
 
 impl Contour {
-    fn index(&mut self, leaf: &Leaf, sheet: usize) -> u32 {
+    /// `None` when the buffers could not grow, with the run's token tripped.
+    fn index(&mut self, leaf: &Leaf, sheet: usize) -> Option<u32> {
         let sheet = sheet.min(leaf.vertices.len().saturating_sub(1));
         // Keyed by the leaf's address, which is stable for the life of the tree and unique per
         // leaf — cheaper than hashing a position, and exact where a position could collide.
         let key = (leaf as *const Leaf as usize, sheet);
         if let Some(i) = self.index_of.get(&key) {
-            return *i;
+            return Some(*i);
+        }
+        if !self.cancel.reserve(&mut self.positions, 1) || !self.cancel.reserve(&mut self.normals, 1)
+        {
+            return None;
+        }
+        if self.index_of.len() == self.index_of.capacity() {
+            // A slot is a key, a value and a control byte, at most eight to seven full.
+            let more = self.index_of.capacity().max(64);
+            let slot = std::mem::size_of::<((usize, usize), u32)>() + 1;
+            if !self.cancel.charge(more * slot * 8 / 7) || self.index_of.try_reserve(more).is_err() {
+                self.cancel.out_of_memory();
+                return None;
+            }
         }
         let i = self.positions.len() as u32;
         self.positions.push(leaf.vertices[sheet]);
         self.normals.push(leaf.normals[sheet]);
         self.index_of.insert(key, i);
-        i
+        Some(i)
     }
 }
 
 fn cell_proc(n: &Node<'_>, out: &mut Contour) {
-    if !n.is_branch() {
+    if !n.is_branch() || out.cancel.is_cancelled() {
         return;
     }
     for c in 0..8 {
@@ -949,6 +1004,10 @@ fn edge_proc(q: &[Node<'_>; 4], axis: usize, out: &mut Contour) {
 
 /// A minimal edge: every surrounding cell is a leaf, so this is where a quad belongs.
 fn emit(q: &[Node<'_>; 4], axis: usize, out: &mut Contour) {
+    // A run out of memory has stopped growing its buffers, so nothing more is written to them.
+    if out.cancel.is_cancelled() {
+        return;
+    }
     // The finest of the four owns the edge. A coarser neighbour does not have these corners, so
     // its own signs would answer a different question.
     let Some(finest) = (0..4).max_by_key(|i| q[*i].cell.depth) else {
@@ -990,7 +1049,10 @@ fn emit(q: &[Node<'_>; 4], axis: usize, out: &mut Contour) {
         let sheet = leaf.of_edge[edge_at_corner(axis, wu, wv)];
         // A cell whose own corners show no crossing on that edge has one vertex and no sheets
         // to choose between — the guessed vertex a thin feature gets. Zero is that one.
-        idx[i] = out.index(leaf, if sheet == NO_SHEET { 0 } else { sheet as usize });
+        let Some(at) = out.index(leaf, if sheet == NO_SHEET { 0 } else { sheet as usize }) else {
+            return;
+        };
+        idx[i] = at;
     }
 
     // Wound so the face points from inside to outside. The ring is right-handed about +axis, so
@@ -1006,6 +1068,9 @@ fn emit(q: &[Node<'_>; 4], axis: usize, out: &mut Contour) {
     //
     // Collapsed cyclically, so a repeat anywhere in the ring is caught rather than only an
     // adjacent one.
+    if !out.cancel.reserve(&mut out.triangles, 2) {
+        return;
+    }
     let mut ring: Vec<u32> = ring.to_vec();
     ring.dedup();
     if ring.len() > 1 && ring.first() == ring.last() {
@@ -1067,6 +1132,104 @@ pub fn mesh_field_adaptive(
         .expect("a token nobody holds is never set")
 }
 
+/// How many leaves carrying surface the tree over `bounds` at `tol` has before balancing, or
+/// `None` if `cancel` was set first — the count [`estimate_surface_leaves`] samples for, made by
+/// building the tree and throwing it away.
+pub(crate) fn surface_leaf_count(
+    field: &(dyn ScalarField + Sync),
+    bounds: (Point3<f64>, Point3<f64>),
+    tol: &MeshTolerance,
+    cancel: &crate::Cancel,
+) -> Option<usize> {
+    let root = root_cell(bounds);
+    let feature = field.feature_size().unwrap_or(f64::INFINITY);
+    let held = cancel.used();
+    let tree = descend(field, &root, tol, feature, cancel);
+    let count = tree.surface_leaves();
+    drop(tree);
+    cancel.release(cancel.used().saturating_sub(held));
+    (!cancel.is_cancelled()).then_some(count)
+}
+
+/// The cubic cell a tree over `bounds` is built on: as wide as the box's longest side, and
+/// centred, so the room a non-cubic box gains is shared rather than added to one side.
+fn root_cell((lo, hi): (Point3<f64>, Point3<f64>)) -> Cell {
+    let extent = hi - lo;
+    let size = extent.x.max(extent.y).max(extent.z);
+    let centre = Point3::from((lo.coords + hi.coords) * 0.5);
+    let half = size * 0.5;
+    Cell { lo: Point3::new(centre.x - half, centre.y - half, centre.z - half), size, depth: 0 }
+}
+
+/// How many surface leaves the tree would have, from a sample of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LeafEstimate {
+    /// The expected count of surface leaves, before balancing.
+    pub expected: f64,
+    /// Cells the walk decided: what the estimate cost, against the tree it stands in for.
+    pub cells_decided: usize,
+}
+
+/// The most cells the walk keeps at any one level.
+pub(crate) const ESTIMATE_LEVEL: usize = 4096;
+
+/// Estimates how many surface leaves the tree over `bounds` at `tol` has before balancing,
+/// without building it.
+///
+/// **The tree's own rule, on a thinned copy of each level.** The walk judges cells exactly as
+/// the build does (`decide`), one level at a time. A level of at most [`ESTIMATE_LEVEL`] cells
+/// is kept whole; a larger one is thinned to that many by taking every so-many-th cell, and each
+/// kept cell stands for the ones skipped beside it — it carries a weight, and a leaf adds its
+/// weight to the count. So the walk is the build when the tree is small, and costs at most
+/// [`ESTIMATE_LEVEL`] decisions a level when it is not.
+///
+/// **Thinned per level rather than sampled once at the top**, because that is where the leaves
+/// are. The first version built a fixed sample of one shallow level in full, and read a cube
+/// cage at the finest detail at a ninth of its leaves: they are concentrated under few of that
+/// level's seven thousand cells, and a sample of 128 missed them. A region that keeps refining
+/// becomes a larger share of each level below it, so a thinned level samples it in proportion —
+/// and the levels are in the order the children were made, so the cells under one parent sit
+/// together and an even stride over the list takes its share of every region. Measured within 8%
+/// of the exact count on a ball, a cage and a gyroid block at every detail
+/// (`examples/tessellation_memory.rs --leaves`).
+pub(crate) fn estimate_surface_leaves(
+    field: &(dyn ScalarField + Sync),
+    bounds: (Point3<f64>, Point3<f64>),
+    tol: &MeshTolerance,
+    cancel: &crate::Cancel,
+) -> Option<LeafEstimate> {
+    let root = root_cell(bounds);
+    let feature = field.feature_size().unwrap_or(f64::INFINITY);
+
+    let mut expected = 0.0;
+    let mut decided = 0usize;
+    let mut level: Vec<(Cell, f64)> = vec![(root, 1.0)];
+    while !level.is_empty() {
+        let mut next: Vec<(Cell, f64)> = Vec::with_capacity(level.len() * 4);
+        for (cell, weight) in &level {
+            if cancel.is_cancelled() {
+                return None;
+            }
+            decided += 1;
+            match decide(field, cell, tol, feature) {
+                Decided::Done(Tree::Leaf(_)) => expected += weight,
+                Decided::Done(_) => {}
+                Decided::Branch => next.extend(cell.children().map(|c| (c, *weight))),
+            }
+        }
+        let n = next.len();
+        if n > ESTIMATE_LEVEL {
+            let k = ESTIMATE_LEVEL;
+            let scale = n as f64 / k as f64;
+            // The middle of each of `k` equal runs, so the first and last runs are sampled alike.
+            next = (0..k).map(|i| next[(2 * i + 1) * n / (2 * k)]).map(|(c, w)| (c, w * scale)).collect();
+        }
+        level = next;
+    }
+    Some(LeafEstimate { expected, cells_decided: decided })
+}
+
+
 /// [`mesh_field_adaptive`], or `None` if `cancel` was set before the mesh was finished.
 pub(crate) fn mesh_field_adaptive_cancellable(
     field: &(dyn ScalarField + Sync),
@@ -1074,7 +1237,9 @@ pub(crate) fn mesh_field_adaptive_cancellable(
     tol: &MeshTolerance,
     cancel: &crate::Cancel,
 ) -> Option<FieldMesh> {
+    let held = cancel.used();
     let (tree, root) = build_cancellable(field, bounds, tol, cancel);
+    let tree_bytes = cancel.used().saturating_sub(held);
     // Asked after the build rather than trusted to it: a build that was cancelled returns a tree
     // with empty cells where it stopped, and contouring that would produce a mesh with holes
     // that looks like an answer.
@@ -1082,12 +1247,18 @@ pub(crate) fn mesh_field_adaptive_cancellable(
         return None;
     }
     let mut out = Contour {
+        cancel: cancel.clone(),
         positions: Vec::new(),
         normals: Vec::new(),
         triangles: Vec::new(),
         index_of: std::collections::HashMap::new(),
     };
     cell_proc(&Node { tree: &tree, cell: root }, &mut out);
+    drop(tree);
+    cancel.release(tree_bytes);
+    if cancel.is_cancelled() {
+        return None;
+    }
     Some(FieldMesh {
         positions: out.positions,
         normals: out.normals,

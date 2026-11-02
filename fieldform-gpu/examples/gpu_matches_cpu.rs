@@ -212,6 +212,8 @@ fn main() {
         Scene::ChamferBlend,
         Scene::ChamferedDifference,
         Scene::Hollow,
+        Scene::Infilled,
+        Scene::InfilledJoined,
         Scene::CylindricalInfill,
         Scene::SphericalInfill,
         Scene::ConformalInfill,
@@ -1600,6 +1602,12 @@ enum Scene {
     /// as if it were somewhere else. The two inner faces are also where a cavity's normal
     /// points opposite the outer one, which the difference arm has to negate.
     Hollow,
+    /// The same box with a skin and a gyroid core, through `Node::Infill`, because the block is
+    /// what the app builds and the lowering both compilers read is the thing that could be wrong.
+    Infilled,
+    /// And with the core rounded into the skin, so the lowering's blend is what is measured:
+    /// a hard infill has no blend in it for a taper, a bound or a sign to go wrong in.
+    InfilledJoined,
 }
 
 impl Scene {
@@ -1608,6 +1616,8 @@ impl Scene {
             Scene::CageOnly => "cage alone",
             Scene::ConformalInfill => "a gyroid laid over an open domed surface",
             Scene::ConformalShell => "the same gyroid, confined to a shell of it",
+            Scene::Infilled => "box with a skin and a gyroid core, one block",
+            Scene::InfilledJoined => "the same, the core rounded into the skin",
             Scene::Difference => "cage minus pipe",
             Scene::PipeOnly => "pipe alone",
             Scene::TwoBodies => "cage and pipe, unjoined",
@@ -4239,6 +4249,47 @@ impl Scene {
             return (doc, graph, Vec::new());
         }
 
+        if matches!(self, Scene::Infilled | Scene::InfilledJoined) {
+            let mut graph = Graph::empty();
+            let mm = |f: f64| ParamRef::Literal(f * CAGE_MM);
+            let cube = graph.add(Node::Cuboid {
+                edge: Default::default(),
+                centre: fieldform_scene::Place::At([ParamRef::Literal(0.0); 3]),
+                size: [mm(0.7); 3],
+                turn: fieldform_scene::no_turn(),
+            });
+            let core = graph.add(Node::Lattice {
+                frame: fieldform_scene::Frame::default(),
+                cell: fieldform_scene::LatticeCell::Gyroid,
+                map: fieldform_scene::CellMap::Rectangular { cell: mm(0.2) },
+                phase: LatticePhase::sheet(mm(0.025)),
+            });
+            let infill = graph.add(Node::Infill {
+                input: cube.into(),
+                wall: mm(0.05),
+                fill: core.into(),
+                join: if matches!(self, Scene::InfilledJoined) {
+                    fieldform_scene::Fillet::of(mm(0.03))
+                } else {
+                    fieldform_scene::Fillet::hard()
+                },
+            });
+            // **A corner off, or this measures nothing.** A closed skin hides the core from every
+            // ray, so the scene as first written reported the shell's own hit count to the pixel
+            // and passed without a single ray reaching the lattice or the join.
+            let opening = graph.add(Node::Cuboid {
+                edge: Default::default(),
+                centre: fieldform_scene::Place::At([mm(0.2), mm(-0.2), mm(0.2)]),
+                size: [mm(0.4); 3],
+                turn: fieldform_scene::no_turn(),
+            });
+            graph.add(Node::Boolean {
+                op: BooleanOp::Difference,
+                inputs: vec![infill.into(), opening.into()],
+            });
+            return (doc, graph, Vec::new());
+        }
+
         if matches!(self, Scene::Hollow) {
             let mut graph = Graph::empty();
             let cube = graph.add(Node::Cuboid { edge: Default::default(),
@@ -4593,6 +4644,8 @@ impl Scene {
             | Scene::LoftedG0
             | Scene::LoftedDerived
             | Scene::Hollow
+            | Scene::Infilled
+            | Scene::InfilledJoined
             | Scene::CylindricalInfill
             | Scene::SphericalInfill
             | Scene::SolidInfill

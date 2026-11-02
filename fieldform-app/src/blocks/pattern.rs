@@ -225,11 +225,9 @@ impl App {
             }
         };
 
-        // **The same choice Mirror offers, spelled the same way (D9).** A block that
-        // holds the body it patterns consumes it, and a consumed node is not a root --
-        // so the body leaves the list and cannot be shown, hidden or handed to a
-        // boolean on its own. Off is what the tool now builds; on is what documents
-        // written before this existed mean, and they keep meaning it.
+        // **The same choice Mirror offers, spelled the same way (D9).** On is what the tool
+        // builds, since the count includes the original and the block is what the next
+        // operation reads. Off leaves the body out of it.
         let mut new_join = join;
         ui.horizontal(|ui| {
             row_label(ui, "Holds:");
@@ -245,7 +243,7 @@ impl App {
                 "The body is part of this block, so it is drawn here and not \
                  separately."
             } else {
-                "The body stays a block of its own — hide it to leave a gap."
+                "The body is left out of this block. Turn its eye on to draw it beside them."
             })
             .small()
             .weak(),

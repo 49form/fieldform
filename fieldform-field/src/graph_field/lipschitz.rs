@@ -70,6 +70,9 @@ fn lipschitz_of_node(document: &Document, graph: &Graph, node: NodeId, depth: us
         // exactly `a` and at `t = 1` exactly `b`, and in between it cannot rise faster than the
         // steeper of them.
         Node::Morph { a, b, .. } => recurse(a).max(recurse(b)),
+        // The largest of what it reads, which is the answer its lowering gives: it is booleans
+        // and a fixed offset, with a blend where it rounds, and none of those adds to a rate.
+        Node::Infill { input, fill, .. } => recurse(input).max(recurse(fill)),
         // The chain rule, with both terms known — see [`RampShape::slope_factor`]. This is the
         // number that makes a driven parameter statable at all.
         Node::Ramp {
@@ -214,6 +217,16 @@ fn true_distance_at(document: &Document, graph: &Graph, node: NodeId, depth: usi
         // A radius of nought is a hard boolean: both operands, since min and max of a distance
         // and a bound is a bound.
         Node::Boolean { inputs, .. } | Node::Blend { inputs, .. } => inputs.iter().all(|i| recurse(i)),
+        // What its lowering says, and held to that by
+        // `an_infill_claims_what_its_lowering_claims`: a blend once a join rounds, which is never
+        // exact, and otherwise booleans over a fixed offset, which need both operands. A wall of
+        // nought has no join to round, however much of one is set.
+        Node::Infill { wall, join, .. }
+            if document.resolve(wall).is_none_or(|t| t > 0.0) && rounds(join) =>
+        {
+            false
+        }
+        Node::Infill { input, fill, .. } => recurse(input) && recurse(fill),
         // Never, whatever it is made of: where the two gradients oppose the value rises more
         // slowly than one per millimetre, so the reading is short. The same answer
         // `normalization_of` gives over the compiled ops, and the two are held together by
@@ -413,6 +426,17 @@ pub fn approximate_blends(document: &Document, graph: &Graph) -> Vec<NodeId> {
             Node::Pattern { input, fillet, .. }
                 if !fillet.is_plainly_hard()
                     && !operand_carries_true_distance(document, graph, input) =>
+            {
+                Some(id)
+            }
+            // The same obligation again, and not at a wall of nought, where the join is ignored.
+            // The cavity is a fixed offset of the body, so it carries what the body carries.
+            Node::Infill { input, wall, fill, join }
+                if !join.is_plainly_hard()
+                    && document.resolve(wall).is_none_or(|t| t > 0.0)
+                    && [input, fill]
+                        .iter()
+                        .any(|slot| !operand_carries_true_distance(document, graph, slot)) =>
             {
                 Some(id)
             }
@@ -1058,6 +1082,14 @@ pub(crate) fn driven_refusal(node: &Node) -> Option<CompileError> {
                 ));
         }
         Node::Shell { .. } => "a shell's thickness",
+        // The join may follow a ramp, since it is a blend once lowered. The wall may not, for the
+        // reason a shell's may not, and variable walls are one later change to both.
+        Node::Infill { wall, .. } => {
+            return wall
+                .driver()
+                .is_some()
+                .then_some(CompileError::ParameterCannotBeDriven("an infill's wall"));
+        }
         Node::Twist { .. } => "a twist's rate or origin",
         Node::Attract { .. } => "an attractor's strength or falloff radius",
         Node::Transform { .. } => "a placement's translation, rotation or scale",

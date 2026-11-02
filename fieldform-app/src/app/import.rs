@@ -88,11 +88,12 @@ impl App {
             && bodies.iter().all(|id| !is_visible_among(&self.doc, part, &consumed, *id));
         let selected = self.selected_block == Some(outputs::BlockRef::Import(source));
 
-        let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
             ui.ctx(),
             ui.make_persistent_id(("import", source.raw())),
             false,
         );
+        self.open_for_reveal(&mut state, ui.ctx(), RowKey::Import(source));
         state
             .show_header(ui, |ui| {
                 // The original CAD, over the field it became. Offered only when there is

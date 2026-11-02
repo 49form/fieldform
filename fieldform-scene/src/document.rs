@@ -66,6 +66,23 @@ pub struct Parameter {
     pub value: ParamValue,
 }
 
+/// The graph view's saved state: which of the two views the panel shows, and the positions nodes
+/// were dragged to, keyed by block (or by a named number's id made into one). A pin whose node no
+/// longer exists is harmless and is dropped the next time the graph is drawn.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GraphLayout {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shown: bool,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pins: std::collections::BTreeMap<NodeId, [f32; 2]>,
+}
+
+impl GraphLayout {
+    pub fn is_default(&self) -> bool {
+        !self.shown && self.pins.is_empty()
+    }
+}
+
 /// What a body is called and whether it is drawn.
 ///
 /// Absent for most bodies, which is the point: a body with nothing to remember costs nothing,
@@ -451,6 +468,12 @@ pub struct Document {
     /// never stored, and the order the compilers fold them in ignores this entirely — see
     /// [`Self::folded_bodies`].
     pub arrangement: HashMap<NodeId, u32>,
+
+    /// How the blocks panel shows this document, and where nodes were dragged in its graph view
+    /// (`notebook-graph-view-spec.md` §5, ruling 2: shared, so everyone who opens the file sees
+    /// the same layout). Presentation only (G1): nothing reads it to build, evaluate or write
+    /// generated source. Its own archive entry, for the reason `arrangement` has one.
+    pub graph_layout: GraphLayout,
     /// [`Self::created`], for curves.
     ///
     /// A second map rather than one keyed by something both ids fit into, because the first is
@@ -519,6 +542,13 @@ pub struct Document {
     /// and an older build shows it where it last stood; this is only the rule that re-derives that
     /// position. A record outlives its block in the document, so undoing a delete finds it again.
     pub surface_points: std::collections::BTreeMap<NodeId, crate::SurfacePoint>,
+    /// Sketches: the curves that lie on a plane block and follow it (`Sketch`), by curve.
+    ///
+    /// **Beside the curves, for the reason the surface axes are.** The curve stores its points as
+    /// any curve does, so everything that reads a curve reads a sketch and an older build draws it
+    /// where it last lay; this is only the rule that re-lays those points from the plane. A record
+    /// outlives its curve in the document, so undoing a delete finds it again.
+    pub sketches: std::collections::BTreeMap<CurveId, crate::Sketch>,
     /// Relations between curves (`profile-group-spec.md` §5): which curve follows which, how,
     /// and whether it was found not to hold on open. Beside the curves rather than on them,
     /// since a curve referencing another curve is the dependency direction this document
@@ -753,12 +783,14 @@ impl Document {
             sources: HashMap::new(),
             created: HashMap::new(),
             arrangement: HashMap::new(),
+            graph_layout: GraphLayout::default(),
             curves_created: HashMap::new(),
             profile_names: HashMap::new(),
             declared_curves: std::collections::BTreeSet::new(),
             ungrouped_curves: std::collections::BTreeSet::new(),
             surface_axes: std::collections::BTreeMap::new(),
             surface_points: std::collections::BTreeMap::new(),
+            sketches: std::collections::BTreeMap::new(),
             relations: std::collections::BTreeMap::new(),
             tessellations: Vec::new(),
             exports: Vec::new(),

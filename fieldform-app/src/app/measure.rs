@@ -74,7 +74,7 @@ impl App {
                 }
             }
         }
-        let field = GraphField::compile_graph(&self.doc, &graph, 0.05).ok();
+        let field = GraphField::compile_graph(&self.doc, &graph, crate::MEASURE_TOLERANCE_MM).ok();
         let Some(field) = field else {
             self.warn(match self.compile_error() {
                 Some(why) => format!("Nothing to measure: {why}"),
@@ -235,7 +235,7 @@ impl App {
     ///
     /// An unbounded body — one unioned with a half-space or a bare lattice — has no volume to
     /// report, and saying so beats measuring whatever happens to fall inside an arbitrary box.
-    fn measure_bounds(&self, target: Option<NodeId>) -> Option<(Point3<f64>, Point3<f64>)> {
+    pub(crate) fn measure_bounds(&self, target: Option<NodeId>) -> Option<(Point3<f64>, Point3<f64>)> {
         let extent = match target {
             Some(id) => self.body_extent(id),
             None => {

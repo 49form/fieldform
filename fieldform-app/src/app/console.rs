@@ -145,6 +145,9 @@ impl App {
     /// A safety net is worth having precisely because the next such caller will be written by
     /// someone who has forgotten this one.
     fn report(&mut self, ok: bool, text: String) {
+        if let Some(capture) = self.line_capture.as_mut() {
+            capture.push((ok, text.clone()));
+        }
         self.console_reports += 1;
         if !ok {
             self.console_warnings += 1;
@@ -302,6 +305,24 @@ impl App {
         self.echo_rebase();
     }
 
+    /// Runs one console line and says what it did, as data.
+    ///
+    /// **The same `run_command`, with the words it reports caught as they are made**, so what a
+    /// caller reads here is what the console printed and the two cannot differ
+    /// (`mcp-server-spec.md` §6.1). The console, the log and `--run` are untouched.
+    #[cfg_attr(not(test), allow(dead_code))] // read by the agent host, which a later phase adds
+    pub(crate) fn run_line(&mut self, line: &str) -> outcome::LineOutcome {
+        self.line_capture = Some(Vec::new());
+        self.line_error = None;
+        let before = outcome::BlockSnapshot::of(&self.doc);
+        self.run_command(line);
+        let caught = self.line_capture.take().unwrap_or_default();
+        let error = self.line_error.take();
+        let mut out = outcome::LineOutcome::from_reports(line, caught, error);
+        out.blocks = before.changes_to(&outcome::BlockSnapshot::of(&self.doc), &self.doc);
+        out
+    }
+
     fn run_command_unechoed(&mut self, line: &str) {
         let line = line.trim();
         if line.is_empty() {
@@ -327,7 +348,13 @@ impl App {
                     .map(|(_, op)| op.to_string())
                     .unwrap_or(verb.clone());
                 match console_keys::help_for(&verb, &op) {
-                    Some(line) => self.say(line),
+                    Some(line) => {
+                        self.say(line);
+                        // The catalogue's worked line, when it has one (`examples.rs`).
+                        if let Some(example) = examples::example_of(&verb) {
+                            self.say(format!("e.g. {example}"));
+                        }
+                    }
                     None => self.say(format!("`{verb}` is not in the key table — `help` lists every command")),
                 }
                 return;
@@ -408,7 +435,16 @@ impl App {
         // a cube", which is the same silence a wrong value falls back into. Only on the typed
         // path: a menu passes no keys, and a verb that has not declared its keys is passed
         // through as it always was.
+        match self.agent_guard_paths(&op, args) {
+            Ok(guarded) => args = guarded,
+            Err(error) => {
+                self.line_error = Some(error.clone());
+                self.warn(error.message);
+                return;
+            }
+        }
         if let Some(why) = console_keys::refusal(&name, &op, &args) {
+            self.line_error = Some(outcome::unknown_key_error(&name, &op, &args, &why));
             self.warn(why);
             return;
         }
@@ -457,6 +493,7 @@ impl App {
         if op.contains('.') {
             self.say(format!("{op} ran"));
         } else {
+            self.line_error = Some(outcome::unknown_verb_error(&name));
             self.warn(format!("{name:?} is not a command — type `help` for the list"));
         }
     }
@@ -564,7 +601,7 @@ impl App {
                     let bounds = fieldform_field::part_extent(doc, &alone)
                         .as_box()
                         .ok_or_else(|| "it has no bounds to measure within — an unbounded block cannot be measured".to_string())?;
-                    let field = GraphField::compile_graph(doc, &alone, 1e-3).map_err(|e| e.to_string())?;
+                    let field = GraphField::compile_graph(doc, &alone, crate::MEASURE_TOLERANCE_MM).map_err(|e| e.to_string())?;
                     Ok((field, bounds))
                 };
                 let first = match of {

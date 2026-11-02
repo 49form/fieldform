@@ -20,7 +20,9 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
-use fieldform_field::{Cancel, FieldMesh, GraphField, MeshTolerance, Progress, Tessellated};
+use fieldform_field::{
+    Cancel, Estimate, FieldMesh, GraphField, MeshTolerance, Progress, Stopped, Tessellated,
+};
 use fieldform_scene::{
     Export, ExportId, Graph, MeshDetail, Node, NodeId, PartId, Tessellation, TessellationId,
 };
@@ -87,6 +89,33 @@ pub(crate) struct Outputs {
     /// whether that is every body in it — a whole-part tessellation on show.
     pub(crate) instead_of: std::collections::HashSet<NodeId>,
     pub(crate) instead_of_all: bool,
+    /// What each tessellation is expected to hold, for the inputs it was worked out from.
+    estimates: HashMap<TessellationId, Estimating>,
+    /// The field an estimate was made from, kept for the run that follows it so a Run after an
+    /// estimate does not compile the body a second time. Only for the inputs it was compiled
+    /// from; anything else drops it.
+    prepared: HashMap<TessellationId, (u64, Arc<GraphField>)>,
+    /// The bytes a run may hold, in place of what the machine says it has free — so a test can
+    /// ask what happens on a machine with less memory than the one it runs on.
+    pub(crate) memory_override: Option<u64>,
+}
+
+/// A tessellation's memory estimate: being worked out, worked out, or not to be had for these
+/// inputs — kept, so a body that does not compile is not compiled again every frame to find out.
+enum Estimating {
+    Running { key: u64, cancel: Cancel, result: Receiver<Option<Estimate>> },
+    Done { key: u64, estimate: Estimate },
+    Unavailable { key: u64, why: String },
+}
+
+impl Estimating {
+    fn key(&self) -> u64 {
+        match self {
+            Estimating::Running { key, .. }
+            | Estimating::Done { key, .. }
+            | Estimating::Unavailable { key, .. } => *key,
+        }
+    }
 }
 
 struct Reads {
@@ -100,8 +129,11 @@ struct Tessellating {
     started: Instant,
     key: u64,
     tolerance: MeshTolerance,
-    /// `None` when it was cancelled; a disconnect with nothing sent is a panic.
-    result: Receiver<Option<Tessellated>>,
+    /// What it was expected to hold when it started, if that was known then — what it reserves
+    /// of the machine against the runs that start beside it.
+    estimate: Option<Estimate>,
+    /// Why it stopped, when it did; a disconnect with nothing sent is a panic.
+    result: Receiver<Result<(Tessellated, Estimate), Stopped>>,
 }
 
 /// What a tessellation last finished with.
@@ -111,6 +143,9 @@ struct Outcome {
     tolerance: MeshTolerance,
     took: f64,
     mesh: Result<(Arc<FieldMesh>, usize), String>,
+    /// The run was refused before it started, or stopped itself for want of memory — said as
+    /// that rather than as a failure, since nothing is wrong with the body.
+    refused: bool,
 }
 
 struct Writing {
@@ -157,9 +192,11 @@ impl App {
         }
         self.forget_removed_outputs();
         self.refresh_reads();
+        self.poll_estimates();
         self.poll_tessellations();
         self.poll_writes();
         self.start_due_tessellations();
+        self.start_due_estimates();
         self.start_due_writes();
         self.sync_previews();
         self.note_stage("the output blocks", started);
@@ -170,7 +207,9 @@ impl App {
             t.active && self.outputs.reads.get(&t.id).is_some_and(|r| r.key.is_ok())
                 && !self.tessellation_is_current(t.id)
         });
-        if self.outputs.busy() || waiting {
+        let estimating =
+            self.outputs.estimates.values().any(|e| matches!(e, Estimating::Running { .. }));
+        if self.outputs.busy() || waiting || estimating {
             ctx.request_repaint_after(Duration::from_millis(250));
         }
     }
@@ -401,6 +440,8 @@ impl App {
                 .is_none_or(|r| r.key != key);
             if moved {
                 self.outputs.reads.insert(t.id, Reads { key: key.clone(), changed: Instant::now() });
+                // A body compiled for inputs that have moved on is of no use to the next run.
+                self.outputs.prepared.remove(&t.id);
             }
             // **A run on inputs that have since moved is stopped at once**, not left to finish.
             // It would produce a mesh of geometry that no longer exists, and it holds a core the
@@ -447,6 +488,12 @@ impl App {
     }
 
     /// Starts one tessellation now, whatever its state — the Run button, and the settled path.
+    ///
+    /// **Refused, and never started, when its estimate is more than the machine can give it.**
+    /// With the estimate already worked out that is decided here and nothing is spawned; without
+    /// it the run's first stage works it out and stops before meshing anything. Either way the
+    /// run is also given the machine's limit to hold to, so one the estimate read short stops
+    /// itself with a message rather than ending the application.
     fn start_tessellation(&mut self, id: TessellationId) {
         let started = std::time::Instant::now();
         let Some(t) = self.doc.tessellations.iter().find(|t| t.id == id).cloned() else {
@@ -463,18 +510,17 @@ impl App {
                 return;
             }
         };
-        // Compiled here and *moved* there. The compile reads the document, so it has to happen
-        // on this thread; meshing does not touch the document at all, which is what makes
-        // handing it over safe without a lock. A `GraphField` owns its leaves through `Arc`, so
-        // what crosses is a handle rather than a copy of the geometry.
-        let field = match GraphField::compile_graph(
-            &self.doc,
-            &input.graph,
-            (input.tolerance.min_cell_mm * 0.5).max(1e-4),
-        ) {
+        let limit = self.run_limit(id);
+        let known = self.estimate_for(id, input.key);
+        if let (Some(limit), Some(estimate)) = (limit, known)
+            && estimate.bytes as u64 > limit
+        {
+            self.refuse(id, &input, estimate, limit);
+            return;
+        }
+        let field = match self.prepared_field(id, &input) {
             Ok(field) => field,
-            Err(e) => {
-                let why = self.explain_compile(&e);
+            Err(why) => {
                 self.outputs.tessellated.insert(
                     id,
                     Outcome {
@@ -483,13 +529,17 @@ impl App {
                         tolerance: input.tolerance,
                         took: 0.0,
                         mesh: Err(why),
+                        refused: false,
                     },
                 );
                 return;
             }
         };
         self.note_stage("compiling a Tessellate block's body", started);
-        let cancel = Cancel::new();
+        let cancel = match limit {
+            Some(limit) => Cancel::with_memory_limit(usize::try_from(limit).unwrap_or(usize::MAX)),
+            None => Cancel::new(),
+        };
         let progress = Progress::new();
         let (tx, rx) = std::sync::mpsc::channel();
         let (run_cancel, run_progress) = (cancel.clone(), progress.clone());
@@ -497,12 +547,13 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name(format!("tessellate {}", t.title()))
             .spawn(move || {
-                let out = fieldform_field::tessellate(
-                    &field,
+                let out = fieldform_field::tessellate_within(
+                    &*field,
                     bounds,
                     &tolerance,
                     t.improve,
                     t.reduce,
+                    known,
                     &run_cancel,
                     &run_progress,
                 );
@@ -520,12 +571,84 @@ impl App {
                         started: Instant::now(),
                         key: input.key,
                         tolerance: input.tolerance,
+                        estimate: known,
                         result: rx,
                     },
                 );
             }
             Err(e) => self.warn(format!("could not start tessellating: {e}")),
         }
+    }
+
+    /// The compiled body for `input`: the one its estimate was made from when that is still
+    /// these inputs, or compiled now.
+    ///
+    /// Compiled here and *moved* to the worker. The compile reads the document, so it has to
+    /// happen on this thread; meshing does not touch the document at all, which is what makes
+    /// handing it over safe without a lock. A `GraphField` owns its leaves through `Arc`, so what
+    /// crosses is a handle rather than a copy of the geometry.
+    fn prepared_field(&mut self, id: TessellationId, input: &Input) -> Result<Arc<GraphField>, String> {
+        if let Some((key, field)) = self.outputs.prepared.remove(&id)
+            && key == input.key
+        {
+            return Ok(field);
+        }
+        GraphField::compile_graph(
+            &self.doc,
+            &input.graph,
+            (input.tolerance.min_cell_mm * 0.5).max(1e-4),
+        )
+        .map(Arc::new)
+        .map_err(|e| self.explain_compile(&e))
+    }
+
+    /// The bytes a run of `id` starting now may hold: what the machine can give, less what the
+    /// runs already going expect still to take. `None` where the machine does not say.
+    ///
+    /// **A run in flight reserves the rest of its estimate.** Two runs started a frame apart would
+    /// otherwise each be measured against the whole machine, and fit alone and not together; what
+    /// one has already taken is out of the free figure, so only what it has yet to take is held.
+    pub(crate) fn run_limit(&self, id: TessellationId) -> Option<u64> {
+        let free = match self.outputs.memory_override {
+            Some(bytes) => bytes,
+            None => crate::memory::usable(crate::memory::physical()?),
+        };
+        let reserved: u64 = self
+            .outputs
+            .tessellating
+            .iter()
+            .filter(|(other, _)| **other != id)
+            .filter_map(|(_, job)| {
+                let expected = job.estimate?.bytes as u64;
+                Some(expected.saturating_sub(job.cancel.used() as u64))
+            })
+            .sum();
+        Some(free.saturating_sub(reserved))
+    }
+
+    /// The estimate worked out for exactly these inputs, if one has been.
+    fn estimate_for(&self, id: TessellationId, key: u64) -> Option<Estimate> {
+        match self.outputs.estimates.get(&id) {
+            Some(Estimating::Done { key: k, estimate }) if *k == key => Some(*estimate),
+            _ => None,
+        }
+    }
+
+    /// Records that a run of `id` was refused for want of memory, and says so.
+    fn refuse(&mut self, id: TessellationId, input: &Input, estimate: Estimate, limit: u64) {
+        let why = format!("not run: {}", too_large(estimate.bytes as u64, limit));
+        self.warn(format!("{} {why}", self.tessellation_name(id)));
+        self.outputs.tessellated.insert(
+            id,
+            Outcome {
+                key: input.key,
+                generation: 0,
+                tolerance: input.tolerance,
+                took: 0.0,
+                mesh: Err(why),
+                refused: true,
+            },
+        );
     }
 
     fn stop_tessellation(&mut self, id: TessellationId) {
@@ -539,29 +662,41 @@ impl App {
         let ids: Vec<TessellationId> = self.outputs.tessellating.keys().copied().collect();
         for id in ids {
             let job = &self.outputs.tessellating[&id];
-            let finished = match job.result.try_recv() {
+            let received = match job.result.try_recv() {
                 Err(TryRecvError::Empty) => continue,
-                Ok(Some(done)) => Some(Ok(done)),
-                // Cancelled. Whatever cancelled it has already decided what happens next.
-                Ok(None) => None,
+                Ok(out) => Some(out),
                 // The worker panicked. The application survives it, which is most of what a
-                // separate process was wanted for; an out-of-memory would not be survived, and
-                // is the one failure this arrangement still shares with the export it replaced.
-                Err(TryRecvError::Disconnected) => Some(Err(
-                    "stopped unexpectedly — the document is unchanged".to_string(),
-                )),
+                // separate process was wanted for. Running out of memory is no longer this: the
+                // run is held to what the machine can give and stops itself (`Stopped`).
+                Err(TryRecvError::Disconnected) => None,
             };
             let job = self.outputs.tessellating.remove(&id).expect("listed above");
-            let Some(finished) = finished else { continue };
             let took = job.started.elapsed().as_secs_f64();
             let name = self.tessellation_name(id);
-            let mesh = finished.map(|done| {
-                self.say(format!(
-                    "Tessellated {name}: {} triangles in {took:.1}s",
-                    done.mesh.triangles.len()
-                ));
-                (Arc::new(done.mesh), done.meshed)
-            });
+            let (mesh, refused) = match received {
+                Some(Ok((done, estimate))) => {
+                    self.outputs.estimates.insert(id, Estimating::Done { key: job.key, estimate });
+                    self.say(format!(
+                        "Tessellated {name}: {} triangles in {took:.1}s",
+                        done.mesh.triangles.len()
+                    ));
+                    (Ok((Arc::new(done.mesh), done.meshed)), false)
+                }
+                // Cancelled. Whatever cancelled it has already decided what happens next.
+                Some(Err(Stopped::Cancelled)) => continue,
+                Some(Err(Stopped::WouldNotFit { estimate, limit })) => {
+                    self.outputs.estimates.insert(id, Estimating::Done { key: job.key, estimate });
+                    let why = format!("not run: {}", too_large(estimate.bytes as u64, limit as u64));
+                    self.warn(format!("{name} {why}"));
+                    (Err(why), true)
+                }
+                Some(Err(Stopped::OutOfMemory { held, limit })) => {
+                    let why = format!("stopped: {}", ran_out(held as u64, limit.map(|l| l as u64)));
+                    self.warn(format!("{name} {why}"));
+                    (Err(why), true)
+                }
+                None => (Err("stopped unexpectedly — the document is unchanged".to_string()), false),
+            };
             self.outputs.next_generation += 1;
             self.outputs.tessellated.insert(
                 id,
@@ -571,8 +706,165 @@ impl App {
                     tolerance: job.tolerance,
                     took,
                     mesh,
+                    refused,
                 },
             );
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Memory estimates
+    // ---------------------------------------------------------------------------------------
+
+    /// Starts an estimate for each block that has settled on inputs it has none for and will
+    /// not run by itself — so the block says what a run would hold before anyone presses Run.
+    ///
+    /// **Not for a block that is about to run**: an active block's run works the estimate out as
+    /// its first stage, and a second estimate beside it would compile the body twice for one
+    /// number.
+    fn start_due_estimates(&mut self) {
+        let due: Vec<(TessellationId, u64)> = self
+            .doc
+            .tessellations
+            .iter()
+            .filter(|t| !self.outputs.tessellating.contains_key(&t.id))
+            .filter_map(|t| {
+                let reads = self.outputs.reads.get(&t.id)?;
+                let key = *reads.key.as_ref().ok()?;
+                let settled = reads.changed.elapsed() >= SETTLE;
+                let has = self.outputs.estimates.get(&t.id).is_some_and(|e| e.key() == key);
+                (settled && !has).then_some((t.id, key))
+            })
+            .collect();
+        for (id, _) in due {
+            self.start_estimate(id);
+        }
+    }
+
+    /// Compiles a block's body and works out its estimate on a worker, keeping the compiled body
+    /// for the Run that may follow.
+    fn start_estimate(&mut self, id: TessellationId) {
+        let Some(t) = self.doc.tessellations.iter().find(|t| t.id == id).cloned() else { return };
+        let Ok(input) = self.tessellation_input(&t) else { return };
+        let started = std::time::Instant::now();
+        let field = match self.prepared_field(id, &input) {
+            Ok(field) => field,
+            Err(why) => {
+                self.outputs.estimates.insert(id, Estimating::Unavailable { key: input.key, why });
+                return;
+            }
+        };
+        self.note_stage("compiling a Tessellate block's body", started);
+        self.outputs.prepared.insert(id, (input.key, Arc::clone(&field)));
+        let cancel = Cancel::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let run_cancel = cancel.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("estimate {}", t.title()))
+            .spawn(move || {
+                let out = fieldform_field::estimate(
+                    &*field,
+                    input.bounds,
+                    &input.tolerance,
+                    t.improve,
+                    t.reduce,
+                    &run_cancel,
+                );
+                let _ = tx.send(out);
+            });
+        if spawned.is_ok() {
+            self.outputs
+                .estimates
+                .insert(id, Estimating::Running { key: input.key, cancel, result: rx });
+        }
+    }
+
+    fn poll_estimates(&mut self) {
+        let mut done = Vec::new();
+        for (id, state) in &self.outputs.estimates {
+            if let Estimating::Running { key, result, cancel } = state {
+                // A block whose inputs moved on wants an estimate of the new ones, not this.
+                let current = self.outputs.reads.get(id).and_then(|r| r.key.as_ref().ok().copied());
+                if current != Some(*key) {
+                    cancel.cancel();
+                }
+                match result.try_recv() {
+                    Ok(Some(estimate)) => done.push((*id, Some(Estimating::Done { key: *key, estimate }))),
+                    Ok(None) | Err(TryRecvError::Disconnected) => done.push((*id, None)),
+                    Err(TryRecvError::Empty) => {}
+                }
+            }
+        }
+        for (id, state) in done {
+            match state {
+                Some(state) => {
+                    self.outputs.estimates.insert(id, state);
+                }
+                None => {
+                    self.outputs.estimates.remove(&id);
+                }
+            }
+        }
+    }
+
+    /// Works out a block's estimate now, on this thread — for the console, whose line has to say
+    /// it before the next line runs. The compiled body is kept for the run.
+    fn estimate_now(&mut self, id: TessellationId) -> Result<Estimate, String> {
+        let t = self
+            .doc
+            .tessellations
+            .iter()
+            .find(|t| t.id == id)
+            .cloned()
+            .ok_or_else(|| "the block has gone".to_string())?;
+        let input = self.tessellation_input(&t)?;
+        if let Some(estimate) = self.estimate_for(id, input.key) {
+            return Ok(estimate);
+        }
+        let field = self.prepared_field(id, &input)?;
+        let estimate = fieldform_field::estimate(
+            &*field,
+            input.bounds,
+            &input.tolerance,
+            t.improve,
+            t.reduce,
+            &Cancel::new(),
+        )
+        .ok_or_else(|| "the estimate was stopped".to_string())?;
+        self.outputs.prepared.insert(id, (input.key, field));
+        self.outputs.estimates.insert(id, Estimating::Done { key: input.key, estimate });
+        Ok(estimate)
+    }
+
+    /// What a block's run would hold, against what the machine can give it — the line under its
+    /// detail, and the clause the console adds to its reply. `true` beside it when it is too much.
+    fn memory_reading(&self, id: TessellationId) -> (String, bool) {
+        let key = self.outputs.reads.get(&id).and_then(|r| r.key.as_ref().ok().copied());
+        let Some(key) = key else {
+            return ("worked out once there is something to mesh".to_string(), false);
+        };
+        match self.outputs.estimates.get(&id) {
+            Some(Estimating::Done { key: k, estimate }) if *k == key => {
+                let bytes = estimate.bytes as u64;
+                match self.run_limit(id) {
+                    Some(limit) if bytes > limit => (too_large(bytes, limit), true),
+                    Some(limit) => (
+                        format!(
+                            "about {} of the {} this machine can give it",
+                            crate::memory::describe(bytes),
+                            crate::memory::describe(limit)
+                        ),
+                        false,
+                    ),
+                    None => (format!("about {}", crate::memory::describe(bytes)), false),
+                }
+            }
+            Some(Estimating::Running { key: k, .. }) if *k == key => ("estimating\u{2026}".to_string(), false),
+            Some(Estimating::Unavailable { key: k, why }) if *k == key => (format!("not estimated: {why}"), false),
+            _ if self.outputs.tessellating.get(&id).is_some_and(|j| j.key == key) => {
+                ("estimating\u{2026}".to_string(), false)
+            }
+            _ => ("worked out once the edit settles".to_string(), false),
         }
     }
 
@@ -746,6 +1038,14 @@ impl App {
             keep
         });
         self.outputs.tessellated.retain(|id, _| tess.contains(id));
+        self.outputs.estimates.retain(|id, state| {
+            let keep = tess.contains(id);
+            if let (false, Estimating::Running { cancel, .. }) = (keep, &*state) {
+                cancel.cancel();
+            }
+            keep
+        });
+        self.outputs.prepared.retain(|id, _| tess.contains(id));
         self.outputs.reads.retain(|id, _| tess.contains(id));
         self.outputs.stopped_at.retain(|id, _| tess.contains(id));
         self.outputs.written.retain(|id, _| exports.contains(id));
@@ -790,6 +1090,9 @@ impl App {
         let path = match args.get("file").and_then(|v| v.as_str()) {
             Some(file) => std::path::PathBuf::from(file),
             None => {
+                if !self.may_open_a_dialog("export", "export file=<path>") {
+                    return;
+                }
                 let name = self
                     .file
                     .as_ref()
@@ -848,6 +1151,9 @@ impl App {
         // One entry on the history for the pair: undoing an export undoes the blocks it made.
         self.set_outputs(tessellations, exports, None);
         self.select_block(BlockRef::Export(export));
+        // Said before the blocks run, like the Tessellate block's own line: what writing this
+        // file will cost is decided by the mesh it waits for.
+        let clause = self.memory_clause(source);
         match existing {
             Some(id) => {
                 let detail = self
@@ -868,6 +1174,10 @@ impl App {
                  geometry changes while they are active",
                 file_name(&path)
             )),
+        }
+        match clause {
+            Ok(clause) => self.say(format!("{}: {clause}", self.tessellation_name(source))),
+            Err(why) => self.warn(format!("{} not run: {why}", self.tessellation_name(source))),
         }
     }
 
@@ -914,7 +1224,25 @@ impl App {
             Some(b) => self.body_label(b),
             None => "the whole part".to_string(),
         };
-        self.say(format!("Tessellating {what} at {}", detail.label()));
+        match self.memory_clause(id) {
+            Ok(clause) => self.say(format!("Tessellating {what} at {}: {clause}", detail.label())),
+            Err(why) => {
+                self.warn(format!("Tessellating {what} at {}: not run: {why}", detail.label()))
+            }
+        }
+    }
+
+    /// What the console says about a block's memory, worked out now so the line that made the
+    /// block can say it: `Err` with the reason when a run would be refused.
+    fn memory_clause(&mut self, id: TessellationId) -> Result<String, String> {
+        self.refresh_reads();
+        if let Err(why) = self.estimate_now(id) {
+            return Ok(format!("its memory is not estimated, since {why}"));
+        }
+        match self.memory_reading(id) {
+            (why, true) => Err(why),
+            (reading, false) => Ok(format!("memory {reading}")),
+        }
     }
 
     /// The `import` console command: `import` alone opens the dialog, as File → Import does;
@@ -1323,6 +1651,8 @@ impl App {
         }
         let current = self.tessellation_is_current(t.id);
         match self.outputs.tessellated.get(&t.id) {
+            // Already led by what happened — "not run: …", "stopped: …" — since nothing failed.
+            Some(Outcome { mesh: Err(why), refused: true, .. }) if current => why.clone(),
             Some(Outcome { mesh: Err(why), .. }) if current => format!("failed: {why}"),
             // With the tolerance it was made at, because "how long did that take, and at what
             // setting" is the pair a person needs to choose the next one.
@@ -1489,6 +1819,20 @@ impl App {
                     })
                     .unwrap_or(100.0);
                 mesh_detail_controls(ui, &mut t.detail, longest);
+                // **Said where the detail is chosen**, since the detail is what decides it: a
+                // refusal read anywhere else is a refusal of something the person cannot see.
+                let (reading, too_much) = self.memory_reading(id);
+                ui.horizontal(|ui| {
+                    ui.label("Memory:");
+                    let text = egui::RichText::new(&reading).small();
+                    let text = if too_much { text.color(ui.visuals().warn_fg_color) } else { text.weak() };
+                    ui.label(text).on_hover_text(
+                        "What meshing this body at this detail is expected to hold at its peak, \
+                         worked out before it runs and erring high. A run that would need more \
+                         than this machine has free is refused rather than started, and a run that \
+                         outgrows its estimate stops itself rather than the application.",
+                    );
+                });
 
                 ui.checkbox(&mut t.improve, "Improve triangle shape").on_hover_text(
                     "Slides vertices along the surface until the triangles are more even, leaving \
@@ -1641,6 +1985,32 @@ impl App {
             .map(|e| e.id)
             .collect();
         (tess, exports)
+    }
+}
+
+/// Why a run was refused: what it would hold, and what the machine can give it.
+fn too_large(bytes: u64, limit: u64) -> String {
+    format!(
+        "it would hold about {}, more than the {} this machine can give it \u{2014} choose a coarser \
+         detail",
+        crate::memory::describe(bytes),
+        crate::memory::describe(limit)
+    )
+}
+
+/// Why a run stopped part way: it outgrew what it was given, which the estimate read short of.
+fn ran_out(held: u64, limit: Option<u64>) -> String {
+    match limit {
+        Some(limit) => format!(
+            "it ran out of memory: it reached {}, past the {} this machine could give it and past \
+             its estimate \u{2014} choose a coarser detail",
+            crate::memory::describe(held),
+            crate::memory::describe(limit)
+        ),
+        None => format!(
+            "the allocator refused it at {} \u{2014} choose a coarser detail",
+            crate::memory::describe(held)
+        ),
     }
 }
 
@@ -1813,6 +2183,68 @@ mod tests {
         assert!(starts_by_itself(true, false, Some((Some(8), STILL)), None, Some(7)));
     }
 
+    /// **A run the machine cannot hold is refused by name, on the block and in the console, and
+    /// never starts** — with the same body run beside it on a machine that can, so the refusal is
+    /// shown to come from the limit and not from the body.
+    #[test]
+    fn a_tessellation_past_what_the_machine_can_give_is_refused_by_name_and_never_starts() {
+        let Some(mut app) = crate::app_tests::headless_app() else { return };
+        app.run_command("sphere radius=20");
+        crate::app_tests::frame(&mut app, Vec::new());
+
+        // A machine with a megabyte to give: the estimate's own floor is more than that.
+        app.outputs.memory_override = Some(1 << 20);
+        let said = app.console_log.len();
+        app.run_command("tess detail=coarse");
+        let id = app.doc.tessellations.last().expect("the verb made a block").id;
+        let refusal = app.console_log[said..]
+            .iter()
+            .find(|l| !l.ok)
+            .map(|l| l.text.clone())
+            .expect("the verb said it would be refused");
+        assert!(
+            refusal.contains("not run") && refusal.contains("this machine can give it"),
+            "{refusal}"
+        );
+        app.start_tessellation(id);
+        assert!(app.outputs.tessellating.is_empty(), "a refused run was started");
+        let t = app.doc.tessellations.last().cloned().expect("still there");
+        let status = app.tessellation_status(&t);
+        assert!(status.starts_with("not run:"), "{status}");
+        let (reading, too_much) = app.memory_reading(id);
+        assert!(too_much, "{reading}");
+
+        // The control: the same block on a machine with a gigabyte starts, and says what it
+        // expects to hold rather than refusing.
+        app.outputs.memory_override = Some(1 << 30);
+        let said = app.console_log.len();
+        app.start_tessellation(id);
+        assert!(app.outputs.tessellating.contains_key(&id), "a run that fits did not start");
+        assert!(app.console_log[said..].iter().all(|l| l.ok), "a run that fits was warned about");
+        let (reading, too_much) = app.memory_reading(id);
+        assert!(!too_much && reading.starts_with("about"), "{reading}");
+        app.stop_tessellation(id);
+    }
+
+    /// **The console says the estimate on the line that made the block**, so a script reads it
+    /// in the log without waiting for anything to run.
+    #[test]
+    fn the_tessellate_verb_says_what_its_run_will_hold() {
+        let Some(mut app) = crate::app_tests::headless_app() else { return };
+        app.run_command("sphere radius=20");
+        crate::app_tests::frame(&mut app, Vec::new());
+        app.outputs.memory_override = Some(1 << 30);
+        let said = app.console_log.len();
+        app.run_command("tess detail=normal");
+        let line = app.console_log[said..]
+            .iter()
+            .find(|l| l.text.starts_with("Tessellating"))
+            .map(|l| (l.ok, l.text.clone()))
+            .expect("the verb reported");
+        assert!(line.0, "a run that fits is said, not warned: {}", line.1);
+        assert!(line.1.contains("memory about") && line.1.contains("1.0 GB"), "{}", line.1);
+    }
+
     /// Inputs that cannot be meshed wait for the geometry to change, rather than trying and
     /// failing again every frame.
     #[test]
@@ -1868,7 +2300,7 @@ fn mesh_detail_controls(ui: &mut egui::Ui, detail: &mut MeshDetail, longest: f64
     ui.horizontal(|ui| {
         ui.label("Chord:");
         edited |= ui
-            .add(egui::DragValue::new(&mut tol.chord_mm).speed(0.005).range(0.001..=5.0).suffix(" mm"))
+            .add(egui::DragValue::new(&mut tol.chord_mm).speed(0.005).max_decimals(4).range(0.001..=5.0).suffix(" mm"))
             .on_hover_text(
                 "How far the mesh may sit from the true surface — the sag between a chord and \
                  the arc it cuts. Compare it against the layer height you will print at.",
@@ -1876,7 +2308,7 @@ fn mesh_detail_controls(ui: &mut egui::Ui, detail: &mut MeshDetail, longest: f64
             .changed();
         ui.label("Angle:");
         edited |= ui
-            .add(egui::DragValue::new(&mut tol.angle_deg).speed(0.5).range(1.0..=60.0).suffix("\u{00b0}"))
+            .add(egui::DragValue::new(&mut tol.angle_deg).speed(0.5).max_decimals(4).range(1.0..=60.0).suffix("\u{00b0}"))
             .on_hover_text(
                 "How far the surface may turn within one cell. This is the control that \
                  sharpens hard edges: a crease has no sag, so the chord cannot see one.",
@@ -1913,7 +2345,7 @@ fn mesh_detail_controls(ui: &mut egui::Ui, detail: &mut MeshDetail, longest: f64
             .changed();
         ui.label("Min:");
         edited |= ui
-            .add(egui::DragValue::new(&mut tol.min_cell_mm).speed(0.01).range(0.001..=10.0).suffix(" mm"))
+            .add(egui::DragValue::new(&mut tol.min_cell_mm).speed(0.01).max_decimals(4).range(0.001..=10.0).suffix(" mm"))
             .on_hover_text(
                 "The smallest cell the mesher may reach — the floor on the whole process, and \
                  what bounds its cost. Set it to the smallest feature that matters.",

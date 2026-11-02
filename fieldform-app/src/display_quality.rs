@@ -355,6 +355,59 @@ pub(crate) fn save_quality(quality: DisplayQuality) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// The settings key for Allow agent. Off unless somebody turned it on, and kept per person.
+const ALLOW_AGENT_KEY: &str = "allow_agent";
+
+/// Whether a settings file has Allow agent on. Anything unreadable is off: a setting that lets a
+/// program drive the application is never a reason to guess.
+pub(crate) fn saved_allow_agent(settings: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(settings)
+        .ok()
+        .and_then(|read| read.get(ALLOW_AGENT_KEY)?.as_bool())
+        .unwrap_or(false)
+}
+
+/// `settings` with Allow agent set and every other entry kept.
+pub(crate) fn with_saved_allow_agent(settings: Option<&str>, allow: bool) -> String {
+    let mut entries = match settings.and_then(|text| serde_json::from_str(text).ok()) {
+        Some(serde_json::Value::Object(entries)) => entries,
+        _ => serde_json::Map::new(),
+    };
+    entries.insert(ALLOW_AGENT_KEY.to_string(), allow.into());
+    serde_json::to_string_pretty(&serde_json::Value::Object(entries))
+        .expect("a map of strings to JSON values always serializes")
+}
+
+pub(crate) fn load_saved_allow_agent() -> bool {
+    settings_path().and_then(|p| std::fs::read_to_string(p).ok()).is_some_and(|s| saved_allow_agent(&s))
+}
+
+pub(crate) fn save_allow_agent(allow: bool) -> Result<(), String> {
+    let path = settings_path().ok_or("this platform names no per-person settings directory")?;
+    let before = std::fs::read_to_string(&path).ok();
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, with_saved_allow_agent(before.as_deref(), allow))
+        .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod allow_agent_tests {
+    use super::*;
+
+    #[test]
+    fn allow_agent_is_off_unless_the_file_says_on_and_keeps_its_neighbours() {
+        assert!(!saved_allow_agent(""));
+        assert!(!saved_allow_agent("not json"));
+        assert!(!saved_allow_agent(r#"{"allow_agent": "yes"}"#));
+        assert!(saved_allow_agent(r#"{"allow_agent": true}"#));
+        let written = with_saved_allow_agent(Some(&with_saved_quality(None, DisplayQuality::Fast)), true);
+        assert!(saved_allow_agent(&written));
+        assert_eq!(saved_quality(&written), Some(DisplayQuality::Fast), "the rung survives: {written}");
+    }
+}
+
 /// How the viewport projects.
 ///
 /// Presentation state, like the view mode beside it: it changes what you see, never what the

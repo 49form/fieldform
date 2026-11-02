@@ -92,12 +92,21 @@ pub(crate) fn simplify_cancellable(
     if mesh.triangles.is_empty() {
         return Some(report);
     }
+    let _held = cancel.hold(
+        mesh.triangles.len() * SIMPLIFY_BYTES_PER_TRIANGLE
+            + mesh.positions.len() * SIMPLIFY_BYTES_PER_VERTEX,
+    )?;
 
     // Where each vertex has ended up. A collapsed vertex points at the one it became, and
     // `resolve` follows the chain — so a vertex collapsed twice is not two vertices.
     let mut moved_to: Vec<u32> = (0..mesh.positions.len() as u32).collect();
-    let mut live: Vec<[u32; 3]> = mesh.triangles.clone();
-    let mut gone = vec![false; live.len()];
+    let mut live: Vec<[u32; 3]> = cancel.filled(0, [0; 3])?;
+    if live.try_reserve_exact(mesh.triangles.len()).is_err() {
+        cancel.out_of_memory();
+        return None;
+    }
+    live.extend_from_slice(&mesh.triangles);
+    let mut gone = cancel.filled(live.len(), false)?;
 
     for _ in 0..24 {
         let collapsed = sweep(
@@ -370,12 +379,15 @@ pub(crate) fn improve_shape_cancellable(
     cancel: &crate::Cancel,
 ) -> Option<usize> {
     let mut total = 0;
+    // The pass's edge table, rebuilt each pass and given back between them.
+    let per_pass = mesh.triangles.len() * FLIP_BYTES_PER_TRIANGLE;
     // Converges on its own — on the measured document the passes made 11774, 2449, 450, 71, 0.
     // The cap is here so a pathological mesh cannot spin, not because it is normally reached.
     for _ in 0..8 {
         if cancel.is_cancelled() {
             return None;
         }
+        let _held = cancel.hold(per_pass)?;
         let made = flip_pass(mesh, field, tolerance_mm);
         if made == 0 {
             break;
@@ -422,6 +434,16 @@ fn faces_outward(field: &(dyn ScalarField + Sync), a: Point3<f64>, b: Point3<f64
     );
     normal.dot(&grad) > 0.0
 }
+
+/// What each pass after the mesher holds while it runs, charged to the run's token so a run past
+/// its memory stops at the start of a pass rather than part way into an allocation it cannot
+/// survive. Worked out from the structures each builds — a hash table of edges, a vector of
+/// neighbours per vertex — with the table's own growth and the allocator's bookkeeping, and
+/// rounded up: they are charges against a limit, not the estimate, which is measured.
+const FLIP_BYTES_PER_TRIANGLE: usize = 230;
+const RELAX_BYTES_PER_VERTEX: usize = 200;
+const SIMPLIFY_BYTES_PER_TRIANGLE: usize = 40;
+const SIMPLIFY_BYTES_PER_VERTEX: usize = 160;
 
 /// Above this smallest angle a pair is left alone. Thirty degrees is half of equilateral.
 const WORTH_FLIPPING: f64 = 30.0 * std::f64::consts::PI / 180.0;
@@ -701,8 +723,9 @@ pub(crate) fn relax_cancellable(
     tolerance_mm: f64,
     cancel: &crate::Cancel,
 ) -> Option<usize> {
-    let mut neighbours: Vec<Vec<u32>> = vec![Vec::new(); mesh.positions.len()];
-    let mut touching: Vec<Vec<u32>> = vec![Vec::new(); mesh.positions.len()];
+    let _held = cancel.hold(mesh.positions.len() * RELAX_BYTES_PER_VERTEX)?;
+    let mut neighbours: Vec<Vec<u32>> = cancel.filled(mesh.positions.len(), Vec::new())?;
+    let mut touching: Vec<Vec<u32>> = cancel.filled(mesh.positions.len(), Vec::new())?;
     for (t, tri) in mesh.triangles.iter().enumerate() {
         for k in 0..3 {
             let v = tri[k] as usize;

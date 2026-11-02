@@ -420,6 +420,7 @@ pub fn smallest_feature(doc: &fieldform_scene::Document, graph: &Graph, target: 
                 LatticePhase::Solid { .. } => {}
             },
             Node::Shell { thickness, .. } => note(number(thickness)),
+            Node::Infill { wall, .. } => note(number(wall)),
             Node::Blend { fillet, .. } => note(number(&fillet.radius)),
             Node::Pattern { fillet, join: true, .. } => note(number(&fillet.radius)),
             other => {

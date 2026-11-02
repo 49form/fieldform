@@ -356,6 +356,11 @@ pub(crate) const FORMAT_MAJOR: u32 = 3;
 /// countersunk or tapped, blind or through, flat or drill-pointed. A 3.24 build keeps it rather
 /// than leaving the body it was cut from whole.
 ///
+/// `history/graph-layout.json` (`notebook-graph-view-spec.md`, 2026-10-30) holds which view the blocks
+/// panel shows and where nodes were dragged in the graph. Written only once somebody has used the
+/// graph, and read as absent otherwise, so it did not move the minor: an older build carries the
+/// entry through untouched, and a node's position changes no shape.
+///
 /// 3.26 lets an axis on a surface (`history/surface-axes.json`) name a parameter for its `u`, `v`,
 /// `length` or a seed's number, written `{"named": …}` where a literal is still the bare number
 /// it always was. A file that names none is byte-for-byte a 3.25 one; one that does is refused by
@@ -371,7 +376,16 @@ pub(crate) const FORMAT_MAJOR: u32 = 3;
 /// blocks stand on a body's surface, and how each one's position is derived. Additive as 3.9's
 /// surface axes were: the block is an ordinary point with its position stored, so a 3.27 build
 /// shows it where it last stood and carries the entry through. Left out when there are none.
-pub(crate) const FORMAT_MINOR: u32 = 28;
+///
+/// 3.29 adds `history/sketches.json` (`Document::sketches`, 2026-10-31): which curves lie on a
+/// plane block and follow it, with their points across that plane. Additive in the same way: the
+/// curve stores its points as any curve does, so a 3.28 build draws the sketch where it last lay
+/// and carries the entry through. Left out when there are none.
+///
+/// **3.30 adds the `infill` node** (item 129): a body with a skin of `wall` and its inside filled
+/// from a second slot, `fill`, with `join` where it is rounded. A 3.29 build keeps the node rather
+/// than drawing the body solid.
+pub(crate) const FORMAT_MINOR: u32 = 30;
 
 #[derive(thiserror::Error, Debug)]
 pub enum FormatError {

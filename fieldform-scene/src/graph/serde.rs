@@ -934,6 +934,14 @@ impl Serialize for Node {
                 .into_iter()
                 .chain(slot_field("input", input)?),
             ),
+            // A hard join is not written, so a block nobody rounded reads as what it is.
+            Node::Infill { input, wall, fill, join } => json_fields(
+                [(KIND, json(&"infill")?), ("wall", json(wall)?)]
+                    .into_iter()
+                    .chain((*join != Fillet::hard()).then(|| json(join).map(|v| ("join", v))).transpose()?)
+                    .chain(slot_field("input", input)?)
+                    .chain(slot_field("fill", fill)?),
+            ),
             // Two arms until 112, one for a wired ramp and one for an unwired one. Every slot
             // can be empty now and `slot_field` omits the key for all of them, so the special
             // case is the general rule and the duplicate arm is gone.
@@ -1222,6 +1230,7 @@ impl<'de> Deserialize<'de> for Node {
             "attract" => &[KIND, "input", "curve", "point", "strength", "falloff"],
             "ramp" => &[KIND, "input", "in_min", "in_max", "out_min", "out_max", "shape"],
             "shell" => &[KIND, "input", "thickness"],
+            "infill" => &[KIND, "input", "wall", "fill", "join"],
             "pattern" => &[
                 KIND,
                 "input",
@@ -1843,6 +1852,15 @@ impl<'de> Deserialize<'de> for Node {
             "shell" => Node::Shell {
                 input: slot("input")?,
                 thickness: read(kind, "thickness", field("thickness")?)?,
+            },
+            "infill" => Node::Infill {
+                input: slot("input")?,
+                wall: read(kind, "wall", field("wall")?)?,
+                fill: slot("fill")?,
+                join: match object.get("join") {
+                    Some(join) => read(kind, "join", join)?,
+                    None => Fillet::hard(),
+                },
             },
             // Until 112 the one node whose `input` could be absent, read by hand here. Every slot
             // may be empty now and `slot` reads absence as empty for all of them, so the bespoke

@@ -79,6 +79,9 @@ pub(crate) const NODE_META_PATH: &str = "history/node-meta.json";
 /// entry of its own is carried through untouched instead, which
 /// `unrecognised_entries_anywhere_are_carried_untouched` proves.
 pub(crate) const ARRANGEMENT_PATH: &str = "history/arrangement.json";
+/// The graph view's layout (`notebook-graph-view-spec.md` ruling 2): an entry of its own, absent
+/// until somebody uses the graph, so an older build carries it through untouched.
+pub(crate) const GRAPH_LAYOUT_PATH: &str = "history/graph-layout.json";
 
 /// The same as [`CREATED_PATH`], for curves.
 pub(crate) const CURVES_CREATED_PATH: &str = "history/curves-created.json";
@@ -126,6 +129,9 @@ pub(crate) const SURFACE_AXES_PATH: &str = "history/surface-axes.json";
 /// position stored, so an older build opens the file, shows the point where it last stood, and
 /// carries the entry through byte-intact. Left out when there are none.
 pub(crate) const SURFACE_POINTS_PATH: &str = "history/surface-points.json";
+/// Sketches (`Document::sketches`), by the curve each one is: which plane block it lies on and its
+/// points across that plane. Absent before 3.29, and left out when there are none.
+pub(crate) const SKETCHES_PATH: &str = "history/sketches.json";
 /// Relations between curves (`profile-group-spec.md` §5.5), a side entry and a minor bump.
 /// A relation does not change the shape: the points it drives are already in the curves, so
 /// an older build that never reads this draws exactly the right geometry and carries the
@@ -352,6 +358,11 @@ pub fn update_archive(archive: &mut Archive, document: &Document) -> Result<(), 
             document.arrangement.iter().map(|(id, at)| (*id, *at)).collect();
         archive.put_json(ARRANGEMENT_PATH, &arrangement)?;
     }
+    if document.graph_layout.is_default() {
+        archive.remove(GRAPH_LAYOUT_PATH);
+    } else {
+        archive.put_json(GRAPH_LAYOUT_PATH, &document.graph_layout)?;
+    }
     // Only the bodies that have something to remember, so a document nobody has renamed, hidden
     // or shown anything in writes no entry at all.
     let meta: std::collections::BTreeMap<fieldform_scene::NodeId, fieldform_scene::NodeMeta> =
@@ -451,6 +462,18 @@ pub fn update_archive(archive: &mut Archive, document: &Document) -> Result<(), 
         archive.remove(SURFACE_POINTS_PATH);
     } else {
         archive.put_json(SURFACE_POINTS_PATH, &surface_points)?;
+    }
+    // And only the sketches whose curve is still here, by the same rule.
+    let sketches: std::collections::BTreeMap<_, _> = document
+        .sketches
+        .iter()
+        .filter(|(curve, _)| document.curves.contains_key(*curve))
+        .map(|(curve, sketch)| (*curve, sketch.clone()))
+        .collect();
+    if sketches.is_empty() {
+        archive.remove(SKETCHES_PATH);
+    } else {
+        archive.put_json(SKETCHES_PATH, &sketches)?;
     }
     // **A reading of the ownership above, for an older build** (spec §9.4): the curves that are
     // variables and that build's rule would not make one without this entry. This build reads the
@@ -615,6 +638,7 @@ pub fn from_archive(archive: &Archive) -> Result<Document, FormatError> {
         .unwrap_or_default()
         .into_iter()
         .collect();
+    let graph_layout = archive.get_json::<fieldform_scene::GraphLayout>(GRAPH_LAYOUT_PATH)?.unwrap_or_default();
     let node_meta = archive
         .get_json::<std::collections::BTreeMap<fieldform_scene::NodeId, fieldform_scene::NodeMeta>>(
             NODE_META_PATH,
@@ -659,6 +683,10 @@ pub fn from_archive(archive: &Archive) -> Result<Document, FormatError> {
             SURFACE_POINTS_PATH,
         )?
         .unwrap_or_default();
+    // Absent in every document written before 3.29, which reads as no sketch on a plane.
+    let sketches: std::collections::BTreeMap<CurveId, fieldform_scene::Sketch> = archive
+        .get_json::<std::collections::BTreeMap<CurveId, fieldform_scene::Sketch>>(SKETCHES_PATH)?
+        .unwrap_or_default();
     let ungrouped_curves: std::collections::BTreeSet<CurveId> = archive
         .get_json::<Vec<CurveId>>(UNGROUPED_CURVES_PATH)?
         .unwrap_or_default()
@@ -692,6 +720,7 @@ pub fn from_archive(archive: &Archive) -> Result<Document, FormatError> {
         unit: manifest.unit,
         created,
         arrangement,
+        graph_layout,
         node_meta,
         curves_created,
         profile_names,
@@ -699,6 +728,7 @@ pub fn from_archive(archive: &Archive) -> Result<Document, FormatError> {
         ungrouped_curves,
         surface_axes,
         surface_points,
+        sketches,
         relations,
         cages,
         quad_meshes,
@@ -1067,6 +1097,31 @@ mod tests {
         );
     }
 
+    /// **A sketch comes back from a save, and a document with none writes no entry**; one whose
+    /// curve has gone stays in the document for undo and is dropped on the way out.
+    #[test]
+    fn a_sketch_survives_a_save_and_a_document_with_none_writes_no_entry() {
+        use fieldform_scene::{Laid, Node, ParamRef, Sketch};
+        let mut doc = populated();
+        assert!(to_archive(&doc).unwrap().get_json::<serde_json::Value>(SKETCHES_PATH).unwrap().is_none());
+        let part = *doc.parts.keys().next().expect("the fixture holds a part");
+        let plane = doc.parts.get_mut(&part).unwrap().graph.add(Node::Plane {
+            origin: fieldform_scene::Place::At([ParamRef::Literal(0.0); 3]),
+            flipped: false,
+            turn: fieldform_scene::no_turn(),
+        });
+        let curve = *doc.curves.keys().next().expect("the fixture holds a curve");
+        let frame = Laid::new(nalgebra::Point3::origin(), nalgebra::Vector3::x(), nalgebra::Vector3::y());
+        let sketch = Sketch::of(plane, &frame, doc.curves[&curve].control_points());
+        doc.sketches.insert(curve, sketch.clone());
+        assert_eq!(round_trip(&doc).sketches.get(&curve), Some(&sketch), "the record came back whole");
+
+        let mut orphaned = round_trip(&doc);
+        orphaned.curves.remove(&curve);
+        assert!(!orphaned.sketches.is_empty(), "the record outlives the curve in the document");
+        assert!(to_archive(&orphaned).unwrap().get_json::<serde_json::Value>(SKETCHES_PATH).unwrap().is_none(), "and not in a file");
+    }
+
     /// **A surface axis survives a save, and a document with none writes no entry** — the same
     /// bargain as a declared curve, which is what makes 3.9 additive: a document nobody has stood an
     /// axis on a surface in is byte for byte what 3.7 wrote.
@@ -1257,6 +1312,27 @@ mod tests {
 
         let back = round_trip(&doc);
         assert_eq!(back.created, doc.created);
+    }
+
+    /// **The graph view's layout is saved with the document and is shared** (`notebook-graph-view-
+    /// spec.md` ruling 2): which view the panel shows and where nodes were dragged. It is an entry
+    /// of its own, absent for a document that never opened the graph, so an older build ignores it.
+    #[test]
+    fn the_graph_layout_survives_a_save_and_a_document_without_one_writes_no_entry() {
+        let mut doc = populated();
+        let blank = round_trip(&doc);
+        assert!(blank.graph_layout.is_default());
+        let id = doc.parts.values().flat_map(|p| p.graph.nodes().map(|(id, _)| id)).next().expect("a node");
+        doc.graph_layout.shown = true;
+        doc.graph_layout.pins.insert(id, [12.5, -40.0]);
+
+        let back = round_trip(&doc);
+        assert_eq!(back.graph_layout, doc.graph_layout);
+
+        let mut plain = populated();
+        plain.graph_layout = Default::default();
+        let archive = to_archive(&plain).unwrap();
+        assert!(archive.get(GRAPH_LAYOUT_PATH).is_none(), "nothing written when nothing was done");
     }
 
     /// An arrangement survives a save for the same reason a creation time does: where a person

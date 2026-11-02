@@ -28,6 +28,8 @@ pub enum Subject {
     Profile,
     Plane,
     Cage,
+    /// The second ring a curve's Degree… opens: the degrees to pick from.
+    Degree,
     /// Vertices, edges or faces of the cage picked: the cage tools' table (R10).
     CageElements,
 }
@@ -66,6 +68,8 @@ pub fn slots(subject: Subject) -> [Option<&'static str>; 8] {
             Some("modify.split"),
             Some("edit.duplicate"),
         ],
+        // Degree… at North-West in place of Frame, which is under View and More… (the owner,
+        // 2026-10-31, sketching): changing a curve's degree is the edit a sketch asks for most.
         Subject::Curve => [
             Some("create.extrude"),
             Some("create.revolve"),
@@ -74,7 +78,7 @@ pub fn slots(subject: Subject) -> [Option<&'static str>; 8] {
             None,
             Some("edit.duplicate"),
             Some("edit.delete_body"),
-            Some("view.frame_selection"),
+            Some("curve.degree_menu"),
         ],
         Subject::Profile => [
             Some("create.extrude"),
@@ -84,17 +88,32 @@ pub fn slots(subject: Subject) -> [Option<&'static str>; 8] {
             None,
             Some("edit.duplicate"),
             Some("edit.delete_body"),
-            Some("view.frame_selection"),
+            Some("curve.degree_menu"),
         ],
+        // The ring Degree… opens: the degrees worth picking, clockwise from North, and the two
+        // slots after More… left empty rather than filled with degrees nobody asks for.
+        Subject::Degree => [
+            Some("curve.degree.1"),
+            Some("curve.degree.2"),
+            Some("curve.degree.3"),
+            Some("curve.degree.5"),
+            None,
+            Some("curve.degree.7"),
+            None,
+            None,
+        ],
+        // Sketch on at North, the rest turned one slot clockwise, and Frame under More… (the
+        // owner, 2026-10-31): once a plane can stand on a surface, drawing on it is what a plane
+        // is most often for.
         Subject::Plane => [
+            Some("draw.sketch"),
             Some("modify.split"),
             Some("create.boolean"),
             Some("view.section"),
-            Some("edit.duplicate"),
             None,
+            Some("edit.duplicate"),
             Some("view.toggle_visibility"),
             Some("edit.delete_body"),
-            Some("view.frame_selection"),
         ],
         Subject::Cage => [
             Some("cage.refine"),
@@ -170,7 +189,15 @@ mod tests {
     /// about them is computed (§7.3).
     #[test]
     fn the_slot_tables_are_the_ones_approved() {
-        for subject in [Subject::Empty, Subject::Body, Subject::Curve, Subject::Profile, Subject::Plane, Subject::Cage] {
+        for subject in [
+            Subject::Empty,
+            Subject::Body,
+            Subject::Curve,
+            Subject::Profile,
+            Subject::Plane,
+            Subject::Cage,
+            Subject::Degree,
+        ] {
             let table = slots(subject);
             assert_eq!(table[MORE], None, "{subject:?}: South is More…");
             for id in table.into_iter().flatten() {
@@ -193,5 +220,10 @@ mod tests {
             ]
         );
         assert_eq!(slots(Subject::Profile)[0], Some("create.extrude"), "North on a profile extrudes");
+        assert_eq!(slots(Subject::Plane)[0], Some("draw.sketch"), "North on a plane sketches on it");
+        assert_eq!(slots(Subject::Curve)[7], Some("curve.degree_menu"), "North-West on a curve opens the degrees");
+        assert_eq!(slots(Subject::Profile)[7], Some("curve.degree_menu"));
+        assert_eq!(slots(Subject::Degree)[0], Some("curve.degree.1"), "and the ring starts at one");
+        assert!(!slots(Subject::Plane).contains(&Some("view.frame_selection")), "Frame moved under More…");
     }
 }

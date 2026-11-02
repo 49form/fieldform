@@ -1,6 +1,6 @@
 [package]
 name = "fieldform-app"
-version = "0.2.0"
+version = "0.3.0"
 edition.workspace = true
 license = "GPL-3.0-only"
 authors = ["49form"]
@@ -29,6 +29,9 @@ wgpu.workspace = true
 # The `--report` a script run writes. Already linked through `fieldform-io`, so it costs the
 # binary nothing it was not already carrying.
 serde_json.workspace = true
+# The agent host (`src/agent/`): an MCP server on a local socket, run on a thread of its own.
+rmcp.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 # To validate the preview's WGSL in a test: wgpu's answer to a shader it cannot compile is to

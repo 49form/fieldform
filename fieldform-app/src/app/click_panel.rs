@@ -117,14 +117,14 @@ pub(crate) fn window(
                                 state.store(ui.ctx(), fid);
                             } else if response.lost_focus() {
                                 let escape = ui.input(|i| i.key_pressed(egui::Key::Escape));
-                                if !escape {
+                                if !escape && *buffer != row.shown() {
                                     confirm = Some((row.key, buffer.clone()));
                                 }
                                 panel.typing = None;
                             }
                         }
                         _ => {
-                            let shown = egui::RichText::new(&row.text).monospace();
+                            let shown = egui::RichText::new(row.shown()).monospace();
                             let response = ui.add_sized(
                                 egui::vec2(140.0, ui.spacing().interact_size.y),
                                 egui::Button::selectable(focused, shown).sense(egui::Sense::click_and_drag()),
@@ -133,7 +133,7 @@ pub(crate) fn window(
                             if !off && response.clicked() {
                                 panel.focus = i;
                                 if words.is_empty() {
-                                    panel.typing = Some(row.text.clone());
+                                    panel.typing = Some(row.shown());
                                     panel.begun = true;
                                 } else {
                                     let at = words.iter().position(|w| *w == row.text).unwrap_or(0);

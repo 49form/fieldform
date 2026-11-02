@@ -66,6 +66,7 @@ pub fn verb_of(node: &Node) -> Option<(&'static str, &'static str)> {
         Node::Morph { .. } => ("morph", "modify.morph"),
         Node::Offset { .. } => ("offset", "modify.offset"),
         Node::Shell { .. } => ("shell", "modify.shell"),
+        Node::Infill { .. } => ("infill", "modify.infill"),
         Node::Twist { .. } => ("twist", "modify.twist"),
         Node::Mirror { .. } => ("mirror", "modify.mirror"),
         Node::Scale { .. } => ("scale", "modify.scale"),
@@ -141,6 +142,17 @@ pub fn node_with_keys(node: Node, args: &Args, cx: &Context) -> Result<Node, Str
         }
         Node::Offset { .. } => console_keys::offset_with_keys(targeted(node, word, args, lookup)?, args, lookup),
         Node::Shell { .. } => console_keys::shell_with_keys(targeted(node, word, args, lookup)?, args, lookup),
+        // The lattice's words make a new lattice on `infill`, and an existing block already has
+        // one, which is a block of its own to edit. Said, because reading the keys and doing
+        // nothing with them would look like an edit that took.
+        Node::Infill { .. } => {
+            if let Some(key) = console_keys::INFILL_LATTICE_KEYS.iter().find(|k| args.get(k).is_some()) {
+                return Err(format!(
+                    "`{key}=` belongs to the lattice, which is a block of its own — set it there"
+                ));
+            }
+            console_keys::infill_with_keys(targeted(node, word, args, lookup)?, args, lookup)
+        }
         Node::Twist { .. } => console_keys::twist_with_keys(targeted(node, word, args, lookup)?, args, lookup),
         Node::Mirror { .. } => console_keys::mirror_with_keys(targeted(node, word, args, lookup)?, args, lookup),
         Node::Scale { .. } => console_keys::scale_with_keys(targeted(node, word, args, lookup)?, args, lookup),
@@ -178,6 +190,7 @@ fn targeted(mut node: Node, word: &str, args: &Args, lookup: &dyn Fn(&str) -> Lo
         match &mut node {
             Node::Offset { input, .. }
             | Node::Shell { input, .. }
+            | Node::Infill { input, .. }
             | Node::Twist { input, .. }
             | Node::Mirror { input, .. }
             | Node::Scale { input, .. }

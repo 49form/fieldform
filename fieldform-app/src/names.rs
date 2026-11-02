@@ -62,6 +62,7 @@ pub fn operation_word(node: &Node) -> &'static str {
         Node::Mirror { .. } => "Mirror",
         Node::Scale { .. } => "Scale",
         Node::Shell { .. } => "Shell",
+        Node::Infill { .. } => "Infill",
         Node::Ramp { .. } => "Ramp",
         Node::Offset { .. } => "Offset",
         Node::Transform { .. } => "Placement",

@@ -371,6 +371,180 @@ fn by(id: &str) -> &'static commands::Command {
     commands::by_id(id).unwrap_or_else(|| panic!("{id} is in the registry"))
 }
 
+fn curve_points(app: &App, name: &str) -> Vec<nalgebra::Point3<f64>> {
+    let id = app.curve_named(name).unwrap_or_else(|| panic!("no curve is called {name}"));
+    app.doc.curve(id).expect("the curve").control_points().to_vec()
+}
+
+/// **A 2D sketch follows its plane, and a point taken off the plane makes it a 3D one.** A line
+/// drawn while sketching on a plane on a surface is laid in the plane's coordinates; move the body
+/// under the plane and the line goes with it. Edit a point across the plane and the sketch keeps
+/// its new shape through the next move; take one off the plane and it stops following, and says so.
+#[test]
+fn a_sketch_follows_its_plane_until_a_point_leaves_it() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cube size=40,20,10 'block'");
+    app.run_command("plane on=block at=0,0,5 'lid'");
+    frame(&mut app, Vec::new());
+    let lid = app.node_named("lid").expect("made");
+    select(&mut app, "lid");
+    app.run_command("sketch");
+    // Typed in world, flat on the lid: a sketch there. And typed across the plane with `on=`.
+    app.run_command("line p0=2,3,5 p1=12,3,5 'edge'");
+    app.run_command("line on=lid p0=0,0 p1=0,8 'rib'");
+    frame(&mut app, Vec::new());
+    let edge = app.curve_named("edge").expect("made");
+    let rib = app.curve_named("rib").expect("made");
+    assert!(app.doc.sketches.get(&edge).is_some_and(|s| s.live && s.plane == lid), "drawn while sketching, so a sketch");
+    assert!(app.doc.sketches.get(&rib).is_some_and(|s| s.live && s.plane == lid));
+    // To the lid's own precision: it stands on a point bisected to a thousandth of the block.
+    let near = |a: nalgebra::Point3<f64>, b: nalgebra::Point3<f64>| (a - b).norm() < 1e-3;
+    let before = curve_points(&app, "rib");
+    assert!(near(before[1], nalgebra::Point3::new(0.0, 8.0, 5.0)), "across the lid: {:?}", before);
+    app.run_command("sketch");
+
+    // The body moves, the lid with it, and the sketches with the lid.
+    app.run_command("set block.centre=30,0,0");
+    frame(&mut app, Vec::new());
+    let moved = curve_points(&app, "edge");
+    assert!(near(moved[0], nalgebra::Point3::new(32.0, 3.0, 5.0)), "{moved:?}");
+    assert!(near(curve_points(&app, "rib")[1], nalgebra::Point3::new(30.0, 8.0, 5.0)));
+
+    // Edited across the plane: the sketch keeps its new shape through the next move.
+    app.run_command("set edge.p1=40,3,5");
+    frame(&mut app, Vec::new());
+    assert!(app.doc.sketches[&edge].live, "still flat, still a sketch");
+    app.run_command("set block.centre=0,0,0");
+    frame(&mut app, Vec::new());
+    let back = curve_points(&app, "edge");
+    assert!(near(back[1], nalgebra::Point3::new(10.0, 3.0, 5.0)), "the edit came along: {back:?}");
+
+    // A point taken off the plane: a 3D sketch now, and the console says so.
+    let said = app.console_log.len();
+    app.run_command("set rib.p1=0,8,20");
+    frame(&mut app, Vec::new());
+    assert!(!app.doc.sketches[&rib].live, "no longer following");
+    assert!(app.console_log[said..].iter().any(|l| l.text.contains("3D sketch")), "and it says so");
+    app.run_command("set block.centre=30,0,0");
+    frame(&mut app, Vec::new());
+    assert!(near(curve_points(&app, "rib")[0], nalgebra::Point3::new(0.0, 0.0, 5.0)), "left behind");
+    assert!(near(curve_points(&app, "edge")[0], nalgebra::Point3::new(32.0, 3.0, 5.0)), "the 2D one still follows");
+
+    // Laid back onto the plane on purpose: flat on it, and following again.
+    app.lie_on_plane(rib, lid);
+    frame(&mut app, Vec::new());
+    assert!(app.doc.sketches[&rib].live);
+    // Projected straight onto the lid's plane, where it stands: x stays, z comes down to the lid.
+    let laid = curve_points(&app, "rib");
+    assert!(near(laid[0], nalgebra::Point3::new(0.0, 0.0, 5.0)) && near(laid[1], nalgebra::Point3::new(0.0, 8.0, 5.0)), "{laid:?}");
+    app.run_command("set block.centre=40,0,0");
+    frame(&mut app, Vec::new());
+    assert!(near(curve_points(&app, "rib")[1], nalgebra::Point3::new(10.0, 8.0, 5.0)), "and it follows again");
+    app.run_command("undo");
+    frame(&mut app, Vec::new());
+    app.run_command("undo");
+    frame(&mut app, Vec::new());
+    assert!(!app.doc.sketches[&rib].live && (curve_points(&app, "rib")[1].z - 20.0).abs() < 1e-6, "one step back");
+}
+
+/// **While sketching, the handles are the plane's, and a curve's degree is one line away.** On a
+/// plane standing on a side wall the manipulator's Z is the wall's normal and only the in-plane
+/// moves are offered; `degree degree=3` raises the selected line and keeps its ends.
+#[test]
+fn sketch_handles_are_the_planes_and_degree_is_one_line() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cube size=40,20,10 'block'");
+    app.run_command("plane on=block at=-20,3,2 'side'");
+    frame(&mut app, Vec::new());
+    select(&mut app, "side");
+    app.run_command("sketch");
+    app.run_command("line on=side p0=0,0 p1=5,0 'l'");
+    frame(&mut app, Vec::new());
+    let gizmo = app.gizmo_frame().expect("handles on the selected line");
+    let z = gizmo.basis * nalgebra::Vector3::z();
+    assert!((z + nalgebra::Vector3::x()).norm() < 1e-6, "Z is the wall's normal: {z}");
+    let handles = gizmo.handles.all();
+    assert!(!handles.contains(&gizmo::Handle::Axis(2)), "no move out of the plane: {handles:?}");
+    assert!(handles.contains(&gizmo::Handle::Plane(2)) && handles.contains(&gizmo::Handle::Arc(2)), "{handles:?}");
+
+    let l = app.curve_named("l").expect("made");
+    app.run_command("degree degree=3");
+    frame(&mut app, Vec::new());
+    assert_eq!(app.doc.curve(l).map(|c| c.degree()), Some(3));
+    assert!(app.doc.sketches[&l].live, "raising the degree keeps it on its plane");
+    app.run_command("undo");
+    assert_eq!(app.doc.curve(l).map(|c| c.degree()), Some(1));
+    app.run_command("sketch off=true");
+    assert!(app.gizmo_frame().is_some_and(|g| g.basis == nalgebra::Rotation3::identity()), "world-aligned again");
+}
+
+/// **A sketch's echo says its plane and its points across it, and replays to the same curve.**
+#[test]
+fn a_sketch_echoes_as_a_curve_on_its_plane() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cube size=40,20,10 'block'");
+    app.run_command("plane on=block at=0,0,5 'lid'");
+    frame(&mut app, Vec::new());
+    let before = echo::Snapshot::of(&app.doc, app.part_graph());
+    app.run_command("line on=lid p0=1,2 p1=9,2 'rib'");
+    frame(&mut app, Vec::new());
+    let lines = echo::lines(&before, &app.doc, app.part_graph(), &[]);
+    let line = lines.iter().find(|l| l.starts_with("curve on=lid")).unwrap_or_else(|| panic!("{lines:?}"));
+    assert!(line.contains("p=1,2;9,2"), "{line}");
+    let copy = line.replace("'rib'", "'copy'");
+    app.run_command(&copy);
+    frame(&mut app, Vec::new());
+    assert_eq!(curve_points(&app, "copy"), curve_points(&app, "rib"));
+    assert!(app.doc.sketches.contains_key(&app.curve_named("copy").unwrap()));
+}
+
+/// **Sketch on a plane is one act, and stopping gives the view back**: the plane becomes the
+/// drawing plane and the projection goes orthographic together; a point built now lies on the
+/// plane; Esc with nothing pending, or the command again, clears the plane and restores the
+/// projection the sketch began from.
+#[test]
+fn sketch_on_a_plane_turns_the_view_and_stopping_gives_it_back() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cube size=40,20,10 'block'");
+    app.run_command("plane on=block at=0,0,5 'lid'");
+    frame(&mut app, Vec::new());
+    let lid = app.node_named("lid").expect("made");
+    let before = app.camera.projection;
+    assert!(!app.sketching());
+
+    select(&mut app, "lid");
+    app.invoke_command(by("draw.sketch"));
+    assert!(app.drawing_plane == crate::DrawingPlane::Node(lid), "the plane is what is drawn on");
+    assert_eq!(app.camera.projection, crate::display_quality::Projection::Orthographic);
+    // To the point's own solve tolerance: the lid stands on a surface point, which is found by
+    // bisection to a thousandth of the body.
+    let on = app.into_drawing_plane(nalgebra::Point3::new(1.0, 2.0, 0.0));
+    assert!((on.z - 5.0).abs() < 1e-3, "a point built now lies on the lid: {on}");
+
+    assert!(app.escape_stops_sketching(), "Esc with nothing pending stops it");
+    assert!(app.drawing_plane == crate::DrawingPlane::None);
+    assert_eq!(app.camera.projection, before, "and the projection is the one it began from");
+    assert!(!app.escape_stops_sketching(), "a second Esc is not this feature's");
+
+    // The command again turns square to the plane again rather than stopping (the plane has
+    // usually moved); `sketch off`, or `sketch` with nothing selected, stops.
+    app.run_command("sketch");
+    assert!(app.sketching());
+    app.run_command("sketch");
+    assert!(app.sketching(), "again is a re-orientation, not a stop");
+    app.run_command("sketch off=true");
+    assert!(!app.sketching() && app.camera.projection == before);
+    app.run_command("sketch target=lid");
+    app.select_body(None);
+    assert!(app.sketching());
+    app.run_command("sketch");
+    assert!(!app.sketching() && app.camera.projection == before);
+}
+
 fn select(app: &mut App, name: &str) {
     let id = app.node_named(name).unwrap_or_else(|| panic!("nothing is called {name}"));
     app.select_body(Some(id));
@@ -507,6 +681,7 @@ fn t1_the_echo_of_a_gui_session_replays_to_the_same_graph() {
         ("Cone_0", "modify.mirror"),
         ("Capsule_0", "modify.pattern"),
         ("SkewedBox_0", "modify.attract"),
+        ("Torus_0", "modify.infill"),
     ] {
         select(&mut app, body);
         invoke(&mut app, id);
@@ -558,6 +733,12 @@ fn t1_the_echo_of_a_gui_session_replays_to_the_same_graph() {
     edit(&mut app, "Loft_0", |n| {
         if let Node::Loft { rims, .. } = n {
             *rims = fieldform_scene::Rims { radius: ParamRef::Literal(1.0), continuity: fieldform_scene::Continuity::Chamfer, at: fieldform_scene::RimEnds::Both, second: None };
+        }
+    });
+    edit(&mut app, "Infill_0", |n| {
+        if let Node::Infill { wall, join, .. } = n {
+            *wall = ParamRef::Literal(1.25);
+            *join = fieldform_scene::Fillet { radius: ParamRef::Literal(0.5), continuity: fieldform_scene::Continuity::G2, second: None };
         }
     });
     edit(&mut app, "Boolean_0", |n| {
@@ -2003,6 +2184,150 @@ fn a_cage_session_s_panel_places_the_cap_and_the_kept_line_says_the_distance() {
     assert_eq!(lines, &["cageinset faces=1 thickness=2.5 depth=-1".to_string()]);
 }
 
+/// **The graph view is a view: the menu and the console reach it by the same command, it moves
+/// nothing in the document, and the keys that frame the viewport frame the graph instead while it
+/// is shown** (`notebook-graph-view-spec.md` G2, G3).
+#[test]
+fn switching_the_blocks_panel_to_the_graph_changes_no_document_state() {
+    let Some(mut app) = headless_app() else { return };
+    let by = |id: &str| commands::by_id(id).unwrap_or_else(|| panic!("{id} is in the registry"));
+    frame(&mut app, Vec::new());
+    app.run_command("sphere r=10");
+    frame(&mut app, Vec::new());
+    let moves = app.document_moves;
+    let json = serde_json::to_string(&app.doc.parts.get(&app.active_part).unwrap().graph).unwrap();
+
+    app.invoke_command(by("view.panel.graph"));
+    assert!(app.doc.graph_layout.shown);
+    app.run_command("view show=notebook");
+    assert!(!app.doc.graph_layout.shown);
+    app.run_command("view show=graph map=off");
+    assert!(app.doc.graph_layout.shown);
+    frame(&mut app, Vec::new());
+    app.run_command("frameall");
+    app.run_command("relayout");
+    frame(&mut app, vec![key(egui::Key::F)]);
+
+    assert_eq!(app.document_moves, moves, "a view is not an edit");
+    assert_eq!(
+        serde_json::to_string(&app.doc.parts.get(&app.active_part).unwrap().graph).unwrap(),
+        json,
+        "the generated graph is byte-identical"
+    );
+}
+
+/// **A named number is a node of the graph, wired to every block whose field reads it**, so the
+/// number can be seen and changed in the graph as it can in the notebook (`param name=.. value=..`).
+#[test]
+fn a_named_number_is_a_node_wired_to_the_blocks_that_read_it() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("param name=reach value=11");
+    app.run_command("sphere radius=reach 'ball'");
+    app.run_command("cube size=reach 'box'");
+    frame(&mut app, Vec::new());
+    let list = app.list_readings();
+    let sources = crate::graph_view::sources(
+        &app.doc,
+        app.part_graph(),
+        &list.nesting,
+        &list.listed,
+        &|id| app.body_name(id).unwrap_or("?").to_string(),
+        &|_| None,
+        &|_| crate::graph_view::CurveRow::Own,
+    );
+    let model = crate::graph_view::model::build(&sources);
+    let reach = model.nodes.iter().find(|n| n.label == "reach").expect("the number is a node");
+    assert!(reach.variable && reach.number.is_some_and(|n| n.value == 11.0 && n.editable));
+    let readers: Vec<_> = model.wires.iter().filter(|w| w.from == reach.id).map(|w| w.to).collect();
+    assert_eq!(readers.len(), 2, "both the ball and the box read it");
+
+    // A set from the graph is the notebook's own command, and the number moves.
+    app.run_command("param name=reach value=12");
+    assert_eq!(app.doc.parameter_value(app.doc.parameter_named("reach").unwrap()), Some(12.0));
+}
+
+#[test]
+fn a_block_with_an_empty_input_is_flagged_in_the_graph_and_a_plain_one_is_not() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("sphere radius=5 'ball'");
+    app.run_command("shell target=none thickness=2 'hollow'");
+    frame(&mut app, Vec::new());
+    let list = app.list_readings();
+    let sources = crate::graph_view::sources(
+        &app.doc,
+        app.part_graph(),
+        &list.nesting,
+        &list.listed,
+        &|id| app.body_name(id).unwrap_or("?").to_string(),
+        &|_| None,
+        &|_| crate::graph_view::CurveRow::Own,
+    );
+    let model = crate::graph_view::model::build(&sources);
+    let status = |name: &str| model.nodes.iter().find(|n| n.label == name).map(|n| n.status.clone());
+    assert_eq!(status("ball"), Some(crate::graph_view::model::Status::Ok));
+    assert!(matches!(status("hollow"), Some(crate::graph_view::model::Status::Error(_))), "{:?}", status("hollow"));
+}
+
+#[test]
+fn a_closed_loop_of_curves_is_one_node_wired_to_the_extrude_that_reads_it() {
+    use crate::graph_view::{model::Kind, CurveRow};
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for line in [
+        "line p0=0,0,0 p1=40,0,0 'a'",
+        "line p0=40,0,0 p1=40,20,0 'b'",
+        "line p0=40,20,0 p1=0,20,0 'c'",
+        "line p0=0,20,0 p1=0,0,0 'd'",
+        "extrude profile=a height=10 'slab'",
+    ] {
+        app.run_command(line);
+    }
+    frame(&mut app, Vec::new());
+    app.refresh_profiles();
+    let list = app.list_readings();
+    let nesting = &list.nesting;
+    let curve_row = |c| match app.folded_curve_row(c, nesting) {
+        Some(crate::blocks::list::Block::Profile(key)) => CurveRow::Profile(app.profiles.members(key).map_or(0, <[_]>::len)),
+        None => app.profiles.key_of(c).map_or(CurveRow::Own, CurveRow::Inside),
+        Some(_) => CurveRow::Own,
+    };
+    let sources = crate::graph_view::sources(
+        &app.doc,
+        app.part_graph(),
+        &list.nesting,
+        &list.listed,
+        &|id| app.body_name(id).unwrap_or("?").to_string(),
+        &|_| None,
+        &curve_row,
+    );
+    let model = crate::graph_view::model::build(&sources);
+    let loops: Vec<_> = model.nodes.iter().filter(|n| matches!(n.kind, Kind::Profile(_))).collect();
+    assert_eq!(loops.len(), 1, "four curves, one loop, one node");
+    assert!(!model.nodes.iter().any(|n| matches!(n.kind, Kind::Curve(_))), "no member has a node of its own");
+    let slab = model.nodes.iter().find(|n| n.label == "slab").unwrap();
+    assert!(slab.rows.iter().any(|r| r.from == loops[0].id), "the extrude's row is fed by the loop");
+}
+
+#[test]
+fn find_lights_the_nodes_named_for_it_and_changes_no_document_state() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("sphere radius=5 'Ball'");
+    app.run_command("cube size=5 'box'");
+    app.run_command("view show=graph");
+    let before = app.doc.clone();
+    app.run_command("find 'ball'");
+    let (model, _) = app.graph_model();
+    let hits = crate::graph_view::matching(&model, "BALL");
+    assert_eq!(hits.len(), 1, "case is ignored and only the ball matches");
+    assert!(crate::graph_view::matching(&model, "  ").is_empty(), "no text, no matches");
+    app.run_command("find 'ball'");
+    assert_eq!(app.doc.graph_layout, before.graph_layout);
+    assert_eq!(app.doc.created, before.created, "finding is not an edit");
+}
+
 /// **A through hole has handles, at the point it goes in.** It runs on for ever and has no box,
 /// which used to leave it with none while a blind hole beside it could be dragged; the handles
 /// stand on the block's own place before they ask for a box, so both are moved the same way.
@@ -2151,4 +2476,509 @@ fn a_draft_past_the_section_s_room_is_refused_when_typed_and_said_beside_the_dra
     frame(&mut app, Vec::new());
     assert!(app.compile_error().is_some_and(|why| why.contains("cross itself")), "{:?}", app.compile_error());
     assert_eq!(app.draft_refused, Some(slot), "the panel says it beside this block's draft");
+}
+
+/// The lattice block an infill named `name` reads, and the block itself.
+fn infill_named(app: &App, name: &str) -> (NodeId, fieldform_scene::ParamRef, fieldform_scene::Fillet, Node) {
+    let id = app.node_named(name).unwrap_or_else(|| panic!("nothing is called {name}"));
+    let graph = app.part_graph();
+    let Some(Node::Infill { wall, fill, join, .. }) = graph.node(id) else {
+        panic!("{name} is not an infill")
+    };
+    let fill = graph.node(fill.source().expect("the slot is filled")).expect("a block").clone();
+    (id, *wall, *join, fill)
+}
+
+/// **The first click, on the case the numbers were chosen against.** A sixty millimetre cube with
+/// nothing typed, off the origin so that where the cells start says something.
+#[test]
+fn a_first_click_fills_a_sixty_millimetre_cube_as_the_benchmark_does() {
+    let Some(mut app) = headless_app() else { return };
+    app.run_command("cube 'box' size=60,60,60 centre=5,0,0");
+    app.run_command("infill target=box 'part'");
+    frame(&mut app, Vec::new());
+    let (id, wall, join, fill) = infill_named(&app, "part");
+    assert_eq!(wall, ParamRef::Literal(2.0));
+    assert!(join == Fillet::hard());
+    let Node::Lattice { cell, frame: where_, map, phase } = fill else { panic!("{fill:?}") };
+    assert_eq!(cell, fieldform_scene::LatticeCell::Gyroid);
+    assert_eq!(map, CellMap::Rectangular { cell: ParamRef::Literal(10.0) });
+    assert_eq!(phase, LatticePhase::sheet(ParamRef::Literal(1.0)));
+    let fieldform_scene::Frame::At { origin, .. } = where_ else { panic!("{where_:?}") };
+    assert_eq!(origin, [5.0, 0.0, 0.0].map(ParamRef::Literal), "at the body's centre, as a number");
+    assert_eq!(app.part_graph().roots(), vec![id], "the body and the lattice are both consumed");
+}
+
+/// `cell=` alone writes that cell's own start, and a phase number typed beats it.
+#[test]
+fn a_cell_named_starts_from_its_preset_and_a_number_typed_wins() {
+    let Some(mut app) = headless_app() else { return };
+    app.run_command("cube 'box' size=60,60,60");
+    app.run_command("infill target=box wall=1.5 cell=octet cell_size=8 join=0.4 'beams'");
+    frame(&mut app, Vec::new());
+    let (_, wall, join, fill) = infill_named(&app, "beams");
+    assert_eq!(wall, ParamRef::Literal(1.5));
+    assert_eq!(join.radius, ParamRef::Literal(0.4));
+    let Node::Lattice { cell, phase, .. } = fill else { panic!("{fill:?}") };
+    assert_eq!(cell, fieldform_scene::LatticeCell::Octet);
+    assert_eq!(phase, LatticePhase::Strut { radius: ParamRef::Literal(0.4) }, "5 % of the cell");
+
+    app.run_command("cube 'other' size=60,60,60 centre=100,0,0");
+    app.run_command("infill target=other cell=gyroid cell_size=10 thickness=1.25 'typed'");
+    frame(&mut app, Vec::new());
+    let (_, _, _, fill) = infill_named(&app, "typed");
+    let Node::Lattice { phase, .. } = fill else { panic!("{fill:?}") };
+    assert_eq!(phase, LatticePhase::sheet(ParamRef::Literal(1.25)));
+}
+
+/// `fill=` reads a block that is already there, and makes nothing.
+#[test]
+fn a_fill_named_reads_the_block_and_makes_no_lattice() {
+    let Some(mut app) = headless_app() else { return };
+    app.run_command("cube 'box' size=60,60,60");
+    app.run_command("tpms 'shared' cell=gyroid cell_size=10");
+    let shared = app.node_named("shared").unwrap();
+    let before = app.part_graph().nodes().count();
+    app.run_command("infill target=box wall=2 fill=shared 'part'");
+    frame(&mut app, Vec::new());
+    assert_eq!(app.part_graph().nodes().count(), before + 1, "the infill and nothing else");
+    let id = app.node_named("part").unwrap();
+    let Some(Node::Infill { fill, .. }) = app.part_graph().node(id) else { panic!() };
+    assert_eq!(fill.source(), Some(shared));
+}
+
+/// Refused by name, and nothing left behind, which is the half a refusal can forget.
+#[test]
+fn a_line_the_block_cannot_mean_makes_nothing() {
+    let Some(mut app) = headless_app() else { return };
+    app.run_command("cube 'box' size=60,60,60");
+    app.run_command("tpms 'shared' cell=gyroid cell_size=10");
+    let before = app.part_graph().nodes().count();
+    for line in [
+        "infill target=box wall=-1",
+        "infill target=box fill=shared cell=gyroid",
+        "infill target=box cell=nothing_of_the_kind",
+        "infill target=box phase=strut cell=gyroid",
+    ] {
+        let warned = app.console_warnings;
+        app.run_command(line);
+        assert!(app.console_warnings > warned, "{line} was not refused");
+        assert_eq!(app.part_graph().nodes().count(), before, "{line} left something behind");
+    }
+}
+
+/// **A graded lattice cannot be aimed**, and a frame moved to the body's centre counts, so a ramp
+/// keeps the world's frame rather than turning the line into a shader that will not generate.
+#[test]
+fn a_graded_infill_off_the_origin_still_draws() {
+    let Some(mut app) = headless_app() else { return };
+    app.run_command("cube 'box' size=60,60,60 centre=40,0,0");
+    app.run_command("plane 'floor' origin=0,0,-30");
+    app.run_command("ramp 'grade' input=floor in=0,60 out=0.6,2.0");
+    app.run_command("infill target=box wall=2 cell=gyroid cell_size=10 thickness=grade 'part'");
+    frame(&mut app, Vec::new());
+    assert!(app.node_named("part").is_some(), "the line was taken");
+    let graph = app.part_graph().clone();
+    fieldform_gpu::generate(&app.doc, &graph).expect("a shader for it");
+}
+
+/// One undo step, the lattice with it, and the body back as a body.
+#[test]
+fn undoing_an_infill_takes_its_lattice_and_gives_the_body_back() {
+    let Some(mut app) = headless_app() else { return };
+    app.run_command("cube 'box' size=60,60,60");
+    let body = app.node_named("box").unwrap();
+    // No name on the line: a name given there is an edit of its own, with a step of its own.
+    app.run_command("infill target=box");
+    frame(&mut app, Vec::new());
+    assert_eq!(app.part_graph().nodes().count(), 3);
+    app.run_command("undo");
+    frame(&mut app, Vec::new());
+    assert_eq!(app.part_graph().nodes().count(), 1, "one step");
+    assert_eq!(app.part_graph().roots(), vec![body]);
+}
+
+/// The palette's "infill" finds the tool that does it, and only that.
+#[test]
+fn infill_is_the_tool_called_infill() {
+    let tool = commands::by_id("modify.infill").expect("in the registry");
+    assert_eq!(tool.display_name, "Infill");
+    assert!(tool.aliases.contains(&"lightweight"));
+    let tpms = commands::by_id("create.tpms").expect("in the registry");
+    assert!(!tpms.aliases.contains(&"infill"), "two tools answering to one word");
+}
+
+/// **The panel, drawn**, in every state it has a branch for: it has to survive a wall of nought, a
+/// rounded join, a fill that is not a lattice and an empty slot, and the report has to come back.
+#[test]
+fn the_panel_draws_in_every_state_and_its_report_arrives() {
+    let Some(mut app) = headless_app() else { return };
+    app.run_command("cube 'box' size=60,60,60");
+    app.run_command("infill target=box 'part'");
+    let id = app.node_named("part").unwrap();
+    // The block's own body, since a row draws it only once it has been opened.
+    let panel = |app: &mut App, id: NodeId| {
+        let ctx = app.egui_ctx.clone();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.node_block_body(ui, id));
+    };
+    panel(&mut app, id);
+    assert!(app.infill_cavities.contains_key(&id), "the panel was not drawn");
+
+    // The report is asked for once the document has sat still, and arrives off the thread.
+    let started = std::time::Instant::now();
+    let report = loop {
+        panel(&mut app, id);
+        if let Some(report) = app.infill_cavities.get(&id).and_then(|run| run.report()) {
+            break report;
+        }
+        assert!(started.elapsed().as_secs() < 30, "no report in thirty seconds");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert!((report.deepest - 30.0).abs() < 0.01, "read {}", report.deepest);
+    assert!(report.has_room(2.0) && report.fill_lands);
+    assert!((0.05..0.6).contains(&report.solid_share), "read {}", report.solid_share);
+
+    for line in [
+        "set part.wall=0",
+        "set part.wall=40",
+        "set part.wall=2 part.join=0.5",
+    ] {
+        app.run_command(line);
+        panel(&mut app, id);
+    }
+    app.run_command("sphere 'ball' radius=5");
+    app.run_command("cube 'other' size=60,60,60 centre=100,0,0");
+    app.run_command("infill target=other fill=ball 'plain'");
+    let plain = app.node_named("plain").unwrap();
+    panel(&mut app, plain);
+    app.run_command("infill target=none fill=none 'empty'");
+    let empty = app.node_named("empty").expect("an empty block is a block");
+    panel(&mut app, empty);
+    // Against a body that only bounds its distance, which marks the wall as a minimum.
+    app.run_command("sphere 'round' radius=30 centre=300,0,0");
+    app.run_command("cube 'corner' size=40,40,40 centre=320,0,0");
+    app.run_command("morph a=round b=corner t=0.5 'soft'");
+    app.run_command("infill target=soft wall=2 cell=gyroid 'bounded'");
+    let bounded = app.node_named("bounded").unwrap();
+    panel(&mut app, bounded);
+}
+
+/// Runs frames until the list has been to the row and let go, and says whether it arrived.
+fn reveal_arrives(app: &mut App) -> bool {
+    let mut reached = false;
+    for _ in 0..200 {
+        frame(app, Vec::new());
+        reached |= app.reveal.as_ref().is_some_and(|r| r.reached);
+    }
+    assert!(app.reveal.is_none(), "the list lets go once it is there");
+    reached
+}
+
+/// **A plane two blocks down is found from the viewport.** Every row starts closed, so the row
+/// holding the selection does not exist until the rows above it have opened: that it is drawn at
+/// all is what this asserts, and the row is what scrolls and shows the highlight.
+#[test]
+fn a_block_selected_in_the_viewport_opens_every_row_above_it() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for line in [
+        "sphere 'ball' radius=10",
+        "plane origin=0,0,2 'deep'",
+        "boolean in=ball,deep -i 'inner'",
+        "cube size=40,40,40 'box'",
+        "boolean in=box,inner -s 'outer'",
+    ] {
+        app.run_command(line);
+    }
+    frame(&mut app, Vec::new());
+    let deep = app.node_named("deep").expect("the plane");
+    // As the plane's outline under a click does it.
+    app.select_body(Some(deep));
+    assert!(reveal_arrives(&mut app), "the plane's row was never drawn");
+}
+
+/// **And a curve folded into a profile under the block reading it**, which has two kinds of row
+/// above it, the loop's and the extrude's.
+#[test]
+fn a_curve_selected_in_the_viewport_opens_its_profile_and_its_reader() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for line in [
+        "line p0=0,0,0 p1=40,0,0 'a'",
+        "line p0=40,0,0 p1=40,20,0 'b'",
+        "line p0=40,20,0 p1=0,20,0 'c'",
+        "line p0=0,20,0 p1=0,0,0 'd'",
+        "extrude profile=a height=10 'slab'",
+    ] {
+        app.run_command(line);
+    }
+    frame(&mut app, Vec::new());
+    let curve = app.curve_named("c").expect("the curve");
+    app.select_curve(curve);
+    assert!(reveal_arrives(&mut app), "the curve's row was never drawn");
+}
+
+/// **A row clicked in the list stays where it is.** It is under the pointer already, and
+/// scrolling it to the middle would move it away from the hand that chose it. The control for the
+/// two above: the same selection, from the list.
+#[test]
+fn a_row_chosen_in_the_list_is_not_scrolled_to() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("sphere 'ball' radius=10");
+    app.run_command("cube size=40,40,40 'box'");
+    frame(&mut app, Vec::new());
+    let ball = app.node_named("ball").expect("the sphere");
+    app.select_body(Some(ball));
+    app.chose_from_list(RowKey::Node(ball));
+    frame(&mut app, Vec::new());
+    assert!(app.reveal.is_none());
+}
+
+/// **A selection made while the graph is up is found in the notebook when you go there**, which is
+/// also what *Show in notebook* needs: each view follows on its own, so changing view is not
+/// taken for having already seen it.
+#[test]
+fn a_selection_made_in_the_graph_opens_the_notebook_down_to_it() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for line in [
+        "sphere 'ball' radius=10",
+        "plane origin=0,0,2 'deep'",
+        "boolean in=ball,deep -i 'inner'",
+        "cube size=40,40,40 'box'",
+        "boolean in=box,inner -s 'outer'",
+        "view show=graph",
+    ] {
+        app.run_command(line);
+    }
+    frame(&mut app, Vec::new());
+    let deep = app.node_named("deep").expect("the plane");
+    app.select_body(Some(deep));
+    frame(&mut app, Vec::new());
+    assert_eq!(app.graph_followed, Some(deep), "the graph has followed it");
+    assert!(app.reveal.is_none(), "the notebook is not drawn, so it has not moved");
+    app.run_command("view show=notebook");
+    assert!(reveal_arrives(&mut app), "the plane's row was never drawn");
+}
+
+/// **K is the knife on the cage with nothing selected, and Split off it** (the owner, 2026-10-28).
+/// The knife starts from no selection -- its first point is a click -- so it used to wait for
+/// something to be picked before K meant it; a key that does nothing until you have pointed at
+/// something is a key nobody finds.
+#[test]
+fn k_is_the_knife_on_the_cage_whether_or_not_anything_is_selected() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    assert_eq!(app.control, ControlMesh::Cage);
+    assert!(app.selection.is_empty());
+    assert_eq!(app.shortcut_op("modify.split".into()), "cage.cut", "nothing selected");
+    app.selection.toggle(Selection::Face(fieldform_cage::FaceId::from_index(1)));
+    assert_eq!(app.shortcut_op("modify.split".into()), "cage.cut", "a face selected");
+    app.control = ControlMesh::Surface(fieldform_scene::QuadMeshId::default());
+    assert_eq!(app.shortcut_op("modify.split".into()), "modify.split", "a surface keeps Split");
+}
+
+/// **Shift lands a dragged selection on the grid and the snap needs the grid to be drawn**: the
+/// centroid goes to an intersection in the drawing plane's two axes and is left alone in the third,
+/// and a perspective view -- where there is no grid -- moves it exactly where the cursor put it.
+#[test]
+fn shift_lands_a_dragged_selection_on_the_drawn_grid() {
+    use fieldform_cage::FaceId;
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cage");
+    frame(&mut app, Vec::new());
+    // Through the plane's own setter with the swing, since the grid is drawn only square to its
+    // plane (the owner, 2026-10-31): a plane set by assignment leaves the view where it was.
+    app.use_drawing_plane(DrawingPlane::World { normal: Axis::Z, offset_mm: 0.0 }, Swing::Yes);
+    // The swing is animated over frames; a tick past its whole duration lands it.
+    app.camera.tick_snap(60.0);
+    app.show_grid = true;
+    app.camera.projection = Projection::Orthographic;
+    let (aspect, rect) = (1400.0 / 900.0, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0)));
+    let pitch = app.drawing_grid(aspect, rect).expect("an orthographic view with a plane has a grid").pitch;
+
+    app.selection.clear();
+    app.selection.toggle(Selection::Face(FaceId::from_index(1)));
+    let centroid = |app: &App| {
+        let placement = app.control_placement();
+        app.selection.centroid(app.control(), &placement).unwrap().cast::<f64>()
+    };
+    let from = rect.center();
+    let to = from + egui::vec2(37.0, 21.0);
+
+    app.begin_move(aspect, rect, from);
+    app.continue_move(aspect, rect, to, false, false);
+    let free = centroid(&app);
+    app.end_move();
+    app.run_command("undo");
+
+    app.begin_move(aspect, rect, from);
+    app.continue_move(aspect, rect, to, true, false);
+    let snapped = centroid(&app);
+    app.end_move();
+    let on_grid = |v: f64| ((v / pitch).round() * pitch - v).abs() < 1e-3 * pitch.max(1.0);
+    assert!(on_grid(snapped.x) && on_grid(snapped.y), "{snapped:?} sits on a {pitch} mm grid");
+    assert!(!(on_grid(free.x) && on_grid(free.y)), "the unsnapped drag was not already there: {free:?}");
+
+    app.run_command("undo");
+    app.camera.projection = Projection::Perspective;
+    assert!(app.drawing_grid(aspect, rect).is_none(), "no grid is drawn in perspective");
+    let centroid_after = |app: &mut App, grid: bool| {
+        app.begin_move(aspect, rect, from);
+        app.continue_move(aspect, rect, to, grid, false);
+        let at = centroid(app);
+        app.end_move();
+        app.run_command("undo");
+        at
+    };
+    let with_shift = centroid_after(&mut app, true);
+    let without = centroid_after(&mut app, false);
+    assert!((with_shift - without).norm() < 1e-3, "perspective: Shift moves nothing but the cursor");
+}
+
+/// **A panel shows a number as a person reads it and keeps every digit underneath** (the owner,
+/// 2026-10-28, after a knife's offset read `18.69785451225658 mm`): four decimals, no trailing
+/// zeros, a value too small for four decimals in scientific form rather than as a nought, and
+/// words, lists and counts left exactly as they are.
+#[test]
+fn a_panel_row_shows_a_number_rounded_and_keeps_the_exact_one() {
+    use crate::app::tool_panel::{rounded_for_display, Row};
+    let row = |text: &str, unit| Row { key: "offset", text: text.to_string(), unit };
+    assert_eq!(rounded_for_display(18.69785451225658), "18.6979");
+    assert_eq!(rounded_for_display(2.5), "2.5");
+    assert_eq!(rounded_for_display(10.0), "10");
+    assert_eq!(rounded_for_display(-0.00004), "-4.000e-5", "too small to show is not nought");
+    assert_eq!(rounded_for_display(0.0), "0");
+    let long = row("18.69785451225658", commands::Unit::Mm);
+    assert_eq!(long.shown(), "18.6979");
+    assert_eq!(long.text, "18.69785451225658", "the row keeps every digit");
+    assert_eq!(long.number(), Some(18.69785451225658), "and a scrub starts from them");
+    assert_eq!(row("1,2,3", commands::Unit::Mm).shown(), "1,2,3", "a list is not one number");
+    assert_eq!(row("zip", commands::Unit::Word).shown(), "zip");
+    assert_eq!(row("\u{2014}", commands::Unit::Mm).shown(), "\u{2014}", "an empty row stays a dash");
+}
+
+/// T5: an unknown key is refused with what the verb reads, as data, and a near miss is named.
+#[test]
+fn an_unknown_key_is_refused_with_what_the_verb_reads() {
+    let Some(mut app) = headless_app() else { return };
+    let before = app.part_graph().nodes().count();
+    let out = app.run_line("cube sise=20");
+    assert!(!out.ok);
+    let err = out.error.expect("a refusal carries its structure");
+    assert_eq!(err.code, "unknown_key");
+    assert_eq!(err.key.as_deref(), Some("sise"));
+    assert_eq!(err.did_you_mean.as_deref(), Some("size"));
+    for key in ["size", "centre"] {
+        assert!(err.accepted.iter().any(|k| k == key), "{key} missing from {:?}", err.accepted);
+    }
+    assert_eq!(app.part_graph().nodes().count(), before, "a refused line makes nothing");
+}
+
+#[test]
+fn a_line_that_works_says_what_the_console_said() {
+    let Some(mut app) = headless_app() else { return };
+    let out = app.run_line("sphere radius=10 'ball'");
+    assert!(out.ok, "{out:?}");
+    assert!(out.error.is_none() && out.warnings.is_empty());
+    assert!(out.said.is_some_and(|s| s.contains("sphere")));
+    let out = app.run_line("notaverb");
+    assert_eq!(out.error.map(|e| e.code), Some("unknown_verb"));
+}
+
+#[test]
+fn a_line_reports_the_blocks_it_made_changed_and_removed_by_the_graph() {
+    let Some(mut app) = headless_app() else { return };
+    let made = app.run_line("sphere radius=10 'ball'");
+    assert_eq!(made.blocks.created.len(), 1, "{made:?}");
+    let ball = made.blocks.created[0].clone();
+    assert_eq!((ball.name.as_deref(), ball.kind.as_str(), ball.body), (Some("ball"), "sphere", true));
+    assert!(ball.id.starts_with("n:") && made.blocks.changed.is_empty() && made.blocks.removed.is_empty());
+
+    let refused = app.run_line("sphere radus=10");
+    assert_eq!(refused.blocks, Default::default(), "a refused line touches nothing");
+
+    // Naming is its own undo step, so the first undo takes the label off and changes the block.
+    let unnamed = app.run_line("undo");
+    assert_eq!(unnamed.blocks.changed.len(), 1, "{unnamed:?}");
+    let undone = app.run_line("undo");
+    assert_eq!(undone.blocks.removed.len(), 1, "{undone:?}");
+    assert_eq!(undone.blocks.removed[0].id, ball.id);
+}
+
+/// What each key's field holds on the block its verb makes with no keys given, rendered as
+/// compact JSON with a number slot's `{"literal": 5}` shown as `5`. Feeds `key_defaults::DEFAULTS`.
+/// A verb that needs an input and is refused bare simply has no entry: unknown, not guessed.
+pub(crate) fn derived_key_defaults() -> Option<std::collections::BTreeMap<(String, String), String>> {
+    use serde_json::Value as J;
+    fn plain(v: &J) -> J {
+        match v {
+            J::Object(o) if o.len() == 1 && o.contains_key("literal") => o["literal"].clone(),
+            J::Array(a) => J::Array(a.iter().map(plain).collect()),
+            other => other.clone(),
+        }
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for verb in crate::console_keys::VERBS {
+        let crate::console_keys::Keys::Declared { reads, .. } = &verb.keys else { continue };
+        if !verb.op.starts_with("create.") {
+            continue;
+        }
+        let Some((word, _)) = crate::console_commands().into_iter().find(|(_, op)| *op == verb.op) else { continue };
+        let mut app = headless_app()?;
+        let made = app.run_line(&word);
+        let Some(block) = made.blocks.created.iter().find(|b| b.id.starts_with("n:")).filter(|_| made.ok) else { continue };
+        let raw = u64::from_str_radix(block.id.trim_start_matches("n:"), 16).unwrap();
+        let graph = app.part_graph();
+        let Some((_, node)) = graph.nodes().find(|(id, _)| id.raw() == raw) else { continue };
+        let json = serde_json::to_value(node).unwrap();
+        for k in reads.iter() {
+            let [field] = k.covers else { continue };
+            // A block's id is minted fresh each run, so a default that is one is not a default.
+            let is_id = |v: &J| v.as_str().is_some_and(|s| s.len() == 16 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+            if let Some(v) = json.get(*field).filter(|v| !is_id(v)) {
+                out.insert((verb.op.to_string(), k.word.to_string()), plain(v).to_string());
+            }
+        }
+    }
+    Some(out)
+}
+
+#[test]
+fn the_key_defaults_match_what_the_verbs_make() {
+    let Some(derived) = derived_key_defaults() else { return };
+    if std::env::var_os("FIELDFORM_PRINT_KEY_DEFAULTS").is_some() {
+        for ((op, key), v) in &derived {
+            println!("    ({op:?}, {key:?}, {v:?}),");
+        }
+    }
+    let written: std::collections::BTreeMap<(String, String), String> = crate::key_defaults::DEFAULTS
+        .iter()
+        .map(|(o, k, v)| ((o.to_string(), k.to_string()), v.to_string()))
+        .collect();
+    assert_eq!(written, derived, "regenerate DEFAULTS (see key_defaults.rs)");
+}
+
+#[test]
+fn a_line_that_makes_a_parameter_or_a_curve_says_so() {
+    let Some(mut app) = headless_app() else { return };
+    let made = app.run_line("param name=wall value=3");
+    let p = made.blocks.created.iter().find(|b| b.kind == "parameter");
+    assert!(p.is_some_and(|p| p.name.as_deref() == Some("wall") && p.id.starts_with("p:")), "{made:?}");
+    let edited = app.run_line("param name=wall value=4");
+    assert!(edited.blocks.changed.iter().any(|b| b.kind == "parameter"), "{edited:?}");
+}
+
+#[test]
+fn every_example_runs_on_a_new_document() {
+    for (verb, lines) in crate::examples::EXAMPLES {
+        let Some(mut app) = headless_app() else { return };
+        assert!(crate::catalogue::describe(verb).is_some(), "`{verb}` is an example for no verb");
+        for line in lines.lines() {
+            let out = app.run_line(line);
+            assert!(out.ok, "the example for `{verb}` was refused at `{line}`: {:?}", out.error);
+        }
+    }
 }

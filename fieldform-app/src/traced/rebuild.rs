@@ -71,6 +71,17 @@ pub(super) fn bake_key(
 }
 
 /// One narrow band, ready to share.
+/// How many cells a leaf wants at `quality`, before the atlas has had its say.
+///
+/// A draft stays coarse for everything, because it has a frame's budget. Only a settled bake of a
+/// mesh goes finer, and it is made on the worker, so the window does not wait for it.
+pub(super) fn wanted_cells(leaf: fieldform_gpu::BakedLeaf, quality: Quality, resolution: usize) -> usize {
+    match (leaf, quality) {
+        (fieldform_gpu::BakedLeaf::Mesh(_), Quality::Final) => resolution.max(MESH_BAKE_RESOLUTION),
+        _ => resolution,
+    }
+}
+
 fn bake_of(
     field: &(dyn fieldform_field::ScalarField + Sync),
     bounds: (Point3<f64>, Point3<f64>),
@@ -244,7 +255,12 @@ impl TracedView {
             f64,
         );
         let mut later: Vec<Queued> = Vec::new();
+        // Every resolution this rebuild asked for, since a mesh's is not a cage's.
+        let mut asked_cells: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for leaf in &program.baked {
+            let resolution =
+                fieldform_gpu::bake_resolution_limit(device, leaf_count, wanted_cells(*leaf, quality, resolution));
+            asked_cells.insert(resolution);
             let bounds = match leaf {
                 // Its own box, resolved against the document by id. This used to be *the*
                 // cage's box for every cage leaf, on the reasoning that a document held one —
@@ -502,7 +518,7 @@ impl TracedView {
                 // A leaf nobody asked for is hidden, and keeps the band it had at this
                 // resolution rather than paying to bake it again when it comes back. Its band
                 // width is its own, so there is nothing here to compare it against.
-                || (!asked.contains(&k.leaf) && k.resolution == resolution)
+                || (!asked.contains(&k.leaf) && (k.resolution == resolution || asked_cells.contains(&k.resolution)))
         });
 
         // In the shader's binding order. A spine goes up as it is; a profile is flattened into
@@ -702,7 +718,10 @@ impl TracedView {
         // The first is every drag of a number and costs nothing; the second is what froze the
         // application for half a minute.
         let previous = previous.filter(|p| p.device() == device);
-        let same_shader = previous.as_ref().is_some_and(|p| p.source() == program.source);
+        let wanted = fieldform_gpu::compiled_source(&program, &spines);
+        // **Or one drawn a moment ago**, which is an undo or an eye turned back: no driver is
+        // asked, so the wait is none, and it is taken here rather than on a worker.
+        let same_shader = previous.as_ref().is_some_and(|p| p.source() == wanted || self.shelf.holds(device, &wanted));
         if !same_shader {
             // See `compile_already_wanted`: adopt the worker rather than start a second one
             // for the same source. `Compiling::source` was put there for this and never read.
@@ -729,16 +748,18 @@ impl TracedView {
                 (bakes.clone(), spines.clone(), surfaces.clone());
             let source = program.source.clone();
             let for_worker = program.clone();
+            let worker_shelf = self.shelf.clone();
             let spawned = std::thread::Builder::new()
                 .name("shader compile".to_string())
                 .spawn(move || {
-                    let built = Renderer::with_device(
+                    let built = Renderer::with_shelf(
                         worker_device,
                         worker_queue,
                         &for_worker,
                         &worker_bakes,
                         &worker_spines,
                         &worker_surfaces,
+                        &worker_shelf,
                     );
                     let _ = tx.send(built);
                 });
@@ -779,7 +800,7 @@ impl TracedView {
         // it. Same order, same moment — only now it is timed.
         let (built, released) = match previous {
             Some(previous) => {
-                let built = Renderer::rebuilt_from(&previous, &program, &bakes, &spines, &surfaces);
+                let built = Renderer::rebuilt_with_shelf(&previous, &program, &bakes, &spines, &surfaces, &self.shelf);
                 let releasing = Instant::now();
                 drop(previous);
                 (built, releasing.elapsed())

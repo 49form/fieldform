@@ -31,6 +31,7 @@ members = [
     "fieldform-gpu",
     "fieldform-app",
     "fieldform-import",
+    "fieldform-mcp",
 ]
 
 [workspace.package]
@@ -104,6 +105,11 @@ nalgebra = { version = "0.35", features = ["serde-serialize"] }
 ordered-float = "5"
 rand = "0.10"
 pollster = "0.4.0"
+# The MCP server inside the application (`mcp-server-spec.md` §3). Official SDK, Apache-2.0; only
+# the server half and its generic read/write transport are built.
+rmcp = { version = "3.8.0", default-features = false, features = ["server", "transport-async-rw"] }
+# What rmcp runs on, and the local socket the relay connects to. No macros, no process, no fs.
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread", "net", "io-util", "sync", "time"] }
 rayon = "1.10"
 rhai = { version = "1.24", features = ["sync"] }
 serde = { version = "1.0", features = ["derive", "rc"] }

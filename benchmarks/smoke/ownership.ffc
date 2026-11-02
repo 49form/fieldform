@@ -112,17 +112,17 @@ saveas file=target/ownership-08-undone.fform
 redo
 saveas file=target/ownership-08-redone.fform
 
-# --- item 10: a pattern adopts its body and still draws it, and so does the same file reopened.
-# A count of three is the seed and two copies 20 and 40 along, and the pattern's block is the
-# copies, with the seed drawn beside them: 2 * 4/3*pi*125 = 1047.20
+# --- item 10: a pattern adopts its body and holds it, and so does the same file reopened.
+# A count of three is the seed and two copies 20 and 40 along, all three in the pattern's block:
+# 3 * 4/3*pi*125 = 1570.80
 new
 sphere radius=5 centre=0,100,0 'seed'
 pattern target=seed kind=linear count=3 step=20,0,0 'row'
-expect target=row volume=1047.20 tol=0.5%
-expect target=row bbox=15,95,-5,45,105,5 tol=0.05
+expect target=row volume=1570.80 tol=0.5%
+expect target=row bbox=-5,95,-5,45,105,5 tol=0.05
 saveas file=target/ownership-10-pattern.fform
 open file=target/ownership-10-pattern.fform
-expect target=row volume=1047.20 tol=0.5%
+expect target=row volume=1570.80 tol=0.5%
 saveas file=target/ownership-10-reopened.fform
 
 # --- Phase 3, a profile: a closed four-line profile, extruded, sits inside the extrude. Its first

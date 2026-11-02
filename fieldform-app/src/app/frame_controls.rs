@@ -267,6 +267,22 @@ impl App {
         self.use_drawing_plane(chosen, Swing::Yes);
     }
 
+    /// Which way the active drawing plane's own Y runs, in world, when the plane is a block.
+    ///
+    /// A plane block has an X of its own — a plane on a surface takes it from the surface point's
+    /// roll — so a view turned to it can put that X across the screen, and a sketch on a slanted
+    /// face reads upright. A world plane has only its normal, and `up_for_normal` answers for it.
+    fn drawing_up(&self) -> Option<Vector3<f64>> {
+        if !matches!(self.drawing_plane, DrawingPlane::Node(_)) {
+            return None;
+        }
+        let frame = self.drawing_frame()?;
+        let numbers = |r: &ParamRef| Some(self.resolve(*r));
+        let (_, rotation) =
+            fieldform_field::resolve_frame(&self.doc, self.part_graph(), &frame, &numbers).ok()?;
+        Some(rotation * Vector3::y())
+    }
+
     /// Sets the plane and says so, turning the camera to look down it unless told not to.
     ///
     /// The two callers want opposite things about the camera and the same thing about
@@ -289,7 +305,8 @@ impl App {
                     && let Some(normal) = self.drawing_normal()
                 {
                     let normal = normal.cast::<f32>();
-                    self.camera.begin_snap_toward(normal, up_for_normal(normal));
+                    let up = self.drawing_up().map_or_else(|| up_for_normal(normal), |up| up.cast::<f32>());
+                    self.camera.begin_snap_toward(normal, up);
                     " and the view has turned to look down it"
                 } else {
                     ""
@@ -300,6 +317,95 @@ impl App {
                 ))
             }
         }
+    }
+
+    /// Whether a sketch is under way: the drawing plane is a plane block.
+    pub(crate) fn sketching(&self) -> bool {
+        matches!(self.drawing_plane, DrawingPlane::Node(_))
+    }
+
+    /// The drawing plane's own axes in world, when there is one: X and Y across it, Z its normal.
+    pub(crate) fn drawing_rotation(&self) -> Option<Rotation3<f64>> {
+        let frame = self.drawing_frame()?;
+        let numbers = |r: &ParamRef| Some(self.resolve(*r));
+        fieldform_field::resolve_frame(&self.doc, self.part_graph(), &frame, &numbers).ok().map(|(_, rotation)| rotation)
+    }
+
+    /// Leaves a sketch the way a ViewCube face does: back to drawing in the world, the view left
+    /// exactly as it is. The projection the sketch began from is not given back, since the face
+    /// was clicked to look from there and a face click never changes the projection.
+    pub(crate) fn leave_sketch_keeping_view(&mut self) {
+        self.sketch_projection_before = None;
+        self.use_drawing_plane(DrawingPlane::None, Swing::No);
+    }
+
+    /// `sketch`, Sketch on plane: on the plane named by `target=`, or the selected one. On the
+    /// plane already being sketched on it turns the view square to it again — the plane has
+    /// usually moved since (the owner, 2026-10-31) — and `sketch off`, or no plane while a
+    /// sketch is under way, stops.
+    pub(crate) fn sketch_on_command(&mut self, args: &Args) {
+        if console_keys::flag(args, "off") {
+            if self.sketching() {
+                self.stop_sketching();
+            } else {
+                self.say("Not sketching on a plane");
+            }
+            return;
+        }
+        let lookup = |t: &str| self.lookup(t);
+        let named = match console_keys::operand_named("sketch", "target", args, &lookup) {
+            Ok(named) => named.and_then(|o| o.source()),
+            Err(why) => {
+                self.warn(why);
+                return;
+            }
+        };
+        let plane = named
+            .filter(|id| matches!(self.part_graph().node(*id), Some(Node::Plane { .. })))
+            .or_else(|| self.selected_plane().map(|(id, _, _)| id));
+        match plane {
+            Some(plane) => self.start_sketching(plane),
+            None if self.sketching() => self.stop_sketching(),
+            None => self.warn("Sketch on needs a plane — select one, or name it with `target=`"),
+        }
+    }
+
+    /// The plane becomes the drawing plane, the view turns square to it, and the projection goes
+    /// orthographic — the three together are what "sketch on this" means, and the grid and its
+    /// snap come with the third.
+    fn start_sketching(&mut self, plane: NodeId) {
+        // Remembered once per sketch, so moving straight from one plane to another gives back the
+        // view the first began from, not the orthographic one it made.
+        if self.sketch_projection_before.is_none() {
+            self.sketch_projection_before = Some(self.camera.projection);
+        }
+        self.camera.projection = crate::display_quality::Projection::Orthographic;
+        self.use_drawing_plane(DrawingPlane::Node(plane), Swing::Yes);
+        self.say("Sketching: orthographic and square to the plane until Esc or `sketch off`; Sketch on again turns square to it again");
+    }
+
+    /// Back to drawing in the world, with the projection the sketch began from.
+    pub(crate) fn stop_sketching(&mut self) {
+        if let Some(was) = self.sketch_projection_before.take() {
+            self.camera.projection = was;
+        }
+        self.use_drawing_plane(DrawingPlane::None, Swing::No);
+    }
+
+    /// Esc with nothing begun since the sketch: stops it, and answers whether it did. A curve
+    /// being placed, a drag or an armed tool is the more recent thing, and Esc is theirs first.
+    pub(crate) fn escape_stops_sketching(&mut self) -> bool {
+        let nothing_nearer = self.pending_curve.is_none()
+            && self.gizmo_drag.is_none()
+            && self.point_drag.is_none()
+            && self.cage_tool.is_none()
+            && self.session.is_none()
+            && self.slide.is_none();
+        if !self.sketching() || !nothing_nearer {
+            return false;
+        }
+        self.stop_sketching();
+        true
     }
 
     /// Which way a frame points, resolved for the panel's own arithmetic.
@@ -1676,7 +1782,7 @@ pub(crate) fn as_literals(p: Point3<f64>) -> [ParamRef; 3] {
         let before = length;
         ui.horizontal(|ui| {
             row_label(ui, "Length:");
-            ui.add(egui::DragValue::new(&mut length).speed(0.5).suffix(" mm"))
+            ui.add(egui::DragValue::new(&mut length).speed(0.5).max_decimals(4).suffix(" mm"))
                 .on_hover_text("Between the two ends — moves the far one along the axis");
         });
         if (length - before).abs() < 1e-12 {

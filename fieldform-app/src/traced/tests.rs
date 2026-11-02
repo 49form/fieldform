@@ -191,6 +191,19 @@
         }
     }
 
+    /// **A settled mesh is baked fine and everything else as it was.** The control is the cage and
+    /// the draft: a cage stays at the number it is given, since it costs a bake per settle and
+    /// looks right coarse, and a drag stays at the draft's, since it has a frame to do it in.
+    #[test]
+    fn only_a_settled_mesh_is_baked_finer_than_it_was_asked() {
+        let mesh = fieldform_gpu::BakedLeaf::Mesh(fieldform_scene::MeshId::new());
+        let cage = fieldform_gpu::BakedLeaf::Cage(fieldform_scene::CageId::from_raw(7));
+        assert_eq!(crate::traced::rebuild::wanted_cells(mesh, Quality::Final, 64), MESH_BAKE_RESOLUTION);
+        assert_eq!(crate::traced::rebuild::wanted_cells(mesh, Quality::Final, 512), 512, "a finer ask stands");
+        assert_eq!(crate::traced::rebuild::wanted_cells(mesh, Quality::Draft, 32), 32);
+        assert_eq!(crate::traced::rebuild::wanted_cells(cage, Quality::Final, 64), 64);
+    }
+
     /// **A cage's band is filed under the level its field was built at.** The level is read off
     /// the scene's tolerance, which nothing else in the key describes: Cage detail and the size of
     /// whatever else is on screen move it while the cage, its box and its band stay put. At the
@@ -1264,4 +1277,51 @@
         assert_eq!(costs_to_keep(None, a), None);
         // One character is a different program.
         assert_eq!(costs_to_keep(Some(learned(a)), &format!("{a} ")), None);
+    }
+
+    /// **What a rebuild asks about a shader is what the renderer holds, and a shape drawn earlier
+    /// comes back without the driver.**
+    ///
+    /// `Renderer::source` is the text after the one edit the driver's copy takes, and the rebuild
+    /// compared it with the generator's, which is never the same text: every dragged number went
+    /// to the compile worker for a shader already in hand, on every document, and nothing failed.
+    #[test]
+    fn a_rebuild_asks_about_the_text_the_renderer_holds_and_the_shelf_gives_a_shape_back() {
+        use fieldform_scene::{Graph, Node, ParamRef, Place};
+
+        let Some((gpus, _)) = devices_or_skip(1, "pipelines kept across a change of shape") else {
+            return;
+        };
+        let gpu = &gpus[0];
+        let doc = fieldform_scene::Document::with_cage(fieldform_cage::Cage::cube_of(10.0));
+        let one = |radius: f64, extra: bool| {
+            let mut graph = Graph::empty();
+            graph.add(Node::Sphere { centre: Place::origin(), radius: ParamRef::Literal(radius) });
+            if extra {
+                graph.add(Node::Sphere { centre: Place::origin(), radius: ParamRef::Literal(1.0) });
+            }
+            fieldform_gpu::generate(&doc, &graph).expect("two spheres generate")
+        };
+        let (ball, pair) = (one(5.0, false), one(5.0, true));
+        assert_ne!(ball.source, pair.source, "two bodies are a different shader from one");
+
+        let shelf = fieldform_gpu::PipelineShelf::default();
+        let build = |program: &fieldform_gpu::ShaderProgram| {
+            fieldform_gpu::Renderer::with_shelf(gpu.device.clone(), gpu.queue.clone(), program, &[], &[], &[], &shelf)
+                .expect("the driver compiles a sphere")
+        };
+        let wanted = fieldform_gpu::compiled_source(&ball, &[]);
+        assert!(!shelf.holds(&gpu.device, &wanted));
+        let first = build(&ball);
+        assert_eq!(first.source(), wanted, "the text a rebuild asks about is the one held");
+        assert!(first.build_cost().pipelines_ms > 0.0, "the first of a shape is compiled");
+        assert!(shelf.holds(&gpu.device, &wanted));
+
+        // A number changed: the same text, so the same shader, whatever the slot now reads.
+        assert_eq!(fieldform_gpu::compiled_source(&one(9.0, false), &[]), wanted);
+
+        build(&pair);
+        let again = build(&ball);
+        assert_eq!(again.build_cost().pipelines_ms, 0.0, "going back asks the driver for nothing");
+        assert_eq!(again.source(), wanted);
     }

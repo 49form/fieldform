@@ -339,6 +339,21 @@ pub fn keys_of(node: &Node, n: &Names) -> Result<Written, String> {
             keys.push(("target", operand(input, n)?));
             keys.push(("thickness", value(thickness, n)?));
         }
+        // Always by `fill=`: the lattice has its own line ahead of this one, with its own name,
+        // which is what a reader needs to find it by. `cell=` on the verb is a shorthand for
+        // typing, and there is nothing it says that the two lines do not.
+        Node::Infill { input, wall, fill, join } => {
+            keys.push(("target", operand(input, n)?));
+            keys.push(("wall", value(wall, n)?));
+            keys.push(("fill", operand(fill, n)?));
+            if *join != Fillet::hard() {
+                keys.push(("join", value(&join.radius, n)?));
+                keys.push(("g", g_word(join.continuity).to_string()));
+                if let Some(second) = &join.second {
+                    keys.push(("second", value(second, n)?));
+                }
+            }
+        }
         // The two numbers of the size pair under their own names, which is what says the pair.
         Node::Coil { frame: f, diameter, size, section, hand } => {
             let (origin, axis) = frame(f, n)?;
@@ -925,17 +940,23 @@ pub fn new_blocks(before: &Graph, doc: &Document, graph: &Graph) -> Vec<NodeId> 
 }
 
 /// A curve as the line that makes it: its points, its degree and its weights, then its name.
-/// `None` for a curve of more than one span, which no line can make yet.
-fn curve_line(curve: &fieldform_scene::Curve) -> Option<String> {
+/// `None` for a curve of more than one span, which no line can make yet. A sketch says the plane
+/// it lies on and its points across that plane, which is the question rather than the answer.
+fn curve_line(doc: &Document, curve: &fieldform_scene::Curve) -> Option<String> {
     if !curve.is_single_span() {
         return None;
     }
-    let points: Vec<String> = curve
-        .control_points()
-        .iter()
-        .map(|p| format!("{},{},{}", number(p.x), number(p.y), number(p.z)))
-        .collect();
-    let mut line = format!("curve p={} degree={}", points.join(";"), curve.degree());
+    let sketch = doc.sketches.get(&curve.id).filter(|s| s.live && s.local.len() == curve.control_points().len());
+    let on = sketch.and_then(|s| Names { doc }.block(s.plane).ok()).map(|name| format!("on={name} ")).unwrap_or_default();
+    let points: Vec<String> = match sketch.filter(|_| !on.is_empty()) {
+        Some(s) => s.local.iter().map(|l| format!("{},{}", number(l[0]), number(l[1]))).collect(),
+        None => curve
+            .control_points()
+            .iter()
+            .map(|p| format!("{},{},{}", number(p.x), number(p.y), number(p.z)))
+            .collect(),
+    };
+    let mut line = format!("curve {on}p={} degree={}", points.join(";"), curve.degree());
     if curve.weights().iter().any(|w| *w != 1.0) {
         let w: Vec<String> = curve.weights().iter().map(|w| number(*w)).collect();
         line.push_str(&format!(" w={}", w.join(",")));
@@ -997,7 +1018,7 @@ pub fn lines(before: &Snapshot, doc: &Document, graph: &Graph, fresh: &[NodeId])
     let mut new_curves: Vec<&fieldform_scene::Curve> =
         doc.curves.values().filter(|c| !before.curves.contains_key(&c.id)).collect();
     new_curves.sort_by_key(|c| (doc.curves_created.get(&c.id).copied().unwrap_or(0), c.id.raw()));
-    out.extend(new_curves.into_iter().filter_map(curve_line));
+    out.extend(new_curves.into_iter().filter_map(|c| curve_line(doc, c)));
     let mut moved: Vec<&fieldform_scene::Curve> = doc
         .curves
         .values()
@@ -1222,6 +1243,12 @@ mod tests {
             Node::Morph { .. } => Node::Morph { a: empty, b: empty, t: zero },
             Node::Offset { .. } => Node::Offset { input: empty, distance: zero },
             Node::Shell { .. } => Node::Shell { input: empty, thickness: ParamRef::Literal(0.1) },
+            Node::Infill { .. } => Node::Infill {
+                input: empty,
+                wall: ParamRef::Literal(0.1),
+                fill: empty,
+                join: Fillet::hard(),
+            },
             Node::Twist { .. } => Node::Twist { input: empty, degrees_per_mm: zero, frame: Frame::default() },
             Node::Mirror { .. } => Node::Mirror { input: empty, frame: Frame::default(), join: false },
             Node::Scale { .. } => Node::Scale { input: empty, factors: [one; 3], frame: Frame::default() },

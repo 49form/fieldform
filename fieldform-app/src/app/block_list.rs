@@ -67,11 +67,12 @@ impl App {
         let all_hidden = members.iter().all(|id| self.hidden_curves.contains(id));
         let selected = self.selected_block == Some(outputs::BlockRef::Profile(key));
 
-        let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
             ui.ctx(),
             ui.make_persistent_id(("profile", key.raw())),
             false,
         );
+        self.open_for_reveal(&mut state, ui.ctx(), RowKey::Profile(key));
         state
             .show_header(ui, |ui| {
                 // **A grip, like a curve's, and keyed the same way.** A profile row *is* a
@@ -595,7 +596,7 @@ impl App {
                     // A variable has no unit and no range anybody declared, so it is the field
                     // that most needs a rate taken from what it reads.
                     let rate = scrub_rate(ui, value, 0.25);
-                    if ui.add(egui::DragValue::new(&mut value).speed(rate)).changed() {
+                    if ui.add(egui::DragValue::new(&mut value).speed(rate).max_decimals(4)).changed() {
                         typed = Some(value);
                     }
                     // `=`, as a spreadsheet starts a formula: compute this instead of typing it.
@@ -1168,6 +1169,7 @@ impl App {
                 };
                 if row.clicked() || row.secondary_clicked() {
                     self.select_curve(id);
+                    self.chose_from_list(RowKey::Curve(id));
                 }
                 row.context_menu(|ui| self.row_menu(ui, Row::Curve { id, readers }));
             })
@@ -1236,6 +1238,10 @@ impl App {
                 // raising the degree is exact. Raising adds control points without moving the
                 // curve at all, so going to 9 to get finer control costs nothing; lowering
                 // discards shape it cannot hold, keeps the two ends, and says so.
+                // Which plane it lies on and follows, if any: a 2D sketch, or the offer to be one.
+                if surface_axis.is_none() {
+                    self.sketch_rows(ui, id);
+                }
                 let single_span = surface_axis.is_none()
                     && self.doc.curve(id).is_some_and(|c| c.is_single_span());
                 if single_span {
@@ -1257,34 +1263,8 @@ impl App {
                             );
                         }
                     });
-                    if chosen != degree
-                        && let Some(before) = self.doc.curve(id).cloned()
-                    {
-                        match before.with_degree(chosen) {
-                            Ok(after) => {
-                                let raised = chosen > degree;
-                                let cmd = Box::new(SetCurve::new(id, Some(before), Some(after)));
-                                // Not a graph edit, so it ends any gesture a value drag had
-                                // open rather than becoming the entry that drag replaces next.
-                                self.gesture = None;
-                                if let Err(e) = self.stack.execute(&mut self.doc, cmd) {
-                                    self.warn(e.to_string());
-                                } else {
-                                    // Indices outlive nothing here: the count changed, so what
-                                    // was picked names different points now.
-                                    self.clear_point_selection();
-                                    self.say(if raised {
-                                        format!("Degree {chosen} — same shape, more points")
-                                    } else {
-                                        format!("Degree {chosen} — shape approximated")
-                                    });
-                                }
-                                self.mark_changed();
-                                self.rebuild_curve_display();
-                                self.rebuild_render_resources();
-                            }
-                            Err(e) => self.warn(e.to_string()),
-                        }
+                    if chosen != degree {
+                        self.change_curve_degree(id, chosen);
                     }
                 }
 
@@ -1719,6 +1699,7 @@ impl App {
             state.set_open(true);
             state.store(ui.ctx());
         }
+        self.open_for_reveal(&mut state, ui.ctx(), RowKey::Node(id));
         // A list collects only while its block is open. Closing the block is the natural end of
         // the act, and a viewport that keeps adding to a list nobody can see is a trap.
         if self.collecting == Some(id) && !state.is_open() {
@@ -1794,6 +1775,7 @@ impl App {
                 // one row and choosing Delete would delete whichever row was selected before.
                 if row.clicked() || row.secondary_clicked() {
                     self.select_body(Some(id));
+                    self.chose_from_list(RowKey::Node(id));
                 }
                 row.context_menu(|ui| self.row_menu(ui, Row::Node { id, is_body }));
             })
@@ -1852,6 +1834,102 @@ impl App {
                 let _ = references;
             });
         let _ = header_response;
+    }
+
+    /// Starts the list on its way to a selection it has not seen, once per selection.
+    ///
+    /// **Read off the selection rather than called from each place that sets one**, of which
+    /// there are dozens: the trace, a plane's outline, a curve under the pointer, the console, a
+    /// block just made. Asking "has it changed" here means a new way of selecting something is
+    /// followed without anyone remembering to.
+    pub(crate) fn follow_selection(&mut self, ctx: &egui::Context) {
+        let now = self
+            .selected_body
+            .map(RowKey::Node)
+            .or(self.selected_curve.map(RowKey::Curve));
+        if now != self.followed {
+            self.followed = now;
+            self.reveal = now.map(|target| {
+                let open = self.rows_above(target);
+                let left = REVEAL_SETTLE_FRAMES + REVEAL_FRAMES_PER_ROW * open.len() as u32;
+                Reveal { target, open, left, reached: false }
+            });
+        }
+        if let Some(reveal) = self.reveal.as_mut() {
+            reveal.left = reveal.left.saturating_sub(1);
+            if reveal.left == 0 {
+                self.reveal = None;
+            } else {
+                // Nothing else may be asking for a frame, and a row is sliding open.
+                ctx.request_repaint();
+            }
+        }
+    }
+
+    /// A row in the list was clicked: it is already where the pointer is, so there is nothing to
+    /// go to, and scrolling would move the row out from under the hand that chose it.
+    pub(crate) fn chose_from_list(&mut self, key: RowKey) {
+        self.followed = Some(key);
+        self.reveal = None;
+    }
+
+    /// Opens `row`, if the list is on its way through it.
+    pub(crate) fn open_for_reveal(
+        &self,
+        state: &mut egui::collapsing_header::CollapsingState,
+        ctx: &egui::Context,
+        row: RowKey,
+    ) {
+        if self.reveal.as_ref().is_some_and(|r| r.open.contains(&row)) {
+            state.set_open(true);
+            state.store(ctx);
+        }
+    }
+
+    /// Every row that has to be open for `target`'s to be drawn: what holds it, what holds that,
+    /// the profile a curve is folded into and the import a block arrived in.
+    ///
+    /// **Every owner, not a path to one.** A shared block has a row in each block that reads it,
+    /// and which of them somebody wanted is not a question the selection answers.
+    fn rows_above(&self, target: RowKey) -> std::collections::HashSet<RowKey> {
+        let list = self.list_readings();
+        let nesting = &list.nesting;
+        let mut open = std::collections::HashSet::new();
+        let mut waiting: Vec<NodeId> = Vec::new();
+        let mut curves: Vec<CurveId> = Vec::new();
+        match target {
+            RowKey::Node(id) => waiting.extend_from_slice(nesting.owners_of(id)),
+            RowKey::Curve(id) => {
+                curves.push(id);
+                // A loop is one row, so what reads any of its curves holds all of them.
+                if let Some(key) = self.profiles.key_of(id) {
+                    open.insert(RowKey::Profile(key));
+                    curves.extend(self.profiles.members(key).unwrap_or_default().iter().copied());
+                }
+            }
+            _ => {}
+        }
+        for curve in &curves {
+            waiting.extend_from_slice(nesting.curve_owners_of(*curve));
+        }
+        while let Some(node) = waiting.pop() {
+            if open.insert(RowKey::Node(node)) {
+                waiting.extend_from_slice(nesting.owners_of(node));
+            }
+        }
+        // The import a row is folded into, for the target and for everything above it.
+        let nodes: Vec<NodeId> = open
+            .iter()
+            .chain([&target])
+            .filter_map(|row| if let RowKey::Node(id) = row { Some(*id) } else { None })
+            .collect();
+        for (source, record) in &self.doc.sources {
+            let holds_curve = curves.iter().any(|c| record.curves.contains(c));
+            if holds_curve || nodes.iter().any(|id| self.body_source(*id) == Some(*source)) {
+                open.insert(RowKey::Import(*source));
+            }
+        }
+        open
     }
 
     /// Draws one row of the block list, and whatever is nested inside it.
@@ -2197,6 +2275,13 @@ impl App {
             egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
             egui::Sense::click(),
         );
+        if let Some(reveal) = self.reveal.as_mut().filter(|r| r.target == key) {
+            if !reveal.reached {
+                reveal.reached = true;
+                reveal.left = reveal.left.min(REVEAL_SETTLE_FRAMES);
+            }
+            row.scroll_to_me(Some(egui::Align::Center));
+        }
         if ui.is_rect_visible(rect) {
             let visuals = ui.style().interact_selectable(&row, selected);
             ui.painter().rect(

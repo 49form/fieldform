@@ -128,29 +128,43 @@ pub struct Handles {
     /// rather than at the drag that caused it. Cage and curve selections keep them: those move
     /// vertices, they do not wrap a field.
     pub per_axis_scale: bool,
+    /// Only the moves that keep to the frame's XY plane: its two in-plane axes and that plane,
+    /// the arc about its normal, and the uniform scale. For a sketch, whose points stay on the
+    /// plane anyway, so a handle out of it would be one that did nothing when dragged (the owner,
+    /// 2026-10-31: "so you don't accidentally grab a plane that moves it in three-dimensional
+    /// space").
+    pub planar: bool,
 }
 
 impl Handles {
     /// A whole body: everything except per-axis scale.
     pub fn body() -> Self {
-        Self { rotate_and_scale: true, per_axis_scale: false }
+        Self { rotate_and_scale: true, per_axis_scale: false, planar: false }
     }
 
     /// A cage or curve selection with extent — an edge, a face, several points.
     pub fn extended() -> Self {
-        Self { rotate_and_scale: true, per_axis_scale: true }
+        Self { rotate_and_scale: true, per_axis_scale: true, planar: false }
     }
 
     /// A single vertex or control point: translate only.
     pub fn single_point() -> Self {
-        Self { rotate_and_scale: false, per_axis_scale: false }
+        Self { rotate_and_scale: false, per_axis_scale: false, planar: false }
+    }
+
+    /// A sketch's selection, kept to its plane: a single point moves in it; several turn about
+    /// its normal and scale as a whole too.
+    pub fn sketch(extent: bool) -> Self {
+        Self { rotate_and_scale: extent, per_axis_scale: false, planar: true }
     }
 
     /// Every handle on offer, nearest-to-the-pivot last so painting order reads correctly.
     pub fn all(self) -> Vec<Handle> {
         let mut out = Vec::with_capacity(13);
+        let in_plane = |axis: &usize| !self.planar || *axis == 2;
+        let along_plane = |axis: &usize| !self.planar || *axis != 2;
         if self.rotate_and_scale {
-            out.extend((0..3).map(Handle::Arc));
+            out.extend((0..3).filter(in_plane).map(Handle::Arc));
             if self.per_axis_scale {
                 out.extend((0..3).map(Handle::ScaleAxis));
             }
@@ -160,8 +174,8 @@ impl Handles {
             // cubes to reach for instead.
             out.push(Handle::ScaleUniform);
         }
-        out.extend((0..3).map(Handle::Axis));
-        out.extend((0..3).map(Handle::Plane));
+        out.extend((0..3).filter(along_plane).map(Handle::Axis));
+        out.extend((0..3).filter(in_plane).map(Handle::Plane));
         out
     }
 }
@@ -430,6 +444,17 @@ impl Drag {
             }
             Handle::ScaleUniform => unreachable!("handled above, before the plane cast"),
         })
+    }
+
+    /// The axis a translating handle is tied to as the frame had it at mouse-down: the line an
+    /// `Axis` handle slides along, the normal of the plane a `Plane` handle slides in. `None`
+    /// for everything that does not translate in the frame, which a snap must leave alone.
+    pub fn translate_axis(&self) -> Option<(Vector3<f64>, bool)> {
+        match self.handle {
+            Handle::Axis(i) => Some((self.frame.axis(i), true)),
+            Handle::Plane(i) => Some((self.frame.axis(i), false)),
+            _ => None,
+        }
     }
 
     /// What to show next to the gizmo while this drag is live.

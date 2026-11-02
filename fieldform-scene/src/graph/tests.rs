@@ -3598,6 +3598,61 @@
     ///
     /// Every slot naming it, which is what the row the gesture is made on stands for: a holder
     /// reading one block twice has one row, so one drag off it is the holder letting go.
+    /// **T8.** Each shape of join, and an owned slot and an empty one, come back as they went.
+    #[test]
+    fn an_infill_survives_the_file() {
+        let (body, fill) = (NodeId::new(), NodeId::new());
+        let joins = [
+            Fillet::hard(),
+            Fillet::of(ParamRef::Literal(0.8)),
+            Fillet { radius: ParamRef::Literal(0.8), continuity: Continuity::G2, second: None },
+            Fillet {
+                radius: ParamRef::Literal(0.8),
+                continuity: Continuity::Chamfer,
+                second: Some(ParamRef::Literal(0.4)),
+            },
+        ];
+        for join in joins {
+            for filling in [Operand::filled(fill), Operand::empty()] {
+                let node = Node::Infill {
+                    input: body.into(),
+                    wall: ParamRef::Literal(2.0),
+                    fill: filling,
+                    join,
+                };
+                let json = serde_json::to_value(&node).expect("writes");
+                let back: Node = serde_json::from_value(json).expect("reads");
+                assert_eq!(back, node);
+            }
+        }
+    }
+
+    /// A hard join is not written, so a block nobody rounded reads as what it is.
+    #[test]
+    fn a_hard_join_is_left_out_of_the_file() {
+        let node = Node::Infill {
+            input: NodeId::new().into(),
+            wall: ParamRef::Literal(2.0),
+            fill: NodeId::new().into(),
+            join: Fillet::hard(),
+        };
+        let json = serde_json::to_value(&node).expect("writes");
+        assert!(json.get("join").is_none(), "{json}");
+    }
+
+    /// **The forward half of T8**, the path an older build takes with a newer block: a field this
+    /// build does not know is kept, and the block refused rather than half read.
+    #[test]
+    fn an_infill_with_a_field_this_build_has_not_heard_of_is_kept() {
+        let json = serde_json::json!({
+            "kind": "infill",
+            "wall": { "literal": 2.0 },
+            "from_a_newer_build": 1,
+        });
+        let node: Node = serde_json::from_value(json).expect("kept rather than refused");
+        assert!(matches!(node, Node::Unknown(_)), "read as {node:?}");
+    }
+
     #[test]
     fn a_holder_told_to_stop_reading_a_block_empties_every_slot_that_named_it() {
         use crate::{BooleanOp, Graph, Node, ParamRef, Place};

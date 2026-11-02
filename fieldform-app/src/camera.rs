@@ -556,6 +556,23 @@ impl OrbitCamera {
         self.dolly = None;
     }
 
+    /// Begins turning the view about the line of sight by `degrees`, keeping what is looked at
+    /// and from where: the ViewCube's quarter-turn arrows, for orienting a sketch the way it
+    /// reads. Not through `up_keeping_roll`, whose business is to *keep* a roll across a change
+    /// of direction — this is the roll being changed, and the up asked for is the up meant.
+    pub(crate) fn begin_roll(&mut self, degrees: f32) {
+        let Some(direction) = (self.eye - self.target).try_normalize(1e-6) else { return };
+        let axis = nalgebra::Unit::new_normalize(direction);
+        let up = UnitQuaternion::from_axis_angle(&axis, degrees.to_radians()) * self.up;
+        self.snap = Some(SnapAnimation {
+            from: self.orientation(),
+            to: UnitQuaternion::face_towards(&direction, &up),
+            elapsed: 0.0,
+        });
+        self.tumble = None;
+        self.dolly = None;
+    }
+
     /// Advances a snap by one frame. Returns whether one is still running, so the caller knows
     /// to ask for another frame.
     pub(crate) fn tick_snap(&mut self, dt: f32) -> bool {

@@ -4165,9 +4165,9 @@
         let ring = graph.add(pattern(sphere.into()));
         record_graph_edit_with(&mut stack, &mut doc, &mut gesture, &mut edits, part, graph)
             .expect("the pattern");
-        // As `apply_pattern` leaves it: drawn beside the pattern. Written straight in, since what
-        // the pattern's own entry does with the flag is held by
-        // `a_pattern_source_still_draws_after_undo_and_redo`.
+        // Its eye turned on: drawn beside the pattern. Written straight in, since what this test
+        // is about is the pattern going, and the eye's own entry is held by
+        // `a_mirror_source_still_draws_after_undo_and_redo`.
         doc.node_meta.entry(sphere).or_default().shown = true;
         assert_eq!(drawn(&doc), sorted(vec![sphere, other, ring]), "the sphere beside its pattern");
 
@@ -4367,42 +4367,32 @@
         }
     }
 
-    /// **A pattern's source still draws after the pattern is undone and redone**
-    /// (`block-ownership-spec.md` §7.3, test 13), and a mirror's the same.
+    /// **A mirror's source still draws after the mirror is undone and redone**
+    /// (`block-ownership-spec.md` §7.3, test 13).
     ///
-    /// Each consumes the body it is made from and turns that body's eye on, since it was on screen
-    /// a moment before. The graph edit and the eye were two entries, so Ctrl+Z took two presses to
-    /// take the pattern back, and the one Ctrl+Y after them brought the pattern back with its
-    /// source no longer drawn: the eye was the other entry, and nothing had redone it. As one
-    /// entry, the eye after the edit, a redo replays both in that order.
+    /// It consumes the body it is made from and turns that body's eye on, since it was on screen a
+    /// moment before. The graph edit and the eye were two entries, so Ctrl+Z took two presses to
+    /// take the mirror back, and the one Ctrl+Y after them brought the mirror back with its source
+    /// no longer drawn: the eye was the other entry, and nothing had redone it. As one entry, the
+    /// eye after the edit, a redo replays both in that order.
     ///
-    /// And a drag straight after is an entry of its own. The pattern opens no gesture, so changing
-    /// a number inside the window does not fold the pattern's entry into the drag's, which would
+    /// And a drag straight after is an entry of its own. The mirror opens no gesture, so changing
+    /// a number inside the window does not fold the mirror's entry into the drag's, which would
     /// take the eye off the history while the document kept it drawn. Held before any undo, since
-    /// an undo ends every gesture and would hide one the pattern had opened.
+    /// an undo ends every gesture and would hide one the mirror had opened.
     ///
     /// Through the functions `set_part_graph_with` and Ctrl+Z run, and the rule the viewport draws
     /// by, since an `App` needs a window and a device.
     #[test]
-    fn a_pattern_source_still_draws_after_undo_and_redo() {
+    fn a_mirror_source_still_draws_after_undo_and_redo() {
         use super::{
             drawn_graph, eye_command, is_visible_among, record_graph_edit_then,
             record_graph_edit_with, shown_ingredients_in, step_history, ParameterEdits,
         };
         use fieldform_ops::{Command, CommandStack, Document};
-        use fieldform_scene::{
-            Axis, Fillet, Frame, Graph, Node, NodeId, ParamRef, PatternKind, Place,
-        };
+        use fieldform_scene::{Axis, Frame, Graph, Node, NodeId, ParamRef, Place};
 
         let lit = ParamRef::Literal;
-        let pattern = |input: NodeId| Node::Pattern {
-            options: Default::default(),
-            input: input.into(),
-            count: lit(4.0),
-            kind: PatternKind::Radial { frame: Frame::at_along(Axis::Z, [lit(0.0); 3]) },
-            join: false,
-            fillet: Fillet::hard(),
-        };
         let mirror = |input: NodeId| Node::Mirror {
             input: input.into(),
             frame: Frame::at_along(Axis::X, [lit(0.0); 3]),
@@ -4412,8 +4402,7 @@
             ids.sort();
             ids
         };
-        let consumers: [(&str, &dyn Fn(NodeId) -> Node); 2] =
-            [("pattern", &pattern), ("mirror", &mirror)];
+        let consumers: [(&str, &dyn Fn(NodeId) -> Node); 1] = [("mirror", &mirror)];
         for (what, consume) in consumers {
             let mut doc = Document::with_cage(fieldform_cage::Cage::cube_of(10.0));
             let part = *doc.parts.keys().next().expect("with_cage makes one part");
@@ -4439,8 +4428,8 @@
             let mut gesture = None;
             let mut edits = ParameterEdits::default();
 
-            // As `apply_pattern` and `apply_mirror` issue it: the eye asked of the graph the edit
-            // writes, where the ball is consumed.
+            // As `apply_mirror` issues it: the eye asked of the graph the edit writes, where the
+            // ball is consumed.
             let made = graph.add(consume(ball));
             let keep: Vec<Box<dyn Command>> = vec![Box::new(eye_command(&graph, ball, true))];
             record_graph_edit_then(

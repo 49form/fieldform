@@ -556,12 +556,71 @@
         });
         assert_eq!(graph.roots(), vec![lattice], "the plane is an operand, not a body");
 
-        let lowered = only_the_same_bodies(&graph, expand_shells(&expand_frames(&doc, &graph)));
+        let lowered =
+            only_the_same_bodies(&graph, expand_shells(&doc, &expand_frames(&doc, &graph)));
         assert!(
             !lowered.roots().contains(&plane),
             "the lowering left the plane as a body, which draws it as a solid",
         );
         assert_eq!(lowered.roots(), graph.roots(), "and the bodies are the bodies they were");
+    }
+
+    /// **A shell's lowering is the shell, whichever way its thickness is written.** A named
+    /// thickness used to reach the cavity's offset unnegated, so the shader grew the body by the
+    /// wall, subtracted that from the body, and had nothing left to draw, while the CPU field read
+    /// the right volume. Nothing on the CPU side could notice, which is why this compares the
+    /// lowered graph with the block it came from.
+    #[test]
+    fn a_shell_named_by_a_parameter_lowers_to_the_same_wall() {
+        use fieldform_field::ScalarField;
+        let mut doc = fieldform_scene::Document::new();
+        let wall = doc.add_parameter("wall", 2.0);
+        let mut graph = Graph::empty();
+        let cube = graph.add(Node::Cuboid {
+            edge: Default::default(),
+            centre: fieldform_scene::Place::At([ParamRef::Literal(0.0); 3]),
+            size: [ParamRef::Literal(30.0); 3],
+            turn: fieldform_scene::no_turn(),
+        });
+        graph.add(Node::Shell { input: cube.into(), thickness: ParamRef::Named(wall) });
+
+        let lowered = expand_shells(&doc, &graph);
+        let shell = fieldform_field::GraphField::compile_graph(&doc, &graph, 1e-3).unwrap();
+        let wall_of_it = fieldform_field::GraphField::compile_graph(&doc, &lowered, 1e-3).unwrap();
+        // Across the wall from outside to the middle: out, in the wall, in the cavity.
+        for x in [16.0, 15.5, 14.0, 13.5, 12.0, 0.0] {
+            let p = nalgebra::Point3::new(x, 0.0, 0.0);
+            assert_eq!(
+                shell.distance(p) < 0.0,
+                wall_of_it.distance(p) < 0.0,
+                "the lowering disagrees with the block at x = {x}",
+            );
+        }
+        assert!(wall_of_it.distance(nalgebra::Point3::new(14.0, 0.0, 0.0)) < 0.0, "there is a wall");
+    }
+
+    /// **Resolving a named thickness costs a buffer write, not a compile.** The number moved out
+    /// of the parameter's own slot, and the promise that slot kept was that the text does not
+    /// change with a value. It does not: the same program, with a different number in it.
+    #[test]
+    fn a_new_value_for_a_named_shell_keeps_the_program() {
+        let mut doc = fieldform_scene::Document::new();
+        let wall = doc.add_parameter("wall", 2.0);
+        let mut graph = Graph::empty();
+        let cube = graph.add(Node::Cuboid {
+            edge: Default::default(),
+            centre: fieldform_scene::Place::At([ParamRef::Literal(0.0); 3]),
+            size: [ParamRef::Literal(30.0); 3],
+            turn: fieldform_scene::no_turn(),
+        });
+        graph.add(Node::Shell { input: cube.into(), thickness: ParamRef::Named(wall) });
+
+        let before = generate(&doc, &graph).unwrap();
+        assert!(doc.set_parameter_literal(wall, 3.5));
+        let after = generate(&doc, &graph).unwrap();
+        assert_eq!(before.source, after.source, "a value must not change the text");
+        assert!(before.params.contains(&ParamRef::Literal(-2.0)), "{:?}", before.params);
+        assert!(after.params.contains(&ParamRef::Literal(-3.5)), "{:?}", after.params);
     }
 
     /// A lowering must describe the same solid it lowered.

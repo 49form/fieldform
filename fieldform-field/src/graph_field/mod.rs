@@ -35,6 +35,7 @@ mod compile;
 mod extent;
 mod helical_nodes;
 mod hole_node;
+mod infill;
 pub use hole_node::{drill_point_depth, hole_of, hole_section};
 pub use helical_nodes::{coil_of, helical_bound, helical_divisor, thread_major_and_pitch, thread_of};
 mod lipschitz;
@@ -58,6 +59,7 @@ pub use loft_sweep::{
     sweep_cap_tube, sweep_lean, sweep_offset, sweep_reads_true, sweep_stretch, sweep_tube,
     wall_bakes_under,
 };
+pub use infill::{InfillCavity, infill_cavity, with_infills_lowered};
 pub use pattern::{
     pattern_grid_anchor_in, pattern_origin_in, pattern_reach, pattern_reach_axes_in,
     pattern_reach_in,
@@ -559,6 +561,12 @@ fn demanded_of(document: &Document, graph: &Graph, node: NodeId, depth: usize) -
             fieldform_scene::Node::Offset { distance, .. } => above + resolve(distance).abs(),
             // A shell is two offsets, and the further of them sets the reach.
             fieldform_scene::Node::Shell { thickness, .. } => above + resolve(thickness).abs(),
+            // What the lowering reads: the join reaches into both, and the body through the
+            // wall's offset as well, which the fill has nothing to do with.
+            fieldform_scene::Node::Infill { input, wall, join, .. } => {
+                let through = if input.source() == Some(node) { resolve(wall).abs() } else { 0.0 };
+                above + through + lipschitz::fillet_reach(document, graph, join)
+            }
             // A similarity rescales distances, so a demand above it is a smaller demand here.
             fieldform_scene::Node::Transform { scale, .. } => {
                 let s = resolve(scale);
@@ -581,6 +589,9 @@ fn demanded_of(document: &Document, graph: &Graph, node: NodeId, depth: usize) -
 
 #[cfg(test)]
 mod shell_extent_tests;
+
+#[cfg(test)]
+mod infill_tests;
 
 #[cfg(test)]
 mod tests;

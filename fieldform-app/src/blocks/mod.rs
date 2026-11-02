@@ -10,6 +10,7 @@
 pub(crate) mod attract;
 pub(crate) mod boolean;
 pub(crate) mod extrude;
+pub(crate) mod infill;
 pub(crate) mod lattice;
 pub(crate) mod list;
 pub(crate) mod loft;

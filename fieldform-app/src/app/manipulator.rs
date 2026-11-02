@@ -39,14 +39,30 @@ impl App {
     /// Continues an in-progress move: projects the current cursor position onto the drag
     /// plane and translates every selected vertex by the resulting offset from its starting
     /// position.
-    pub(crate) fn continue_move(&mut self, aspect: f32, rect: egui::Rect, pos: egui::Pos2) {
+    pub(crate) fn continue_move(
+        &mut self,
+        aspect: f32,
+        rect: egui::Rect,
+        pos: egui::Pos2,
+        grid: bool,
+        ends: bool,
+    ) {
         let Some(state) = self.move_state.take() else {
             return;
         };
         let (origin, dir) = self.camera.pick_ray(aspect, pos, rect);
         if let Some(hit) = ray_plane_intersect(origin, dir, state.plane_point, state.plane_normal)
         {
-            let delta = (hit - state.click_offset) - state.plane_point;
+            let mut delta = (hit - state.click_offset) - state.plane_point;
+            // The selection's centroid is what lands on the grid, or on a curve's end, and the
+            // rest is carried by the same offset -- a selection is moved as a shape, not
+            // reshaped by the snap.
+            let anchor = state.plane_point.cast::<f64>();
+            if let Some(landed) =
+                self.snap_landing(aspect, rect, anchor + delta.cast::<f64>(), grid, ends, None)
+            {
+                delta = (landed - anchor).cast::<f32>();
+            }
             // The drag is measured in the part, where the cursor is; the cage stores its own
             // coordinates. Carrying the offset back through the placement is what keeps a
             // placed cage moving with the pointer rather than by some rotated fraction of it.
@@ -61,6 +77,67 @@ impl App {
             self.update_after_vertex_move(state.mesh, &moved);
         }
         self.move_state = Some(state);
+    }
+
+    /// Where `anchor` lands under the move's snap keys: **Ctrl** on the end of a curve within
+    /// reach on screen, **Shift** on the grid that is drawn. Ctrl wins when both are down and
+    /// something is in reach; otherwise the grid still gets its say. `None` is no snap -- no key
+    /// held, nothing in reach, or no grid because the view is not orthographic -- so the move
+    /// stays where the cursor put it. `moving` is a curve the move is carrying, which must not
+    /// snap to its own end.
+    pub(crate) fn snap_landing(
+        &self,
+        aspect: f32,
+        rect: egui::Rect,
+        anchor: Point3<f64>,
+        grid: bool,
+        ends: bool,
+        moving: Option<CurveId>,
+    ) -> Option<Point3<f64>> {
+        if ends
+            && let Some(at) = self.camera.project_to_screen(aspect, rect, anchor.cast::<f32>())
+            && let Some((_, end)) = self.endpoint_near(aspect, rect, at, moving)
+        {
+            return Some(end);
+        }
+        if grid {
+            return self.grid_snap(aspect, rect, anchor);
+        }
+        None
+    }
+
+    /// A manipulator translation with the snap keys applied, still on the handle's own
+    /// constraint: an arrow keeps to its line and a plane square to its plane, so a snap can
+    /// only choose *where along* the handle's freedom, never leave it. The pivot is what lands.
+    ///
+    /// An arrow that points out of the grid's plane (the view's own axis, in a square view) has
+    /// nothing to snap to on screen, so the grid leaves it alone rather than pulling it to zero.
+    fn snap_translation(
+        &self,
+        aspect: f32,
+        rect: egui::Rect,
+        drag: &gizmo::Drag,
+        pivot: Point3<f64>,
+        delta: Vector3<f64>,
+        grid: bool,
+        ends: bool,
+        moving: Option<CurveId>,
+    ) -> Vector3<f64> {
+        let Some((axis, is_line)) = drag.translate_axis() else { return delta };
+        let grid = grid
+            && self.drawing_grid(aspect, rect).is_some_and(|g| {
+                !is_line || (g.rotation * Vector3::z()).dot(&axis).abs() < 0.7
+            });
+        let Some(landed) = self.snap_landing(aspect, rect, pivot + delta, grid, ends, moving)
+        else {
+            return delta;
+        };
+        let want = landed - pivot;
+        if is_line {
+            axis * want.dot(&axis)
+        } else {
+            want - axis * want.dot(&axis)
+        }
     }
 
     /// Refreshes only what a vertex move actually changed.
@@ -243,6 +320,12 @@ impl App {
         // Control points come first when any are picked. Curves are drawn in every mode — a
         // subtracting curve is inside the solid it cuts, and hiding it would hide the thing
         // being aimed — so there is no mode where handles on one would sit over nothing.
+        // **While sketching, the handles are the plane's.** World-aligned axes over a sketch on a
+        // slanted face read wrong and offer moves out of the plane that the sketch would only
+        // project back; the plane's own X and Y, its normal's arc and the uniform scale are what
+        // a flat drawing can take (the owner, 2026-10-31).
+        let sketch_basis = if self.sketching() { self.drawing_rotation() } else { None };
+
         if !self.selected_points.is_empty() || !self.other_points.is_empty() {
             // Every picked point, on whichever curve it is.
             let picked: Vec<Point3<f64>> = self
@@ -256,15 +339,15 @@ impl App {
                 return Some(gizmo::Frame {
                     extrude: None,
                     pivot,
-                    basis: Rotation3::identity(),
+                    basis: sketch_basis.unwrap_or_else(Rotation3::identity),
                     reach: gizmo::Frame::reach_for(
                         self.camera.view_half_height(pivot.cast::<f32>()) as f64,
                     ),
                     // One point has no extent to turn or scale about; several do.
-                    handles: if picked.len() == 1 {
-                        gizmo::Handles::single_point()
-                    } else {
-                        gizmo::Handles::extended()
+                    handles: match (sketch_basis.is_some(), picked.len() == 1) {
+                        (true, single) => gizmo::Handles::sketch(!single),
+                        (false, true) => gizmo::Handles::single_point(),
+                        (false, false) => gizmo::Handles::extended(),
                     },
                 });
             }
@@ -295,16 +378,16 @@ impl App {
             return Some(gizmo::Frame {
                 extrude: None,
                 pivot,
-                basis: Rotation3::identity(),
+                basis: sketch_basis.unwrap_or_else(Rotation3::identity),
                 reach: gizmo::Frame::reach_for(
                     self.camera.view_half_height(pivot.cast::<f32>()) as f64,
                 ),
                 // A curve has extent unless it is a single point, so turning and scaling it
                 // both mean something.
-                handles: if points.len() == 1 {
-                    gizmo::Handles::single_point()
-                } else {
-                    gizmo::Handles::extended()
+                handles: match (sketch_basis.is_some(), points.len() == 1) {
+                    (true, single) => gizmo::Handles::sketch(!single),
+                    (false, true) => gizmo::Handles::single_point(),
+                    (false, false) => gizmo::Handles::extended(),
                 },
             });
         }
@@ -850,7 +933,14 @@ impl App {
     /// Applied to the state frozen at mouse-down every frame, never to the previous frame's
     /// result — the same rule the cage's own drag already follows, and what makes a dropped
     /// frame or a wandering cursor leave no trace in the final position.
-    pub(crate) fn continue_gizmo(&mut self, aspect: f32, rect: egui::Rect, pos: egui::Pos2, snap: bool) {
+    pub(crate) fn continue_gizmo(
+        &mut self,
+        aspect: f32,
+        rect: egui::Rect,
+        pos: egui::Pos2,
+        snap: bool,
+        grid: bool,
+    ) {
         let Some(mut live) = self.gizmo_drag.take() else { return };
         let (origin, direction) = self.gizmo_ray(aspect, rect, pos);
         let Some(motion) = live.drag.update(origin, direction, pos) else {
@@ -859,8 +949,24 @@ impl App {
             self.gizmo_drag = Some(live);
             return;
         };
-        live.readout = live.drag.readout(motion);
         let pivot = live.pivot;
+        // **Shift lands the pivot on the grid, Ctrl on the end of a curve** (Ctrl also rounds a
+        // depth, which is a handle of its own and untouched here). Applied to the motion, before
+        // the readout and before any target reads it, so every kind of thing the gizmo moves --
+        // a cage, a body, a block, a curve -- snaps the same way and the numbers beside the
+        // gizmo are the snapped ones.
+        let moving = match &live.target {
+            GizmoTarget::Curve { curve, .. } => Some(*curve),
+            GizmoTarget::Profile { moves, .. } => moves.first().map(|m| m.curve),
+            _ => None,
+        };
+        let motion = match motion {
+            gizmo::Motion::Translate(d) if grid || snap => gizmo::Motion::Translate(
+                self.snap_translation(aspect, rect, &live.drag, pivot, d, grid, snap, moving),
+            ),
+            other => other,
+        };
+        live.readout = live.drag.readout(motion);
         // What a target says in place of the motion's own readout, for the ones whose result is a
         // number the motion is not: a depth, not the distance the arrow was pulled.
         let mut said: Option<String> = None;
@@ -899,10 +1005,11 @@ impl App {
                 // does under the control point's own drag, and the field is redrawn at draft
                 // only when the curve shapes one.
                 let (curve, gesture) = (*curve, gesture.clone());
+                // A sketch's points stay on its plane under the handles too.
                 let to: Vec<(usize, Point3<f64>)> = indices
                     .iter()
                     .zip(before)
-                    .map(|(&i, &start)| (i, moved_point(start, motion, pivot)))
+                    .map(|(&i, &start)| (i, self.onto_sketch_plane(curve, moved_point(start, motion, pivot))))
                     .collect();
                 self.move_curve_points_live(curve, &to, &gesture);
             }
@@ -915,7 +1022,7 @@ impl App {
                         .indices
                         .iter()
                         .zip(&m.before)
-                        .map(|(&i, &start)| (i, moved_point(start, motion, pivot)))
+                        .map(|(&i, &start)| (i, self.onto_sketch_plane(m.curve, moved_point(start, motion, pivot))))
                         .collect();
                     self.move_curve_points_live(m.curve, &to, &m.gesture);
                 }

@@ -1014,6 +1014,100 @@ pub struct Renderer {
     identity: u64,
 }
 
+/// The text the driver is handed for `program`, which is what a pipeline is a function of.
+///
+/// **The one edit it takes beyond the generator's.** The normal pass reads every section through
+/// `profile_distance_bake`, whose fallback for a section the tolerance could not bake is the walk
+/// the value pass takes -- a loop the driver inlines into every differenced normal, and the whole
+/// of what made four partial revolves' compile 9.7 s where the bake alone makes it 2.5 s. Only the
+/// bakes in hand say whether every section has one, so the walk is cut here when none is missing.
+/// A drag that costs a section its bake is therefore a new text, and a new pipeline, and never a
+/// stale one reading a grid it does not have.
+///
+/// **So asking whether a pipeline is the one wanted means asking this**, and never comparing
+/// [`Renderer::source`] with `program.source`. The two differ in every document, since the walk is
+/// in the prelude whatever the graph holds and a graph with no sections has all of them baked. That
+/// comparison was what stood between a rebuild and its kept pipelines, and it never once came out
+/// equal: every number dragged went to the compile worker.
+pub fn compiled_source(
+    program: &ShaderProgram,
+    curves: &[(Vec<Point3<f64>>, Option<fieldform_field::BakedProfile>)],
+) -> String {
+    let every_section_baked = program.curves.iter().zip(curves.iter()).all(|(use_, (_, bake))| {
+        !matches!(use_, crate::codegen::CurveUse::Profile(_) | crate::codegen::CurveUse::Wall(..))
+            || bake.is_some()
+    });
+    if every_section_baked {
+        program.source.replacen(
+            "    return profile_distance(index, q); // unbaked-section-walk",
+            "    return 1e30; // every section has its bake; see the renderer",
+            1,
+        )
+    } else {
+        program.source.clone()
+    }
+}
+
+/// How many shapes' pipelines [`PipelineShelf`] holds.
+///
+/// A few, because what it is for is going back: an undo, an eye turned off again. Each entry is one
+/// shader's compiled code and nothing the document holds, so this is not a memory question until
+/// it is a great deal larger than the number of steps anybody retraces.
+const SHELF_SIZE: usize = 8;
+
+/// The pipelines of the shapes drawn most recently, by the text they were compiled from.
+///
+/// **A shader takes seconds and going back to one should not.** Turning a block's eye on and off,
+/// or undoing a cut, asks for a shader compiled moments ago. The driver's own cache answers that
+/// sometimes and not dependably: on an RTX A500 an undo on a 90-block phone read 1.35 s through it
+/// against 0.61 s from here, and a run of the same document took 16 s to go back to a shape it had
+/// drawn half a minute earlier. A pipeline is a function of its text and its device and of nothing
+/// else, so the application can keep them itself and not ask.
+///
+/// Shared, so a compile abandoned for a newer edit still lands here on its worker: nothing it cost
+/// is wasted if that shape is asked for again.
+#[derive(Clone, Default)]
+pub struct PipelineShelf(std::sync::Arc<std::sync::Mutex<Vec<Shelved>>>);
+
+struct Shelved {
+    device: wgpu::Device,
+    source: std::sync::Arc<str>,
+    pipelines: Pipelines,
+}
+
+impl PipelineShelf {
+    fn entries(&self) -> std::sync::MutexGuard<'_, Vec<Shelved>> {
+        // Nothing here can be left half written by a panic that matters: it is only a cache.
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Whether the pipelines for `source` are here, so a rebuild can skip the worker.
+    pub fn holds(&self, device: &wgpu::Device, source: &str) -> bool {
+        self.entries().iter().any(|s| s.device == *device && *s.source == *source)
+    }
+
+    fn find(&self, device: &wgpu::Device, source: &str) -> Option<Pipelines> {
+        self.entries()
+            .iter()
+            .find(|s| s.device == *device && *s.source == *source)
+            .map(|s| s.pipelines.kept())
+    }
+
+    /// Puts `pipelines` at the newest end, dropping whatever has gone longest unused.
+    fn keep(&self, device: &wgpu::Device, source: &str, pipelines: &Pipelines) {
+        let mut entries = self.entries();
+        entries.retain(|s| !(s.device == *device && *s.source == *source));
+        entries.push(Shelved {
+            device: device.clone(),
+            source: std::sync::Arc::from(source),
+            pipelines: pipelines.kept(),
+        });
+        if entries.len() > SHELF_SIZE {
+            entries.remove(0);
+        }
+    }
+}
+
 /// Everything a renderer compiles from its source, so it can be kept or made as one thing.
 struct Pipelines {
     /// What making these cost: nought for a set kept from the previous renderer, which is the
@@ -1050,6 +1144,26 @@ struct Pipelines {
     stats: wgpu::ComputePipeline,
     #[cfg(feature = "march-stats")]
     grid: wgpu::ComputePipeline,
+}
+
+impl Pipelines {
+    /// The same set, costing nothing this time.
+    fn kept(&self) -> Pipelines {
+        Pipelines {
+            module_ms: 0.0,
+            pipelines_ms: 0.0,
+            march: self.march.clone(),
+            skip: self.skip.clone(),
+            cull: self.cull.clone(),
+            occlude: self.occlude.clone(),
+            module: self.module.clone(),
+            march_layout: self.march_layout.clone(),
+            #[cfg(feature = "march-stats")]
+            stats: self.stats.clone(),
+            #[cfg(feature = "march-stats")]
+            grid: self.grid.clone(),
+        }
+    }
 }
 
 /// Hands each renderer its [`Renderer::identity`].
@@ -1521,7 +1635,21 @@ impl Renderer {
         curves: &[(Vec<Point3<f64>>, Option<fieldform_field::BakedProfile>)],
         surfaces: &[fieldform_field::PackedSurface],
     ) -> Result<Self, RenderError> {
-        Self::build(device, queue, program, bakes, curves, surfaces, None)
+        Self::build(device, queue, program, bakes, curves, surfaces, None, None)
+    }
+
+    /// [`Self::with_device`], taking its pipelines from `shelf` if a shape drawn earlier left them
+    /// there and leaving them there otherwise.
+    pub fn with_shelf(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        program: &ShaderProgram,
+        bakes: &[std::sync::Arc<BakedField>],
+        curves: &[(Vec<Point3<f64>>, Option<fieldform_field::BakedProfile>)],
+        surfaces: &[fieldform_field::PackedSurface],
+        shelf: &PipelineShelf,
+    ) -> Result<Self, RenderError> {
+        Self::build(device, queue, program, bakes, curves, surfaces, None, Some(shelf))
     }
 
     /// A renderer for `program` on `previous`'s device, **keeping `previous`'s pipeline when the
@@ -1553,9 +1681,33 @@ impl Renderer {
             curves,
             surfaces,
             Some(previous),
+            None,
         )
     }
 
+    /// [`Self::rebuilt_from`], and [`Self::with_shelf`]'s reading of `shelf` as well, for a rebuild
+    /// that asked the shelf first and knows the compile is not coming.
+    pub fn rebuilt_with_shelf(
+        previous: &Renderer,
+        program: &ShaderProgram,
+        bakes: &[std::sync::Arc<BakedField>],
+        curves: &[(Vec<Point3<f64>>, Option<fieldform_field::BakedProfile>)],
+        surfaces: &[fieldform_field::PackedSurface],
+        shelf: &PipelineShelf,
+    ) -> Result<Self, RenderError> {
+        Self::build(
+            previous.device.clone(),
+            previous.queue.clone(),
+            program,
+            bakes,
+            curves,
+            surfaces,
+            Some(previous),
+            Some(shelf),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn build(
         device: wgpu::Device,
         queue: wgpu::Queue,
@@ -1569,33 +1721,12 @@ impl Renderer {
         surfaces: &[fieldform_field::PackedSurface],
         // A renderer whose pipeline may be kept, if its source is this program's.
         previous: Option<&Renderer>,
+        // Where pipelines for a shape drawn earlier may be waiting, and these will be left.
+        shelf: Option<&PipelineShelf>,
     ) -> Result<Self, RenderError> {
         let began = std::time::Instant::now();
         let ms = |t: std::time::Instant| t.elapsed().as_secs_f32() * 1e3;
-        // **The one edit the driver's text takes beyond the generator's.** The normal pass reads
-        // every section through `profile_distance_bake`, whose fallback for a section the
-        // tolerance could not bake is the walk the value pass takes -- a loop the driver inlines
-        // into every differenced normal, and the whole of what made four partial revolves' compile
-        // 9.7 s where the bake alone makes it 2.5 s. Only this renderer knows whether every
-        // section has its bake, so it cuts the walk here when none is missing. The cache below
-        // compares the edited text, so a drag that costs a section its bake is a new pipeline and
-        // never a stale one reading a grid it does not have.
-        let every_section_baked = program
-            .curves
-            .iter()
-            .zip(curves.iter())
-            .all(|(use_, (_, bake))| {
-                !matches!(use_, crate::codegen::CurveUse::Profile(_) | crate::codegen::CurveUse::Wall(..)) || bake.is_some()
-            });
-        let source: String = if every_section_baked {
-            program.source.replacen(
-                "    return profile_distance(index, q); // unbaked-section-walk",
-                "    return 1e30; // every section has its bake; see the renderer",
-                1,
-            )
-        } else {
-            program.source.clone()
-        };
+        let source = compiled_source(program, curves);
         // **Kept when it would be packed from the same bands** (`atlas_holds`). Every sample of
         // every band is copied twice on this thread and then uploaded -- a 192-cell band is
         // 115 MB -- and a rebuild that changed a number, a curve or which shader is drawn
@@ -1967,8 +2098,14 @@ impl Renderer {
         // hundred kilobytes is microseconds.
         let pipelines = match previous.filter(|p| *p.source == *source) {
             Some(kept) => kept.pipelines(),
-            None => compile()?,
+            None => match shelf.and_then(|s| s.find(&device, &source)) {
+                Some(kept) => kept,
+                None => compile()?,
+            },
         };
+        if let Some(shelf) = shelf {
+            shelf.keep(&device, &source, &pipelines);
+        }
 
         // Zeroed, which is a grid that says it describes nothing: `[5]` is nought.
         let skip_grid = device.create_buffer(&wgpu::BufferDescriptor {

@@ -3,7 +3,7 @@ name the licence that applies to it.
 
 | Layer | Crates | Licence | Text |
 | --- | --- | --- | --- |
-| Kernel | fieldform-cage, fieldform-subd, fieldform-field, fieldform-scene, fieldform-ops, fieldform-io, fieldform-gpu | MPL-2.0 | LICENSE-MPL-2.0 |
+| Kernel | fieldform-cage, fieldform-subd, fieldform-field, fieldform-scene, fieldform-ops, fieldform-io, fieldform-gpu, fieldform-mcp | MPL-2.0 | LICENSE-MPL-2.0 |
 | Application | fieldform-app, fieldform-import | GPL-3.0-only | LICENSE-GPL-3.0 |
 | Vendored: Fidget | vendor/fidget | MPL-2.0 (upstream, unmodified) | vendor/fidget/LICENSE.txt |
 | Vendored: OpenCASCADE bindings | vendor/opencascade-rs | LGPL-2.1 (upstream, unmodified) | vendor/opencascade-rs/LICENSE |

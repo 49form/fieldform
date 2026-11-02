@@ -1,0 +1,97 @@
+# Modify > Infill (backlog item 129), as far as the console reaches it. Every number below is a
+# closed form or a comparison with the blocks it replaces, so a pass means the block is the shape
+# its numbers say. What only an eye can judge -- the panel, how a join shades -- is for a person.
+#
+#   fieldform.exe --run benchmarks/smoke/infill.ffc --keep-going --report infill.json --exit
+#
+# Exit code 0 when every expect passed. Every line here is meant to succeed, apart from the last
+# section's, which are refused on purpose and are marked so. Each document is saved before the
+# next `new`, as the other smoke scripts do.
+
+# --- A sphere that sits wholly in the cavity makes the sum closed: the skin and the sphere.
+#   skin 40^3 - 36^3 = 17344, ball 4/3*pi*5^3 = 523.60, together 17867.60
+new
+cube 'block' size=40,40,40 centre=0,0,0
+sphere 'ball' radius=5 centre=0,0,0
+infill target=block wall=2 fill=ball 'part'
+expect target=part volume=17867.60 tol=0.2%
+expect target=part bbox=-20,-20,-20,20,20,20 tol=0.05
+# A parameter's new value is a new wall: 40^3 - 34^3 + 523.60 = 25219.60.
+param name=w value=2
+set part.wall=w
+expect target=part volume=17867.60 tol=0.2%
+param name=w value=3
+expect target=part volume=25219.60 tol=0.2%
+saveas file=target/infill-sum.fform
+
+# --- A wall of nought is plain infill: no skin, and only what the fill and the body share.
+new
+cube 'block' size=40,40,40 centre=0,0,0
+sphere 'ball' radius=5 centre=0,0,0
+infill target=block wall=0 fill=ball 'part'
+expect target=part volume=523.60 tol=0.2%
+# And a join is ignored there, rather than flaring anything.
+set part.join=2
+expect target=part volume=523.60 tol=0.2%
+expect target=part approx=false
+saveas file=target/infill-nought.fform
+
+# --- A wall past the middle leaves the plain solid, which is a valid part.
+new
+cube 'block' size=20,20,20 centre=0,0,0
+sphere 'ball' radius=1 centre=0,0,0
+infill target=block wall=15 fill=ball 'part'
+expect target=part volume=8000 tol=0.2%
+saveas file=target/infill-solid.fform
+
+# --- Against the construction it replaces: the same solid, whatever fills it.
+new
+cube 'block' size=30,30,30 centre=0,0,0
+infill target=block wall=2 cell=gyroid cell_size=10 phase=sheet thickness=1 'part'
+shell target=block thickness=2 'skin'
+offset target=block distance=-2 'inner'
+tpms 'core' cell=gyroid cell_size=10 phase=sheet thickness=1 origin=0,0,0
+boolean -i in=core,inner 'clipped'
+boolean -u in=skin,clipped 'five'
+expect target=skin volume=9424 tol=0.2%
+expect ratio=part,five volume=1 tol=0.5%
+expect target=part bbox=-15,-15,-15,15,15,15 tol=0.05
+saveas file=target/infill-five.fform
+
+# --- Beams, with a join: a preset's own proportion, and the outside still does not move.
+new
+cube 'block' size=30,30,30 centre=0,0,0
+infill target=block wall=1.5 cell=octet cell_size=10 radius=1 join=1 'part'
+expect target=part bbox=-15,-15,-15,15,15,15 tol=0.05
+# Struts on 1.5 mm of skin, and the skin alone is 30^3 - 27^3 = 7317.
+expect target=part volume=>7317
+saveas file=target/infill-beams.fform
+
+# --- Benchmark t2-01, the graded gyroid core, as the one block. A ramp is a block of its own and
+# comes first, so "one line" is the infill line and not the whole of it.
+new
+cube 'block' size=60,60,60 centre=0,0,0
+plane 'floor' origin=0,0,-30
+ramp 'grade' input=floor in=0,60 out=0.6,2.0
+infill target=block wall=2 cell=gyroid cell_size=10 phase=sheet thickness=grade 'part'
+shell target=block thickness=2 'skin'
+tpms 'core' cell=gyroid cell_size=10 phase=sheet thickness=grade origin=0,0,0
+cube 'inside' size=56,56,56 centre=0,0,0
+boolean -i in=core,inside 'filling'
+boolean -u in=skin,filling 'by_hand'
+expect ratio=part,by_hand volume=1 tol=0.5%
+saveas file=target/infill-graded.fform
+
+# --- Two infills reading one lattice: `fill=` is a reference, so one `set` moves both.
+new
+tpms 'shared' cell=gyroid cell_size=10 phase=sheet thickness=1 origin=0,0,0
+cube 'a' size=30,30,30 centre=0,0,0
+cube 'b' size=30,30,30 centre=100,0,0
+infill target=a wall=2 fill=shared 'first'
+infill target=b wall=2 fill=shared 'second'
+saveas file=target/infill-shared.fform
+
+# --- Refused on purpose: each of these is a `!!` in the log, and none may make a block.
+# A wall below nought, and a fill named beside a lattice described.
+infill target=first wall=-1 fill=shared
+infill target=first wall=2 fill=shared cell=gyroid

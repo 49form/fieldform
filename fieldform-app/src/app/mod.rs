@@ -19,6 +19,7 @@ pub(crate) mod palette_ui;
 // Every command's keys, rebound by pressing them.
 mod keys_panel;
 pub(crate) mod check_model;
+mod graph_panel;
 pub(crate) mod cage_tools;
 pub(crate) mod knife_tool;
 pub(crate) mod click_panel;

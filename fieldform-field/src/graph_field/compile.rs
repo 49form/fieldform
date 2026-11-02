@@ -282,6 +282,16 @@ pub enum CompileError {
          with no bounds \u{2014} a shelled half-space is an infinite slab, which is not a body"
     )]
     ShellNeedsBounds,
+    #[error(
+        "an infill gives a body a skin and fills what is left, and this one wraps something with \
+         no bounds \u{2014} a half-space has no inside to fill"
+    )]
+    InfillNeedsBounds,
+    #[error(
+        "an infill's wall of {0} is below nought \u{2014} the wall is measured inward from the \
+         body, so nought is the least it can be, and nought is plain infill"
+    )]
+    InfillWallBelowNought(f64),
     #[error("a mirror's plane names a node that is not a plane")]
     MirrorNeedsAPlane,
     #[error(
@@ -1051,6 +1061,13 @@ impl GraphField {
         // them all at once would mean four unverified ones instead of one measured.
         if let Some(refusal) = graph.nodes().find_map(|(_, n)| driven_refusal(n)) {
             return Err(refusal);
+        }
+
+        // **An infill is the blocks it is made of**, from the one function the shader reads too.
+        // After the refusal above, so a wall that follows a ramp is told so by name. Nothing to
+        // do, and nothing cloned, for a graph without one.
+        if let Some(lowered) = super::with_infills_lowered(document, graph)? {
+            return Self::build(document, &lowered, tolerance_mm, cache);
         }
 
         // A block that carries its own turn becomes that block inside a placement, which is
@@ -2496,6 +2513,12 @@ impl GraphField {
                         op: BooleanOp::Difference,
                         inputs: vec![body, cavity],
                     }
+                }
+                // Lowered above, unless it is incomplete, and those were passed over at the top of
+                // this loop. Answered rather than panicked, since this is a document and not a
+                // proof, and a refusal is the one thing a wrong assumption here can safely become.
+                Node::Infill { .. } => {
+                    return Err(CompileError::EmptySlot { node: *id, slot: 0 });
                 }
                 Node::Morph { a, b, t } => {
                     if t.driver().is_some() {

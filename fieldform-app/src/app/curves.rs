@@ -1285,6 +1285,11 @@ impl App {
         if frees.is_empty() && !points_moved {
             return false;
         }
+        // A sketch a point of which has left its plane is a 3D sketch now, in the same entry as
+        // the move that took it there. Asked while the curves still stand where the gesture left
+        // them.
+        let touched: Vec<CurveId> = moves.iter().map(|m| m.curve).collect();
+        let breaks = self.sketch_breaks(&touched);
         // Back to where the gesture started, so the command's execute is what puts everything
         // where it ended.
         let mut commands: Vec<Box<dyn fieldform_ops::Command>> = Vec::new();
@@ -1300,6 +1305,7 @@ impl App {
             }
             commands.push(Box::new(SetControlPoints::new(f.curve, f.indices, f.before, f.after)));
         }
+        commands.extend(breaks);
         self.gesture = None;
         let cmd: Box<dyn fieldform_ops::Command> = match commands.len() {
             1 => commands.pop().expect("one command"),
@@ -1309,6 +1315,69 @@ impl App {
             self.warn(e.to_string());
         }
         true
+    }
+
+    /// Changes a single-span curve's degree, as one undo step. Raising keeps the shape exactly and
+    /// adds points; lowering approximates it and says so. What the block's row, the marking
+    /// menu's ring and `degree degree=` all do.
+    pub(crate) fn change_curve_degree(&mut self, id: CurveId, chosen: usize) {
+        let Some(before) = self.doc.curve(id).cloned() else { return };
+        if before.degree() == chosen {
+            return;
+        }
+        match before.with_degree(chosen) {
+            Ok(after) => {
+                let raised = chosen > before.degree();
+                let cmd = Box::new(SetCurve::new(id, Some(before), Some(after)));
+                // Not a graph edit, so it ends any gesture a value drag had open rather than
+                // becoming the entry that drag replaces next.
+                self.gesture = None;
+                if let Err(e) = self.stack.execute(&mut self.doc, cmd) {
+                    self.warn(e.to_string());
+                } else {
+                    // Indices outlive nothing here: the count changed, so what was picked names
+                    // different points now.
+                    self.clear_point_selection();
+                    self.say(if raised {
+                        format!("Degree {chosen} — same shape, more points")
+                    } else {
+                        format!("Degree {chosen} — shape approximated")
+                    });
+                }
+                self.mark_changed();
+                self.rebuild_curve_display();
+                self.rebuild_render_resources();
+            }
+            Err(e) => self.warn(e.to_string()),
+        }
+    }
+
+    /// `degree degree=<n>`, on the curve named by `target=` or the selected one.
+    pub(crate) fn curve_degree_command(&mut self, args: &Args) {
+        let Some(chosen) = args.get("degree").and_then(|v| v.as_f64()).map(|d| d.round() as usize) else {
+            self.warn("`degree` wants the degree: `degree degree=3`");
+            return;
+        };
+        let named = args.get("target").and_then(|v| v.as_str()).map(str::to_string);
+        let curve = match named {
+            Some(name) => match self.curve_named(&name) {
+                Some(id) => Some(id),
+                None => {
+                    self.warn(format!("no curve is called {name:?}"));
+                    return;
+                }
+            },
+            None => self.selected_curve,
+        };
+        let Some(curve) = curve else {
+            self.warn("Select a curve first, or name it with `target=`");
+            return;
+        };
+        if !(1..=24).contains(&chosen) {
+            self.warn(format!("a degree is one to twenty-four, not {chosen}"));
+            return;
+        }
+        self.change_curve_degree(curve, chosen);
     }
 
     /// What follows a curve gesture. The traced view is rebuilt only when a field changed;
@@ -1488,7 +1557,11 @@ impl App {
         // edit, so it ends any gesture a value drag had open, or the next graph edit would take
         // this entry for the drag's and replace it.
         self.gesture = None;
-        if let Err(e) = self.stack.execute(&mut self.doc, Box::new(SetCurve::insert(curve))) {
+        // Drawn while sketching on a plane block, the curve lies on it and follows it, in the same
+        // entry; an axis is never a sketch.
+        let on = if axis.is_some() { None } else { self.sketching_on() };
+        let insert = self.insert_curve_command(curve, on);
+        if let Err(e) = self.stack.execute(&mut self.doc, insert) {
             self.pending_curve = None;
             self.warn(e.to_string());
             return;
@@ -1746,6 +1819,8 @@ impl App {
             // Where each point goes: a snapped end onto its target, everything else by the
             // delta. Moving them is the gesture's shared path, so an end sitting on a block
             // moves the block here exactly as it does under the manipulator.
+            // A sketch's point stays on its plane; a snapped end goes where the snap says, which
+            // is the one move meant to leave it (`onto_sketch_plane`).
             let snapped_at = target.map(|(_, at)| at);
             let to: Vec<(usize, Point3<f64>)> = state
                 .indices
@@ -1753,13 +1828,17 @@ impl App {
                 .zip(&state.start_positions)
                 .map(|(i, start)| match snapped_at {
                     Some(at) if lone_end == Some(*i) => (*i, at),
-                    _ => (*i, start + delta),
+                    _ => (*i, self.onto_sketch_plane(state.curve, start + delta)),
                 })
                 .collect();
             self.move_curve_points_live(state.curve, &to, &state.gesture);
             for m in &state.others {
-                let to: Vec<(usize, Point3<f64>)> =
-                    m.indices.iter().zip(&m.before).map(|(i, start)| (*i, start + delta)).collect();
+                let to: Vec<(usize, Point3<f64>)> = m
+                    .indices
+                    .iter()
+                    .zip(&m.before)
+                    .map(|(i, start)| (*i, self.onto_sketch_plane(m.curve, start + delta)))
+                    .collect();
                 self.move_curve_points_live(m.curve, &to, &m.gesture);
             }
         }

@@ -193,6 +193,20 @@ pub(crate) fn view_cube_grid_rect(cube: egui::Rect) -> egui::Rect {
     )
 }
 
+/// Where the two quarter-turn arrows sit: under Home, in the column left of the cube, the
+/// anticlockwise one above the clockwise one.
+///
+/// **For orienting a sketch the way it reads** (the owner, 2026-10-31): a view square to a plane
+/// is right about the plane's normal and arbitrary about its roll, and a quarter turn either way
+/// is the whole of what is ever wanted of the roll.
+pub(crate) fn view_cube_roll_rects(cube: egui::Rect) -> (egui::Rect, egui::Rect) {
+    let home = view_cube_home_rect(cube);
+    let size = home.size();
+    let step = size.y + 6.0;
+    let at = |row: f32| egui::Rect::from_min_size(egui::pos2(home.min.x, home.min.y + step * row), size);
+    (at(1.0), at(2.0))
+}
+
 /// The cube and everything that hangs off it, as one rectangle.
 ///
 /// What the viewport asks before treating a press as its own. The buttons under and beside
@@ -201,9 +215,42 @@ pub(crate) fn view_cube_grid_rect(cube: egui::Rect) -> egui::Rect {
 /// grid toggle would also have placed a point while a line was being placed.
 pub(crate) fn view_cube_controls_rect(viewport: egui::Rect) -> egui::Rect {
     let cube = view_cube_rect(viewport);
+    let (anticlockwise, clockwise) = view_cube_roll_rects(cube);
     cube.union(view_cube_home_rect(cube))
         .union(view_cube_projection_rect(cube))
         .union(view_cube_grid_rect(cube))
+        .union(anticlockwise)
+        .union(clockwise)
+}
+
+/// A curled arrow for a quarter turn: three quarters of a circle with a head at its end, going
+/// the way the view will turn. Painted rather than lettered, since the proportional face has no
+/// arrows and a glyph it cannot draw is an empty box.
+fn paint_roll_arrow(painter: &egui::Painter, rect: egui::Rect, clockwise: bool, ink: egui::Color32) {
+    let centre = rect.center();
+    let r = rect.width() * 0.32;
+    let stroke = egui::Stroke::new(1.3_f32, ink);
+    // From the bottom round to the left side: open on the lower right, where the head is.
+    let (start, sweep) = (std::f32::consts::FRAC_PI_2, 1.5 * std::f32::consts::PI);
+    let sign = if clockwise { -1.0 } else { 1.0 };
+    let points: Vec<egui::Pos2> = (0..=24)
+        .map(|i| {
+            let a = start + sign * sweep * (i as f32 / 24.0);
+            egui::pos2(centre.x + r * a.cos(), centre.y + r * a.sin())
+        })
+        .collect();
+    painter.add(egui::Shape::line(points.clone(), stroke));
+    // The head: at the arc's end, pointing the way the arc was going.
+    let end = points[24];
+    let before = points[22];
+    let along = (end - before).normalized();
+    let across = egui::vec2(-along.y, along.x);
+    let head = 4.0;
+    painter.add(egui::Shape::convex_polygon(
+        vec![end + along * head, end - along * head * 0.3 + across * head * 0.8, end - along * head * 0.3 - across * head * 0.8],
+        ink,
+        egui::Stroke::NONE,
+    ));
 }
 
 /// A "camera" with the main camera's exact rotation (same eye-to-target direction and up
@@ -245,7 +292,7 @@ fn view_cube_project(vp: &Matrix4<f32>, rect: egui::Rect, p: Vector3<f32>) -> Op
     Some((egui::pos2(x, y), depth))
 }
 
-fn point_in_convex_polygon(p: egui::Pos2, poly: &[egui::Pos2]) -> bool {
+pub(crate) fn point_in_convex_polygon(p: egui::Pos2, poly: &[egui::Pos2]) -> bool {
     let mut sign = 0.0_f32;
     for i in 0..poly.len() {
         let a = poly[i];
@@ -347,12 +394,19 @@ pub(crate) fn show_view_cube(
     let home = view_cube_home_rect(rect);
     let projection_rect = view_cube_projection_rect(rect);
     let grid_rect = view_cube_grid_rect(rect);
+    let (anticlockwise_rect, clockwise_rect) = view_cube_roll_rects(rect);
     let response = ui.interact(
         rect,
         ui.id().with("view_cube"),
         egui::Sense::click_and_drag(),
     );
     let home_response = ui.interact(home, ui.id().with("view_cube_home"), egui::Sense::click());
+    let anticlockwise_response = ui
+        .interact(anticlockwise_rect, ui.id().with("view_cube_roll_acw"), egui::Sense::click())
+        .on_hover_text("Turn the view a quarter turn anticlockwise");
+    let clockwise_response = ui
+        .interact(clockwise_rect, ui.id().with("view_cube_roll_cw"), egui::Sense::click())
+        .on_hover_text("Turn the view a quarter turn clockwise");
     let projection_response = ui
         .interact(
             projection_rect,
@@ -393,9 +447,14 @@ pub(crate) fn show_view_cube(
 
     // Clipped generously enough to take in the Home button, which sits outside the cube's own
     // square. No backdrop panel — just the cube and its icon over the viewport.
-    let painter = ui
-        .painter()
-        .with_clip_rect(rect.union(home).union(projection_rect).union(grid_rect).expand(4.0));
+    let painter = ui.painter().with_clip_rect(
+        rect.union(home)
+            .union(projection_rect)
+            .union(grid_rect)
+            .union(anticlockwise_rect)
+            .union(clockwise_rect)
+            .expand(4.0),
+    );
 
     let cells = view_cube_cells_on_screen(camera, rect);
 
@@ -557,6 +616,22 @@ pub(crate) fn show_view_cube(
     }
     if grid_response.clicked() {
         *grid = !*grid;
+    }
+
+    // The quarter-turn arrows, under Home. On screen anticlockwise is the arc running the way
+    // the hands do not; the camera's roll is about the line of sight toward the eye, so the sign
+    // is the view's.
+    for (response, clockwise) in [(&anticlockwise_response, false), (&clockwise_response, true)] {
+        let ink = if response.hovered() {
+            egui::Color32::from_rgb(255, 214, 64)
+        } else {
+            egui::Color32::from_white_alpha(200)
+        };
+        let rect = if clockwise { clockwise_rect } else { anticlockwise_rect };
+        paint_roll_arrow(&painter, rect, clockwise, ink);
+        if response.clicked() {
+            camera.begin_roll(if clockwise { -90.0 } else { 90.0 });
+        }
     }
 
     if home_response.clicked() {

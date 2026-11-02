@@ -62,6 +62,20 @@ impl Row {
     pub(crate) fn number(&self) -> Option<f64> {
         self.text.trim().parse::<f64>().ok()
     }
+
+    /// What the row shows: a number rounded to what a person reads off a panel (four decimals,
+    /// trailing zeros dropped), where `text` keeps every digit the block holds. A knife's offset is
+    /// whatever fraction of an edge the click landed on, and `18.69785451225658 mm` is not a figure
+    /// anybody can use. Words, lists and anything that is not one number are shown as they are.
+    pub(crate) fn shown(&self) -> String {
+        if self.unit == commands::Unit::Word {
+            return self.text.clone();
+        }
+        match self.text.trim().parse::<f64>() {
+            Ok(v) if v.is_finite() => rounded_for_display(v),
+            _ => self.text.clone(),
+        }
+    }
 }
 
 /// Whether `text` is an expression rather than a value the console reads as it is: arithmetic in
@@ -103,7 +117,7 @@ impl App {
     pub(crate) fn panel_confirm(&mut self, row: &Row, text: &str) -> Result<(), String> {
         let Some(block) = self.session.as_ref().map(|s| s.block) else { return Ok(()) };
         let text = text.trim();
-        if text.is_empty() || text == row.text {
+        if text.is_empty() || text == row.text || text == row.shown() {
             return Ok(());
         }
         let value = if is_expression(text) && row.unit != commands::Unit::Word {
@@ -259,7 +273,7 @@ impl App {
                                 }
                             }
                             _ => {
-                                let shown = egui::RichText::new(&row.text).monospace();
+                                let shown = egui::RichText::new(row.shown()).monospace();
                                 let response = ui.add_sized(
                                     egui::vec2(140.0, ui.spacing().interact_size.y),
                                     egui::Button::selectable(focused, shown).sense(egui::Sense::click_and_drag()),
@@ -267,7 +281,7 @@ impl App {
                                 panel.rects.push(response.rect);
                                 if response.clicked() {
                                     panel.focus = i;
-                                    panel.typing = Some(row.text.clone());
+                                    panel.typing = Some(row.shown());
                                     panel.begun = true;
                                 }
                                 // A middle-button drag scrubs the number (§4.4): Shift for fine
@@ -390,4 +404,17 @@ mod tests {
         let everywhere = rect(-10.0, -10.0, 1420.0, 920.0);
         assert_eq!(clear_of(panel, Some(everywhere), screen), panel.min, "nowhere to go");
     }
+}
+
+/// `v` to four decimals with the zeros after them dropped. A value too small to show at four
+/// decimals is written in scientific form rather than as a nought it is not.
+pub(crate) fn rounded_for_display(v: f64) -> String {
+    let mut text = format!("{v:.4}");
+    if text.contains('.') {
+        text = text.trim_end_matches('0').trim_end_matches('.').to_string();
+    }
+    if text == "0" || text == "-0" {
+        return if v == 0.0 { "0".to_string() } else { format!("{v:.3e}") };
+    }
+    text
 }

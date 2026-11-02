@@ -1,0 +1,19 @@
+[package]
+name = "fieldform-mcp"
+version = "0.3.0"
+edition.workspace = true
+license = "MPL-2.0"
+authors = ["49form"]
+repository = "https://github.com/49form/fieldform"
+publish = false
+description = "Relays an MCP client's stdio to a running FieldForm application's local agent endpoint."
+
+[dependencies]
+tokio = { workspace = true, features = ["io-std", "process", "macros"] }
+
+[[bin]]
+name = "fieldform-mcp"
+path = "src/main.rs"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "net", "rt", "macros", "time"] }
