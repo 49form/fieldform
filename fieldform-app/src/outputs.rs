@@ -41,6 +41,8 @@ use super::{
 pub(crate) enum BlockRef {
     Tessellation(TessellationId),
     Export(ExportId),
+    /// The viewport written as an image file (item 117, `image_block.rs`).
+    Image(fieldform_scene::SaveImageId),
     Import(fieldform_scene::id::SourceId),
     /// A profile row, by its first curve. Selecting it selects every curve of the loop, so
     /// Delete takes them all, as one entry.
@@ -1392,6 +1394,7 @@ impl App {
                 self.set_outputs(self.doc.tessellations.clone(), exports, None);
                 self.say(format!("Deleted {name}"));
             }
+            BlockRef::Image(id) => self.delete_image_block(id),
             BlockRef::Import(source) => self.delete_import(source),
             BlockRef::Profile(key) => self.delete_profile(key),
         }
@@ -1495,6 +1498,7 @@ impl App {
                 }
                 self.set_outputs(self.doc.tessellations.clone(), exports, None);
             }
+            BlockRef::Image(id) => self.rename_image_block(id, text),
             BlockRef::Profile(key) => self.rename_profile(key, text),
             BlockRef::Import(source) => {
                 // An import is called what its file is called until renamed, and an empty name
@@ -1537,6 +1541,15 @@ impl App {
                     }
                 } else if ui.button("Run").clicked() {
                     self.start_write(id);
+                    ui.close();
+                }
+            }
+            BlockRef::Image(id) => {
+                let running = self.pending_snap.as_ref().is_some_and(|s| s.request.block == Some(id));
+                if ui.add_enabled(!running, egui::Button::new("Save now")).clicked() {
+                    let title = self.doc.images.iter().find(|b| b.id == id).map(|b| b.title().to_string()).unwrap_or_default();
+                    self.echo_line(format!("snap block={}", crate::image_export::quoted(&title)));
+                    self.run_image_block(id, false);
                     ui.close();
                 }
             }
@@ -1589,6 +1602,10 @@ impl App {
                         .find(|e| e.id == id)
                         .and_then(|e| e.name.clone())
                         .unwrap_or_default(),
+                ),
+                BlockRef::Image(id) => (
+                    RowKey::Image(id),
+                    self.doc.images.iter().find(|b| b.id == id).and_then(|b| b.name.clone()).unwrap_or_default(),
                 ),
                 BlockRef::Import(source) => (
                     RowKey::Import(source),
@@ -2058,7 +2075,7 @@ fn reusable_tessellation(
 ///
 /// The same shape every body's row has — "Left bearing · Sphere" — so a renamed block still says
 /// which kind of block it is, which is what the list is for reading.
-fn row_title(name: Option<&str>, kind: &str) -> String {
+pub(crate) fn row_title(name: Option<&str>, kind: &str) -> String {
     match name {
         Some(name) => format!("{name}  \u{00b7}  {kind}"),
         None => kind.to_string(),

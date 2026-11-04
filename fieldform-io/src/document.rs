@@ -165,6 +165,9 @@ pub(crate) const VALIDATION_PATH: &str = "validation.json";
 pub(crate) const TESSELLATIONS_PATH: &str = "outputs/tessellations.json";
 /// The export blocks, in the order they were made.
 pub(crate) const EXPORTS_PATH: &str = "outputs/exports.json";
+/// The Save Image blocks, in the order they were made -- backlog item 117. Left out when there
+/// are none, as the other two are; a build that predates them carries the entry through.
+pub(crate) const IMAGES_PATH: &str = "outputs/images.json";
 
 /// Directory prefix holding one entry per cage.
 pub(crate) const CAGES_PREFIX: &str = "cages/";
@@ -410,6 +413,11 @@ pub fn update_archive(archive: &mut Archive, document: &Document) -> Result<(), 
     } else {
         archive.put_json(EXPORTS_PATH, &document.exports)?;
     }
+    if document.images.is_empty() {
+        archive.remove(IMAGES_PATH);
+    } else {
+        archive.put_json(IMAGES_PATH, &document.images)?;
+    }
     if document.curves_created.is_empty() {
         archive.remove(CURVES_CREATED_PATH);
     } else {
@@ -653,6 +661,9 @@ pub fn from_archive(archive: &Archive) -> Result<Document, FormatError> {
     let exports = archive
         .get_json::<Vec<fieldform_scene::Export>>(EXPORTS_PATH)?
         .unwrap_or_default();
+    let images = archive
+        .get_json::<Vec<fieldform_scene::SaveImage>>(IMAGES_PATH)?
+        .unwrap_or_default();
 
     let curves_created = archive
         .get_json::<std::collections::BTreeMap<CurveId, u64>>(CURVES_CREATED_PATH)?
@@ -736,6 +747,7 @@ pub fn from_archive(archive: &Archive) -> Result<Document, FormatError> {
         validation: archive.get_json(VALIDATION_PATH)?.unwrap_or_default(),
         tessellations,
         exports,
+        images,
         meshes,
         curves: json.curves.into_iter().collect(),
         parameters: parameters_from_json(json.parameters)?,
@@ -864,12 +876,23 @@ mod tests {
             path: "C:/out/part.stl".into(),
             active: true,
         };
+        let mut image = fieldform_scene::SaveImage::new(part, 3840, 2160);
+        image.name = Some("hero".into());
+        image.view = Some("iso".into());
+        image.supersample = 2;
+        image.background = fieldform_scene::ImageBackground::Colour([32, 32, 32]);
+        image.format = fieldform_scene::ImageFormat::Jpeg;
+        image.jpeg_quality = 95;
+        image.folder = "renders".into();
+        image.capture = fieldform_scene::Capture::EverySeconds(30);
         doc.tessellations = vec![preset.clone(), by_hand.clone()];
         doc.exports = vec![export.clone()];
+        doc.images = vec![image.clone()];
 
         let back = from_archive(&to_archive(&doc).expect("writes")).expect("reads");
         assert_eq!(back.tessellations, vec![preset, by_hand], "order and contents both");
         assert_eq!(back.exports, vec![export]);
+        assert_eq!(back.images, vec![image], "every setting of a Save Image block round-trips");
 
         // And none at all writes no entry, so a document without them is the file it was.
         let archive = to_archive(&Document::new()).expect("writes");

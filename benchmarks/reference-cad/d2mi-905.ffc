@@ -1,0 +1,21 @@
+# NIST D2MI part 827-9999-905, shouldered spacer, rebuilt from its drawing.
+# Millimetres (the drawing is inches x 25.4), in the STEP file's own frame: axis along z,
+# shoulder at z = 0, spigot up to z = 2.159, body down to z = -23.114. Mid-tolerance diameters.
+#
+# Run with:
+#   fieldform --run benchmarks/reference-cad/d2mi-905.ffc --exit
+# from the repository root, on an empty document. It saves the part beside this script.
+
+# body dia .214-.224 x .910, spigot dia .164-.167 x .085, R.005 MAX where they meet
+cylinder radius=2.7813 from=0,0,-23.114 to=0,0,0 'Body'
+cylinder radius=2.1018 from=0,0,-1 to=0,0,2.159 'Spigot'
+boolean in=Body,Spigot -u radius=0.127 'Turned'
+# bore dia .139-.142 from the spigot end, meeting the drill's point
+cylinder radius=1.7844 from=0,0,3 to=0,0,-2 'SmallBore'
+# drill dia .156-.166 from the body end, full diameter to .075 below the shoulder, 118 degree point
+cylinder radius=2.0447 from=0,0,-24 to=0,0,-0.67642 'DrillBody'
+cone base_radius=38.8171 top_radius=0 from=0,0,-24 to=0,0,-0.67642 'DrillPoint'
+boolean in=DrillBody,DrillPoint -i 'Drill'
+boolean in=Turned,SmallBore,Drill -s 'D2MI-905'
+
+saveas file=benchmarks/reference-cad/d2mi-905.fform

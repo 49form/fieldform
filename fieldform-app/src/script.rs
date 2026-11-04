@@ -48,22 +48,6 @@ pub(crate) struct Script {
     pub(crate) done: Vec<serde_json::Value>,
 }
 
-/// A snapshot asked for and not yet written.
-///
-/// **It waits, because a still is not finished when the line is typed.** The viewport averages
-/// eight jittered frames into the picture a person sees, one a frame, so a file written the
-/// moment `snap` runs would carry the noisiest of them. The verb asks the view for a final
-/// frame, this sits here, and the frame loop writes the file once `TracedView::is_settled`
-/// says the picture is the finished one. A script **stops** while one is pending, so two
-/// snapshots in a row cannot write each other's image.
-pub(crate) struct PendingSnap {
-    pub(crate) path: std::path::PathBuf,
-    /// When the wait started, so a view that never settles says so instead of hanging a run.
-    pub(crate) since: std::time::Instant,
-    /// The longest the driver has been seen compiling a shader during this wait, which does not
-    /// count against the limit — see [`SNAP_WAIT_MAX`].
-    pub(crate) compiling: std::time::Duration,
-}
 
 /// What a run has counted so far: which line it stopped at, every `expect` it has reached, and
 /// when it started. Kept on the `App` because a run spans frames whenever it takes a snapshot,

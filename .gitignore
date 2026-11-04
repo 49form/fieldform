@@ -14,6 +14,11 @@ benchmarks/smoke/*.fform
 # A smoke run writes a picture beside its document; neither is kept.
 benchmarks/smoke/*.png
 
+# The reference parts are NIST's to serve, fetched by fetch.py, and the documents the scripts
+# save are rebuilt by running them.
+benchmarks/reference-cad/models/
+benchmarks/reference-cad/*.fform
+
 # OS and editor files
 .DS_Store
 Thumbs.db

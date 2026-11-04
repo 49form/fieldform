@@ -385,7 +385,13 @@ pub(crate) const FORMAT_MAJOR: u32 = 3;
 /// **3.30 adds the `infill` node** (item 129): a body with a skin of `wall` and its inside filled
 /// from a second slot, `fill`, with `join` where it is rounded. A 3.29 build keeps the node rather
 /// than drawing the body solid.
-pub(crate) const FORMAT_MINOR: u32 = 30;
+///
+/// 3.31 adds `outputs/images.json` (`Document::images`, 2026-11-02): the Save Image blocks, each
+/// the request a picture of the viewport is made from and where the file goes (item 117).
+/// Additive as the other two output entries are, and left out when there are none; a 3.30 build
+/// carries the entry through untouched and draws nothing differently, since the blocks are not
+/// geometry.
+pub(crate) const FORMAT_MINOR: u32 = 31;
 
 #[derive(thiserror::Error, Debug)]
 pub enum FormatError {

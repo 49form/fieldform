@@ -71,6 +71,12 @@ struct Camera {
     // plane -- gives none, and the march starts at the eye as it always did. A ray that misses
     // the sphere altogether misses everything.
     scene: vec4<f32>,
+    // The image this frame is one tile of: xy the tile's top-left pixel in it, zw its size in
+    // pixels. zw nought means the frame *is* the picture, which is every frame but a saved
+    // image too large for one set of targets. Every ray goes through the one projection of the
+    // whole image, offset to where the tile sits -- a sub-frustum of the same camera -- so the
+    // seams between tiles are not there to be seen. `image_uv` is the one place that reads it.
+    tile: vec4<u32>,
 }
 
 struct Ray {
@@ -102,12 +108,35 @@ fn ray_at(cam: Camera, u: f32, v: f32) -> Ray {
     return Ray(origin, normalize(dir));
 }
 
+// The size in pixels of the picture this frame's projection is of: the frame itself, or the
+// image it is a tile of.
+fn image_size(cam: Camera) -> vec2<f32> {
+    if cam.tile.z > 0u {
+        return vec2<f32>(f32(cam.tile.z), f32(cam.tile.w));
+    }
+    return vec2<f32>(f32(cam.frame.x), f32(cam.frame.y));
+}
+
+// A point of this frame, given in its own pixels, as a position in the [-1, 1] frame of the
+// picture with y up -- the picture being the image this frame is a tile of, when it is one.
+//
+// **The one place a pixel becomes a position**, for `primary_ray` and the cull's tile corners
+// alike, so a tile offset applied in one and not the other cannot happen: the header above says
+// why a second copy of this arithmetic is the thing this file forbids.
+fn image_uv(cam: Camera, px: f32, py: f32) -> vec2<f32> {
+    let size = image_size(cam);
+    var at = vec2<f32>(px, py);
+    if cam.tile.z > 0u {
+        at = at + vec2<f32>(f32(cam.tile.x), f32(cam.tile.y));
+    }
+    return vec2<f32>(at.x / size.x * 2.0 - 1.0, 1.0 - at.y / size.y * 2.0);
+}
+
 // The ray through a pixel's centre, offset by the frame's jitter.
 fn primary_ray(cam: Camera, pixel: vec2<u32>) -> Ray {
     // Pixel centre, in a [-1, 1] frame with y up.
-    let u = (f32(pixel.x) + 0.5 + cam.jitter.x) / f32(cam.frame.x) * 2.0 - 1.0;
-    let v = 1.0 - (f32(pixel.y) + 0.5 + cam.jitter.y) / f32(cam.frame.y) * 2.0;
-    return ray_at(cam, u, v);
+    let uv = image_uv(cam, f32(pixel.x) + 0.5 + cam.jitter.x, f32(pixel.y) + 0.5 + cam.jitter.y);
+    return ray_at(cam, uv.x, uv.y);
 }
 
 // Which pixels a still frame marches its occlusion and its shadow for (loop spec P5): every one,
@@ -138,7 +167,9 @@ fn occlusion_pixels(cam: Camera) -> OcclusionPixels {
 // The world-space width of one pixel at distance `t` along a ray: what a detail has to be
 // larger than to be seen, and so what anything sized "per pixel" is measured against.
 fn pixel_footprint(cam: Camera, t: f32) -> f32 {
-    let extent = 2.0 * cam.lens.x / f32(cam.frame.y);
+    // Of the whole picture's height where this frame is a tile of one: a tile's pixels are the
+    // image's pixels, not a coarser frame's.
+    let extent = 2.0 * cam.lens.x / image_size(cam).y;
     if cam.frame.w == 1u {
         return extent;
     }

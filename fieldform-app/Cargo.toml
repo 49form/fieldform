@@ -16,8 +16,10 @@ bytemuck.workspace = true
 rayon.workspace = true
 nalgebra.workspace = true
 rfd.workspace = true
-# Decodes the splash screen, which is a PNG embedded in the binary.
+# Decodes the splash screen, which is a PNG embedded in the binary, and encodes a saved JPEG.
 image.workspace = true
+# Writes a saved PNG with its metadata and, for 16-bit, its depth.
+png.workspace = true
 
 fieldform-cage.workspace = true
 fieldform-ops.workspace = true

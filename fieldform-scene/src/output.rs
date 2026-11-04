@@ -18,7 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::id::{ExportId, NodeId, PartId, TessellationId};
+use crate::id::{ExportId, NodeId, PartId, SaveImageId, TessellationId};
 
 /// How closely a mesh must follow the field.
 ///
@@ -207,6 +207,162 @@ impl Export {
     /// same block, since
     /// that is the vocabulary the owner brought.
     pub const DEFAULT_NAME: &'static str = "Export Mesh";
+
+    pub fn title(&self) -> &str {
+        self.name.as_deref().unwrap_or(Self::DEFAULT_NAME)
+    }
+}
+
+/// How a saved image is rendered: the picture on screen, or a fresh render at any size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageQuality {
+    /// The pixels on screen, at the viewport's own size: nothing is re-rendered.
+    Displayed,
+    /// An offscreen still at the requested size, converged as the viewport's still is, with
+    /// the supersample's extra samples averaged in before the tonemap.
+    Still,
+}
+
+/// What lies behind the part in a saved image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageBackground {
+    /// What the viewport shows behind the part.
+    Environment,
+    /// A flat colour, as it will be in the file: sRGB bytes, not lit and not tonemapped.
+    Colour([u8; 3]),
+    /// Coverage in the alpha channel; the part looks the same and the backdrop goes.
+    Transparent,
+}
+
+/// The file format a saved image is written in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFormat {
+    Png,
+    Jpeg,
+}
+
+impl ImageFormat {
+    /// The extension a file of this format takes, without the dot.
+    pub fn extension(self) -> &'static str {
+        match self {
+            ImageFormat::Png => "png",
+            ImageFormat::Jpeg => "jpg",
+        }
+    }
+
+    /// The format an extension means, or `None` for one that is neither.
+    pub fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_ascii_lowercase().as_str() {
+            "png" => Some(ImageFormat::Png),
+            "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
+            _ => None,
+        }
+    }
+}
+
+/// When a Save Image block captures by itself. Off until somebody turns it on, and paused when
+/// a document opens: a file is never the thing that starts writing images.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capture {
+    Off,
+    /// Every so many seconds, no fewer than [`SaveImage::MIN_CAPTURE_SECONDS`].
+    EverySeconds(u32),
+    /// After any committed edit, once the view has converged.
+    OnChange,
+    /// Every so many committed edits.
+    EveryCommits(u32),
+}
+
+/// The viewport written as an image file -- a sink block beside Export (backlog item 117).
+///
+/// It holds the request the picture is made from and where it goes; nothing here is geometry,
+/// nothing composes it, and none of it invalidates the field or the viewport's own still. Like
+/// the other two output blocks it is a document thing, saved with it, so a render is a thing in
+/// the document with the numbers that made it rather than a screenshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveImage {
+    pub id: SaveImageId,
+    /// A name given to it, or `None` for [`SaveImage::DEFAULT_NAME`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The part whose viewport it pictures: the block list shows it with that part.
+    pub part: PartId,
+    /// A ViewCube view, a corner by signs or a direction, as `snap view=` takes them; `None`
+    /// for the camera as it stands when the picture is taken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
+    /// Output pixels. Explicit, always: a preset in the panel writes numbers here.
+    pub width: u32,
+    pub height: u32,
+    pub quality: ImageQuality,
+    /// One, two or four: a Still renders that many times the samples per pixel, averaged in
+    /// linear light before the tonemap.
+    pub supersample: u8,
+    pub background: ImageBackground,
+    pub format: ImageFormat,
+    /// Eight or sixteen; sixteen is PNG and Still only.
+    pub bits: u8,
+    /// JPEG quality, 1 to 100.
+    pub jpeg_quality: u8,
+    /// Where files go, relative to the document's folder; an unsaved document uses the
+    /// Pictures folder under `FieldForm`.
+    pub folder: String,
+    /// The file name's pattern, with `{doc}`, `{block}`, `{date}`, `{time}`, `{n}` or
+    /// `{n:04}`, `{w}`, `{h}` and `{view}` filled in.
+    pub pattern: String,
+    /// Whether a file already there is written over. Off: the counter advances until the name
+    /// is free, and nothing is ever silently replaced.
+    pub overwrite: bool,
+    pub capture: Capture,
+    /// Automatic capture stops after this many files.
+    ///
+    /// The `{n}` counter is deliberately *not* here: a number that advanced on every save would
+    /// make each save an edit to the document, with an entry on the history. It is the
+    /// application's, starting at one each session and advancing past the files already there.
+    pub max_count: u32,
+}
+
+impl SaveImage {
+    /// What the block is called until somebody names it.
+    pub const DEFAULT_NAME: &'static str = "Save Image";
+    /// The file name a block starts with.
+    pub const DEFAULT_PATTERN: &'static str = "{doc}_{block}_{n:04}";
+    /// The shortest interval automatic capture accepts.
+    pub const MIN_CAPTURE_SECONDS: u32 = 5;
+    /// The most files automatic capture writes before it stops, until somebody raises it.
+    pub const DEFAULT_MAX_COUNT: u32 = 500;
+    /// The longest side an image may have, in pixels. A named constant rather than the GPU's
+    /// own limit, which a tiled render is not bound by.
+    pub const MAX_SIDE: u32 = 16_384;
+
+    /// A block for `part` at `width` by `height`, with every other setting at its default:
+    /// a Still at 1x, the environment behind it, 8-bit PNG, no automatic capture.
+    pub fn new(part: PartId, width: u32, height: u32) -> Self {
+        Self {
+            id: SaveImageId::new(),
+            name: None,
+            part,
+            view: None,
+            width,
+            height,
+            quality: ImageQuality::Still,
+            supersample: 1,
+            background: ImageBackground::Environment,
+            format: ImageFormat::Png,
+            bits: 8,
+            jpeg_quality: 92,
+            folder: String::new(),
+            pattern: Self::DEFAULT_PATTERN.to_string(),
+            overwrite: false,
+            capture: Capture::Off,
+            max_count: Self::DEFAULT_MAX_COUNT,
+        }
+    }
 
     pub fn title(&self) -> &str {
         self.name.as_deref().unwrap_or(Self::DEFAULT_NAME)

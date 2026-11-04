@@ -7904,10 +7904,11 @@
     }
 
     /// What a driven radius divides by is the ramp's rate times what the form's reading moves
-    /// per millimetre of radius -- one for the bounded circle and chamfer, `1 + 2^(−1/n)` for
-    /// the divided forms -- and the compiled field reports it as a bound, the walk agrees, and
-    /// the blend is *not* marked approximate: its operands are exact, and the radius it has
-    /// where it has one is the radius asked for.
+    /// per millimetre of radius -- one for every shape a fillet is offered, now that each is
+    /// bounded rather than divided, `1 + 2^(−1/n)` for an exponent with no closed form -- and
+    /// the compiled field reports it as a bound, the walk agrees, and the blend is *not* marked
+    /// approximate: its operands are exact, and the radius it has where it has one is the
+    /// radius asked for.
     #[test]
     fn a_driven_blend_divides_by_the_rate_its_radius_costs_and_is_a_bound() {
         let doc = Document::new();
@@ -7917,7 +7918,7 @@
             let n = Fillet { radius: lit(1.0), continuity, second: None }.exponent();
             // The ramp runs four millimetres of radius over forty of height.
             let rate = 0.1;
-            let moves = if n == 1.0 || n == 2.0 { 1.0 } else { 1.0 + 2f64.powf(-1.0 / n) };
+            let moves = if super::blend::has_closed_form(n) { 1.0 } else { 1.0 + 2f64.powf(-1.0 / n) };
             let divisor = crate::driven_blend_divisor(&doc, &graph, blend);
             assert!(
                 (divisor - (1.0 + moves * rate)).abs() < 1e-9,

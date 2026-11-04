@@ -47,10 +47,10 @@ pub use environment::{
 pub use render::{
     BuildCost,
     bake_resolution_limit, compiled_source, required_limits, timing_features, Camera, Hit,
-    Occlusion, PipelineShelf, RenderError, Renderer, Sections, SkipGridReading, TileMaskReading,
-    MAX_SECTIONS,
+    ImageTile, Occlusion, PipelineShelf, RenderError, Renderer, Sections, SkipGridReading,
+    TileMaskReading, MAX_SECTIONS,
 };
 pub use shading::{
-    halton_jitter, DisplayImage, Draft, Light, Look, ShadingResources, SubmissionCost,
-    SubmissionTicket,
+    halton_jitter, DisplayImage, DisplayImageF32, Draft, Light, Look, PresentFormat,
+    ShadingResources, SubmissionCost, SubmissionTicket,
 };

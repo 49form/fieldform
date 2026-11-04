@@ -669,144 +669,50 @@ impl App {
         self.expect_results.push(record);
     }
 
-    /// `snap file="ref.png" [view=iso]`: the finished still, written as a PNG.
+    /// `snap file="ref.png" [view=iso] [quality=still width=5000 ss=2 bg=transparent …]`: the
+    /// finished still, written as a PNG or a JPEG. `snap block=<name>` runs a Save Image block's
+    /// settings. The keys are the Save Image block's own, so what the panel can ask for a line
+    /// can say; `console_keys::VERBS` is the one list of them.
     ///
-    /// `view=` takes the ViewCube's own names, so a snapshot is aimed the way a click aims it and
-    /// no second vocabulary of directions appears. The camera is set at once rather than swung,
-    /// since nobody is watching a scripted run and an animation would only be a wait.
-    ///
-    /// **`size=` is refused by name.** A snapshot is the viewport's own picture, read from the
-    /// texture it drew; rendering at some other size would mean a second path to a frame, with
-    /// its own targets and its own accumulation, and the one thing this file is for is being the
-    /// picture that was on screen. The window's size is what sets it.
+    /// **Without `quality=still` it is the viewport's own picture**, read from the texture it
+    /// drew, and `view=` moves the one camera to take it: the behaviour every script written
+    /// before the block existed relies on. `quality=still` draws a picture of its own at any
+    /// size, beside the viewport, and `view=` then aims a copy of the camera so nobody's view
+    /// is moved. **`size=` is refused by name**, as it always was: the displayed picture is the
+    /// window's size, and a size of its own is `width=`/`height=` on a Still.
     pub(crate) fn snap_command(&mut self, args: &Args) {
         if args.get("size").is_some() {
             self.warn(
-                "`snap size=` is not read — a snapshot is the viewport's own picture, so the \
-                 window's size is its size",
+                "`snap size=` is not read — the displayed picture is the window's size; a size of \
+                 its own is `quality=still width=…`",
             );
             return;
         }
-        let Some(file) = args.get("file").and_then(|v| v.as_str()) else {
-            self.warn("`snap` wants `file=` — `snap file=\"ref.png\"`");
+        if let Some(name) = args.get("block").map(|v| v.text()) {
+            match self.image_block_named(name.trim()) {
+                Some(id) => self.run_image_block(id, false),
+                None => self.warn(format!("there is no Save Image block called {name:?}")),
+            }
+            return;
+        }
+        let Some(file) = args.get("file").map(|v| v.text()) else {
+            self.warn("`snap` wants `file=` — `snap file=\"ref.png\"`, or `block=` to run a Save Image block");
             return;
         };
-        if let Some(name) = args.get("view").and_then(|v| v.as_str()) {
-            let wanted = name.trim();
-            let found = view_cube_faces()
-                .into_iter()
-                .find(|f| f.label().is_some_and(|l| l.eq_ignore_ascii_case(wanted)))
-                .or_else(|| {
-                    // The corner the cube calls home, which is what every tool calls iso.
-                    ["iso", "home", "isometric"]
-                        .contains(&wanted.to_ascii_lowercase().as_str())
-                        .then_some(CubeRegion { sign: [-1, -1, 1] })
-                })
-                .or_else(|| {
-                    // Any other face, edge or corner of the cube, by the signs of where the eye
-                    // goes: `view=1,-1,1` is the corner across the model from iso. What the cube
-                    // can be clicked to, a script can say.
-                    let signs: Vec<i8> =
-                        wanted.split(',').map(|v| v.trim().parse().ok()).collect::<Option<_>>()?;
-                    let sign: [i8; 3] = signs.try_into().ok()?;
-                    (sign.iter().all(|v| (-1..=1).contains(v)) && sign != [0, 0, 0])
-                        .then_some(CubeRegion { sign })
-                });
-            // Or any direction at all, from the target toward the eye: `view=0.8,-0.3,0.5` is
-            // the orbit somebody's screenshot was taken from, near enough to compare.
-            let toward = found.is_none().then(|| {
-                let parts: Vec<f32> = wanted.split(',').map(|v| v.trim().parse().ok()).collect::<Option<_>>()?;
-                let v: [f32; 3] = parts.try_into().ok()?;
-                let dir = nalgebra::Vector3::new(v[0], v[1], v[2]);
-                (dir.norm() > 1e-6).then_some(dir)
-            }).flatten();
-            if found.is_none() && toward.is_none() {
-                self.warn(format!(
-                    "`snap view=` takes the ViewCube's own names — front, back, left, right, top, \
-                     bottom or iso — a corner by signs, `view=1,-1,1`, or a direction, \
-                     `view=0.8,-0.3,0.5`, not {wanted:?}"
-                ));
-                return;
-            }
-            // Set rather than swung: nobody is watching a scripted run, and an animation would
-            // only be frames spent arriving. The same swing the ViewCube starts, finished at once.
-            match (found, toward) {
-                (Some(region), _) => self.camera.begin_snap(region),
-                (None, Some(dir)) => self.camera.begin_snap_toward(dir, nalgebra::Vector3::z()),
-                (None, None) => unreachable!("refused above"),
-            }
-            while self.camera.tick_snap(SNAP_SECONDS) {}
-            self.traced.invalidate(traced::Quality::Final);
+        let mut request = image_export::ImageRequest::displayed(std::path::PathBuf::from(&file));
+        if let Err(why) = image_export::read_image_keys(&mut request, args) {
+            self.warn(why);
+            return;
         }
-        // `zoom=3` is three times closer about the same target, for a picture of a detail at
-        // the zoom somebody looked at it with.
-        if let Some(zoom) = args.get("zoom").and_then(|v| v.as_f64()) {
-            if !(zoom > 0.0) {
-                self.warn("`snap zoom=` wants a number over nought: 3 is three times closer");
-                return;
-            }
-            self.camera.zoom_in(zoom as f32);
-            self.traced.invalidate(traced::Quality::Final);
-        }
-        let path = std::path::PathBuf::from(file);
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
-            && !parent.is_dir()
+        if let Some(ext) = request.path.extension().and_then(|e| e.to_str())
+            && args.get("format").is_none()
+            && let Some(f) = fieldform_scene::ImageFormat::from_extension(ext)
         {
-            self.warn(format!("there is no folder {} to write the snapshot into", parent.display()));
-            return;
+            request.format = f;
         }
-        // Asked for at final quality, so a snapshot taken mid-gesture is still the finished
-        // picture rather than the draft that happened to be up.
-        self.traced.invalidate(traced::Quality::Final);
-        self.pending_snap = Some(PendingSnap {
-            path,
-            since: std::time::Instant::now(),
-            compiling: std::time::Duration::ZERO,
-        });
-    }
-
-    /// Writes a pending snapshot once the view's still has converged. See [`PendingSnap`].
-    pub(crate) fn drive_snap(&mut self, ctx: &egui::Context) {
-        // A shader the driver is still compiling is progress, not a stall, so the wait is
-        // measured against everything but that.
-        let compiling = self.traced.is_compiling();
-        let Some(snap) = &mut self.pending_snap else { return };
-        if let Some(so_far) = compiling {
-            snap.compiling = snap.compiling.max(so_far);
-        }
-        let waited = snap.since.elapsed().saturating_sub(snap.compiling);
-        if waited > SNAP_WAIT_MAX {
-            let path = snap.path.clone();
-            self.pending_snap = None;
-            self.warn(format!(
-                "the view did not finish a still in {} s of drawing, so {} was not written",
-                SNAP_WAIT_MAX.as_secs(),
-                file_name(&path)
-            ));
-            return;
-        }
-        if !self.traced.is_settled() {
-            // Keep the frames coming: a still averages one a frame and stops when it is done.
-            ctx.request_repaint();
-            return;
-        }
-        let path = snap.path.clone();
-        self.pending_snap = None;
-        let Some(image) = self.traced.read_display() else {
-            self.warn(format!("there is no picture to write to {}", file_name(&path)));
-            return;
-        };
-        match image::RgbaImage::from_raw(image.width, image.height, image.rgba)
-            .ok_or_else(|| "the picture read back was the wrong size".to_string())
-            .and_then(|buffer| buffer.save(&path).map_err(|e| e.to_string()))
-        {
-            Ok(()) => self.say(format!(
-                "Wrote {} — {} by {}",
-                file_name(&path),
-                image.width,
-                image.height
-            )),
-            Err(why) => self.warn(format!("{} could not be written: {why}", file_name(&path))),
+        request.line = image_export::snap_line(&request);
+        if let Err(why) = self.begin_image(request) {
+            self.warn(why);
         }
     }
 

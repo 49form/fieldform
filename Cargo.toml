@@ -97,7 +97,10 @@ facet = { version = "0.46", features = ["reflect", "doc"] }
 env_logger = "0.11"
 flume = { version = "0.12", features = ["async"] }
 heck = { version = "0.5" }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Written directly for a saved image: text chunks and 16-bit depth, which the `image` facade
+# does not expose. The same crate `image` decodes PNGs with, so it costs the binary nothing new.
+png = "0.18"
 libc = "0.2"
 log = "0.4"
 naga = { version = "29.0.0", features = ["wgsl-in"] }

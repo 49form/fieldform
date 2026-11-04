@@ -51,7 +51,10 @@ use nalgebra::{Point3, Vector3};
 use std::time::{Duration, Instant};
 
 mod draw;
+mod offscreen;
 mod rebuild;
+
+pub use offscreen::{ImageCost, ImageOutcome, ImageStep, ImageTarget, ViewSnapshot};
 
 /// A band's shape, with the resolution taken out: two bakes of one shape that differ only in
 /// how finely they sample it describe the same geometry in the same place.
@@ -713,6 +716,26 @@ impl ViewKey {
     }
 }
 
+/// The longest edge a still may be drawn at: what the setting asks for, capped at what a
+/// G-buffer may be asked to hold. Nought asks for the viewport's own size.
+fn still_cap(max_pixels: u32) -> u32 {
+    if max_pixels == 0 { STILL_PIXELS } else { max_pixels.min(STILL_PIXELS) }
+}
+
+/// A frame of a `wide` by `high` viewport shrunk by `shrink`, in whole pixels, never nought.
+fn frame_size(wide: f32, high: f32, shrink: f32) -> (u32, u32) {
+    ((wide * shrink).round().max(1.0) as u32, (high * shrink).round().max(1.0) as u32)
+}
+
+/// The size a still of a `wide` by `high` viewport is drawn at under a quality asking for
+/// `max_pixels` on the longest edge -- the one derivation, which `draw` uses and which says what
+/// `snap` writes for the displayed picture and what a Still defaults to.
+pub fn still_frame_size(wide: f32, high: f32, max_pixels: u32) -> (u32, u32) {
+    let (wide, high) = (wide.max(1.0), high.max(1.0));
+    let shrink = (still_cap(max_pixels) as f32 / wide.max(high)).min(1.0);
+    frame_size(wide, high, shrink)
+}
+
 /// This frame's value of every slot the shader reads, in slot order, written into the buffer
 /// `spare` held. See [`note_view`] for where that buffer comes from.
 fn resolve_values(
@@ -1155,6 +1178,10 @@ pub struct TracedView {
     /// The camera, frame size and step budget of the last frame drawn: what the warm-up marches,
     /// and what a march-stats capture traces so that it is what is on screen.
     last_frame: Option<(Camera, u32, u32, u32)>,
+    /// A saved image being drawn beside the viewport, with targets of its own (`offscreen`).
+    image: Option<offscreen::ImageJob>,
+    /// A lid on a tile's pixels below the budget, set only by a test.
+    image_tile_pixels: Option<u64>,
     /// When the card was last given anything to do, which is what says its clocks have dropped.
     last_gpu_work: Option<Instant>,
     /// Until when the warm-up runs, while one is running. See [`CLOCKS_HOLD`].

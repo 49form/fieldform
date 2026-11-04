@@ -2,7 +2,7 @@
 // Copyright (c) 2026 49form
 //! Tests of a blend across a face its operands share, and what it may claim about itself there.
     use super::*;
-    use super::blend::{blend_bound, smooth_min};
+    use super::blend::{arc_crossing, blend_bound, has_closed_form, smooth_min};
     use crate::Normalization;
     use fieldform_scene::{BooleanOp, Continuity, Document, Fillet, Graph, Node, ParamRef};
     use nalgebra::{Point3, Vector3};
@@ -158,42 +158,143 @@
     }
 
     /// What [`blend_bound`] is claimed to be, held against the raw fillet over a grid of operand
-    /// values: the same zero set and sign; never more than a millimetre a millimetre of the
+    /// values at every exponent a fillet is offered -- the chamfer's one, G1's two, G2's three
+    /// -- and four: the same zero set and sign; never more than a millimetre a millimetre of the
     /// *larger* operand change, which is what makes it a bound whatever the operands' gradients
     /// are doing; between option A's value and the raw one; and the nearer operand itself once
-    /// the other is a radius further off.
+    /// the other is a radius further off. And, since the max-norm distance to Γ is what it is
+    /// claimed to be, it is held to that distance measured the slow way: Γ sampled densely and
+    /// the nearest sample taken.
     #[test]
     fn the_blends_bound_is_the_max_norm_distance_to_its_own_zero_set() {
-        let n = 2.0;
-        let steps: Vec<f64> = (-150..=200).map(|i| f64::from(i) * 0.1 + 0.0137).collect();
-        let mut steepest = 0.0f64;
-        for &a in &steps {
-            for &b in &steps {
-                let (h, f) = (blend_bound(a, b, K, n), smooth_min(a, b, K, n));
-                if f.abs() > 1e-9 {
-                    assert_eq!(h > 0.0, f > 0.0, "sign at ({a}, {b}): {h} against {f}");
-                    assert!(h.abs() <= f.abs() + 1e-12, "longer than the raw form at ({a}, {b})");
-                    assert!(
-                        h.abs() >= f.abs() / 2f64.sqrt() - 1e-12,
-                        "shorter than option A at ({a}, {b}): {h} against {f}"
-                    );
-                }
-                if b >= a.abs() + K {
-                    // To the last bit once clear of the line `b = |a| + k` itself, where the
-                    // arc ties with the operand and may round a bit low -- never high.
-                    assert!(
-                        h <= a && a - h < 1e-12,
-                        "a radius clear of the join it is the nearer operand: {h} against {a}"
-                    );
-                }
-                for (da, db) in [(0.07, 0.0), (0.0, 0.07), (0.07, 0.07), (0.07, -0.07), (-0.05, 0.07)] {
-                    let moved = blend_bound(a + da, b + db, K, n);
-                    let step = f64::max(f64::abs(da), f64::abs(db));
-                    steepest = steepest.max((moved - h).abs() / step);
+        for n in [1.0, 2.0, 3.0, 4.0] {
+            assert!(has_closed_form(n));
+            let steps: Vec<f64> = (-150..=200).map(|i| f64::from(i) * 0.1 + 0.0137).collect();
+            let mut steepest = 0.0f64;
+            // Γ, densely: the arc `(k - k·u, k - k·v)` over `uⁿ + vⁿ = 1`, sampled thickly at
+            // both ends -- at n = 3 and 4 the arc meets each ray with a vertical tangent, and a
+            // sampling even in `u` leaves a chord there half a unit long that a point a
+            // hundredth from the arc then reads as a fifth away -- and the two rays. The
+            // tolerance is the widest gap the sampling actually left, measured, not assumed.
+            let mut arc: Vec<(f64, f64)> = Vec::new();
+            for i in 0..=4000 {
+                let t = f64::from(i) / 4000.0;
+                for u in [t * t * t, 1.0 - (1.0 - t).powi(3)] {
+                    let v = (1.0 - u.powf(n)).max(0.0).powf(1.0 / n);
+                    arc.push((K - K * u, K - K * v));
                 }
             }
+            arc.sort_by(|p, q| p.partial_cmp(q).unwrap());
+            let spacing = arc
+                .windows(2)
+                .map(|w| (w[0].0 - w[1].0).abs().max((w[0].1 - w[1].1).abs()))
+                .fold(0.0f64, f64::max);
+            let mut gamma = arc;
+            for i in 0..=4000 {
+                let far = K + 40.0 * f64::from(i) / 4000.0;
+                gamma.push((0.0, far));
+                gamma.push((far, 0.0));
+            }
+            let mut worst_against_sampled = 0.0f64;
+            for &a in &steps {
+                for &b in &steps {
+                    let (h, f) = (blend_bound(a, b, K, n), smooth_min(a, b, K, n));
+                    if f.abs() > 1e-9 {
+                        assert_eq!(h > 0.0, f > 0.0, "n = {n}: sign at ({a}, {b}): {h} against {f}");
+                        assert!(h.abs() <= f.abs() + 1e-12, "n = {n}: longer than the raw form at ({a}, {b})");
+                        assert!(
+                            h.abs() >= f.abs() / 2f64.powf(1.0 / n) - 1e-12,
+                            "n = {n}: shorter than option A at ({a}, {b}): {h} against {f}"
+                        );
+                    }
+                    if b >= a.abs() + K {
+                        // To the last bit once clear of the line `b = |a| + k` itself, where the
+                        // arc ties with the operand and may round a bit low -- never high.
+                        assert!(
+                            h <= a && a - h < 1e-12,
+                            "n = {n}: a radius clear of the join it is the nearer operand: {h} against {a}"
+                        );
+                    }
+                    for (da, db) in [(0.07, 0.0), (0.0, 0.07), (0.07, 0.07), (0.07, -0.07), (-0.05, 0.07)] {
+                        let moved = blend_bound(a + da, b + db, K, n);
+                        let step = f64::max(f64::abs(da), f64::abs(db));
+                        steepest = steepest.max((moved - h).abs() / step);
+                    }
+                    // The slow way, on a coarser grid: the nearest sample of Γ in the max-norm.
+                    if (a * 10.0).round() as i64 % 4 == 0 && (b * 10.0).round() as i64 % 4 == 0 {
+                        let sampled = gamma
+                            .iter()
+                            .map(|&(ga, gb)| (a - ga).abs().max((b - gb).abs()))
+                            .fold(f64::INFINITY, f64::min);
+                        worst_against_sampled = worst_against_sampled.max((h.abs() - sampled).abs());
+                    }
+                }
+            }
+            assert!(steepest <= 1.0 + 1e-9, "n = {n}: it rose {steepest} for one of the larger operand's change");
+            assert!(
+                worst_against_sampled <= spacing,
+                "n = {n}: the closed form and the sampled distance differ by {worst_against_sampled}, past the sampling's {spacing}"
+            );
+            // And the crossing lies on the arc, which is the equation each closed form solves.
+            for i in -20..=20 {
+                let d = K * f64::from(i) / 20.0;
+                let s = arc_crossing(d, K, n).expect("within the arc's reach");
+                let (x, y) = ((s + d) / 2.0, (s - d) / 2.0);
+                assert!((x.powf(n) + y.powf(n) - K.powf(n)).abs() < 1e-9 * K.powf(n), "n = {n}, d = {d}: ({x}, {y}) is off the arc");
+            }
+            assert!(arc_crossing(K * 1.001, K, n).is_none());
         }
-        assert!(steepest <= 1.0 + 1e-9, "it rose {steepest} for one of the larger operand's change");
+    }
+
+    /// A rounded blend claims a distance nowhere: over two operands that are distances it says
+    /// `LowerBound`, since inside the join's reach it understates (spec §2.2, §3) -- and the
+    /// unit-gradient check that defines a distance confirms it where the bound is shortest,
+    /// which is not above a shared face (there the bound is the raised face's own distance,
+    /// exact) but on the diagonal of a join between square walls: two unit gradients at right
+    /// angles averaged, 0.707 long. With no radius it is a hard boolean, and a hard boolean of
+    /// two distances is a distance.
+    #[test]
+    fn a_blend_claims_distance_only_where_it_is_one() {
+        for continuity in [Continuity::G1, Continuity::G2, Continuity::Chamfer] {
+            let shared = two_slabs_sharing_a_top_at(continuity);
+            assert_eq!(shared.normalization(), Normalization::LowerBound, "{continuity:?}");
+            // An L: a slab with its top at z = 0, and an upright on its left whose face is at
+            // x = -10, blended at the inside corner.
+            let mut graph = Graph::empty();
+            let base = slab(&mut graph, -40.0, 40.0);
+            let upright = graph.add(Node::Cuboid {
+                edge: Default::default(),
+                centre: fieldform_scene::Place::At([lit(-15.0), lit(0.0), lit(10.0)]),
+                size: [lit(10.0), lit(40.0), lit(20.0)],
+                turn: fieldform_scene::no_turn(),
+            });
+            graph.add(Node::Blend {
+                op: BooleanOp::Union,
+                inputs: vec![base.into(), upright.into()],
+                fillet: Fillet { radius: lit(K), continuity, second: None },
+            });
+            let corner = GraphField::compile_graph(&Document::new(), &graph, 1e-3).expect("compiles");
+            assert_eq!(corner.normalization(), Normalization::LowerBound, "{continuity:?}");
+            // Along the inside corner's diagonal, within the radius of both faces, where the
+            // two readings agree and the bound's gradient is their mean.
+            let probes: Vec<Point3<f64>> = (1..12).map(|i| {
+                let t = 0.3 * f64::from(i);
+                Point3::new(-10.0 + t, 0.37, t)
+            }).collect();
+            let deviation = crate::gradient_deviation(&corner, &probes, 1e-4);
+            assert!(deviation > 0.2, "{continuity:?}: the blend reads like a distance on the corner's diagonal ({deviation})");
+            assert!(deviation < 0.5, "{continuity:?}: further off unit than two square gradients averaged ({deviation})");
+        }
+        let mut graph = Graph::empty();
+        let a = slab(&mut graph, -40.0, 10.0);
+        let b = slab(&mut graph, -10.0, 40.0);
+        graph.add(Node::Blend {
+            op: BooleanOp::Union,
+            inputs: vec![a.into(), b.into()],
+            fillet: Fillet { radius: lit(0.0), continuity: Continuity::G1, second: None },
+        });
+        let hard = GraphField::compile_graph(&Document::new(), &graph, 1e-3).expect("compiles");
+        assert_eq!(hard.normalization(), Normalization::Distance, "a radius of nought is a hard boolean of two distances");
     }
 
     /// **Option B as the spec words it would have been wrong here**, which is why it was not

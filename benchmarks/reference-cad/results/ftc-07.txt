@@ -1,0 +1,37 @@
+imported 1 solid(s) from benchmarks/reference-cad/models/nist_ftc_07_asme1_rd.stp in 1.4 s
+reference: 32328 triangles, volume 1726262 mm3, box 311.606 x 222.706 x 135.890 mm
+compiled at 0.001 mm in 0.03 s
+
+the reference's surface, read in our field, 216136 points
+  mean 0.0029  median 0.0000  p99 0.0340  p99.9 0.1201  worst 0.4464 mm
+  worst places, at least 5 mm apart:
+    -0.446 mm at (118.36, 95.12, -104.14)
+    -0.446 mm at (139.57, 73.91, -104.14)
+    -0.439 mm at (134.26, 79.19, -104.14)
+    -0.344 mm at (126.87, 86.29, -104.14)
+    -0.209 mm at (121.92, 90.78, -104.14)
+    +0.200 mm at (-148.05, -103.63, -120.45)
+    +0.200 mm at (148.05, 103.63, -120.45)
+    +0.200 mm at (-148.05, 103.63, -120.45)
+
+our surface, read in the reference's field (true distance), 244402 points
+  mean 0.0023  median 0.0000  p99 0.0222  p99.9 0.0747  worst 0.4078 mm
+  worst places, at least 5 mm apart:
+    +0.408 mm at (122.81, 90.10, -103.65)
+    +0.408 mm at (118.31, 94.60, -103.65)
+    +0.408 mm at (131.79, 81.11, -103.65)
+    +0.408 mm at (127.30, 85.61, -103.65)
+    +0.408 mm at (138.54, 74.37, -103.65)
+    -0.290 mm at (-148.05, -103.60, -120.14)
+    -0.290 mm at (148.05, -103.60, -120.14)
+    -0.280 mm at (-148.15, 103.42, -120.16)
+
+the solids on a 1 mm grid
+  ours 1719424, the reference 1719279 mm3
+  only ours 187, only the reference 42 mm3: 0.013% of the reference differs
+
+against the limits
+  pass drawing tolerance: worst 0.446 of 0.76 mm
+  FAIL worst point: 0.446 of 0.1 mm
+  pass 99% of points: 0.034 of 0.05 mm
+  pass volume: 0.013% of 0.1%

@@ -278,7 +278,8 @@ impl App {
             | Block::Parameter(_)
             | Block::Surface(_)
             | Block::Tessellation(_)
-            | Block::Export(_) => 0,
+            | Block::Export(_)
+            | Block::Image(_) => 0,
         };
         let mut out: Vec<Block> = variables.into_iter().map(Block::Parameter).collect();
         // **With the inputs, above the things that read them.** A surface is not built from
@@ -365,6 +366,7 @@ impl App {
         let (tessellations, exports) = self.output_blocks();
         out.extend(tessellations.into_iter().map(Block::Tessellation));
         out.extend(exports.into_iter().map(Block::Export));
+        out.extend(self.image_blocks().into_iter().map(Block::Image));
         out
     }
 
@@ -1978,6 +1980,7 @@ impl App {
                 Block::Surface(id) => self.surface_block(ui, id),
                 Block::Tessellation(id) => self.tessellation_block(ui, id),
                 Block::Export(id) => self.export_block(ui, id),
+                Block::Image(id) => self.image_block(ui, id),
                 Block::Node(id) => {
                     self.node_block(ui, id, &row.inside, &row.references, row.nested, nesting, holder)
                 }
@@ -2209,6 +2212,7 @@ impl App {
                 RowKey::Surface(_) => "Surface".to_string(),
                 RowKey::Tessellation(_) => fieldform_scene::Tessellation::DEFAULT_NAME.to_string(),
                 RowKey::Export(_) => fieldform_scene::Export::DEFAULT_NAME.to_string(),
+                RowKey::Image(_) => fieldform_scene::SaveImage::DEFAULT_NAME.to_string(),
                 RowKey::Import(_) => "Import".to_string(),
                 RowKey::Profile(key) => {
                     format!("Profile {}", self.profiles.number(key).unwrap_or(0))
@@ -2259,6 +2263,9 @@ impl App {
                     }
                     RowKey::Export(id) => {
                         self.rename_output(outputs::BlockRef::Export(id), text.trim())
+                    }
+                    RowKey::Image(id) => {
+                        self.rename_output(outputs::BlockRef::Image(id), text.trim())
                     }
                     RowKey::Import(source) => {
                         self.rename_output(outputs::BlockRef::Import(source), text.trim())
@@ -2316,6 +2323,13 @@ impl App {
                     .iter()
                     .find(|t| t.id == id)
                     .and_then(|t| t.name.clone())
+                    .unwrap_or_default(),
+                RowKey::Image(id) => self
+                    .doc
+                    .images
+                    .iter()
+                    .find(|b| b.id == id)
+                    .and_then(|b| b.name.clone())
                     .unwrap_or_default(),
                 RowKey::Export(id) => self
                     .doc

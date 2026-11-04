@@ -209,15 +209,17 @@ fn tile_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // The tile's square in the image's [-1, 1] frame, a pixel wider on every side. `v` runs
     // opposite to the row, so `v0` is the *top* edge and is the larger of the two.
-    let width = f32(camera.frame.x);
-    let height = f32(camera.frame.y);
     let tx = f32(tile % tiles_x);
     let ty = f32(tile / tiles_x);
     let t = f32(TILE);
-    let u0 = (tx * t - CULL_PIXEL_PAD) / width * 2.0 - 1.0;
-    let u1 = ((tx + 1.0) * t + CULL_PIXEL_PAD) / width * 2.0 - 1.0;
-    let v0 = 1.0 - (ty * t - CULL_PIXEL_PAD) / height * 2.0;
-    let v1 = 1.0 - ((ty + 1.0) * t + CULL_PIXEL_PAD) / height * 2.0;
+    // Through `image_uv`, as the rays are, so a frame that is a tile of a larger picture culls
+    // against the corners its rays actually go through.
+    let top_left = image_uv(camera, tx * t - CULL_PIXEL_PAD, ty * t - CULL_PIXEL_PAD);
+    let bottom_right = image_uv(camera, (tx + 1.0) * t + CULL_PIXEL_PAD, (ty + 1.0) * t + CULL_PIXEL_PAD);
+    let u0 = top_left.x;
+    let u1 = bottom_right.x;
+    let v0 = top_left.y;
+    let v1 = bottom_right.y;
 
     var corner: array<Ray, 4>;
     corner[0] = ray_at(camera, u0, v0);

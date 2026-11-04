@@ -186,70 +186,42 @@ impl TracedView {
         // A still draws at the size the setting asks for, capped at what a G-buffer may be
         // asked to hold; a drag keeps to its own cap regardless, since sharpness is what a
         // gesture trades away. Coarse asks for 720, which makes the two tiers one size.
-        let still_cap = if view.max_pixels == 0 {
-            STILL_PIXELS
-        } else {
-            view.max_pixels.min(STILL_PIXELS)
-        };
+        let still_cap = still_cap(view.max_pixels);
         let cap = if still {
             still_cap
         } else {
             interactive_pixels.min(still_cap).min(DRAFT_LADDER[self.draft_rung])
         };
         let shrink = (cap as f32 / wide.max(high)).min(1.0);
-        let width = (wide * shrink).round().max(1.0) as u32;
-        let height = (high * shrink).round().max(1.0) as u32;
+        let (width, height) = frame_size(wide, high, shrink);
 
-        let mut camera = Camera::looking_at(
-            view.eye,
-            view.target,
-            view.up,
-            view.scene,
-            view.fov_deg,
-            width as f64 / height as f64,
+        // The one derivation of a frame's camera and look, shared with a saved image so the
+        // two frame the scene identically (`offscreen::frame_camera`).
+        let snapshot = view.snapshot();
+        let mut camera = offscreen::frame_camera(
+            &snapshot,
+            width,
+            height,
+            // The app's sphere is the union of every bounded body's extent, so it encloses all
+            // of them exactly when there is no unbounded one -- which the rebuild checked.
+            self.scene_bounded,
+            // **No per-tile cull while a shader is in flight.** The renderer on screen is the
+            // previous program, and its cull extents are literals fixed when *it* was generated
+            // -- so they describe the document as it was before whatever edit started this
+            // compile. The numbers a frame draws with are current, the extents are not, and the
+            // gap is a body culled out of tiles it has since grown into. See `Camera::cull`.
+            //
+            // The same hole the box guards have always had, and this closes it for both: a
+            // guard is skipped where the body's own extent slots are, and both read the same
+            // stale literals.
+            self.compiling.is_none(),
+            self.value_scale.unwrap_or(1.0),
         );
-        camera.sections = fieldform_gpu::Sections::of(&view.sections);
-        // The app's sphere is the union of every bounded body's extent, so it encloses all of
-        // them exactly when there is no unbounded one -- which the rebuild checked.
-        camera.start_at_scene = self.scene_bounded;
-        // **No per-tile cull while a shader is in flight.** The renderer on screen is the
-        // previous program, and its cull extents are literals fixed when *it* was generated --
-        // so they describe the document as it was before whatever edit started this compile. The
-        // numbers a frame draws with are current, the extents are not, and the gap is a body
-        // culled out of tiles it has since grown into. See `Camera::cull`.
-        //
-        // The same hole the box guards have always had, and this closes it for both: a guard is
-        // skipped where the body's own extent slots are, and both read the same stale literals.
-        camera.cull = self.compiling.is_none();
-        // The same number the step budget is bought with, for the same reason: a divided field
-        // is honest and is not a distance estimate. The budget is what stops it losing the
-        // silhouette; this is what stops it shading black. See `Camera::value_scale`.
-        camera.value_scale = self.value_scale.unwrap_or(1.0);
-        if view.orthographic {
-            // The same half-height the app's own projection matrix uses: the perspective one
-            // taken out to the distance it is being viewed from. Sharing the derivation keeps
-            // the traced surface the same size as the cage drawn over it in overlay mode — two
-            // framings of one scene would show as the wireframe sitting a little inside or
-            // outside the surface it describes.
-            let distance = (view.eye - view.target).norm();
-            camera.orthographic = true;
-            camera.half_height = (distance * (view.fov_deg.to_radians() * 0.5).tan()).max(1e-9);
-            // Parallel rays start on a plane through the eye rather than at a point, so a ray
-            // at the edge of the frame begins further out than the centre one does. The budget
-            // has to cover that, or the model clips along its own silhouette.
-            camera.far += camera.half_height * 2.0;
-        }
 
         // The studio rig follows the camera, as the viewport's one light always has, so the
         // model is lit from wherever it is being looked at. The environment does not: its
         // reflections turn as you orbit, which is what makes a polished surface read as one.
-        let mut look = Look::for_environment(
-            view.environment,
-            view.material.clone(),
-            camera.forward,
-            camera.right,
-            camera.up,
-        );
+        let mut look = offscreen::frame_look(&snapshot, &camera);
         look.selected = view.selected;
         look.draft = view.draft;
         // Two screen pixels wide whatever the frame's scale: a 720-pixel drag frame shown
@@ -257,19 +229,7 @@ impl TracedView {
         look.outline_radius = (2.0 * shrink).round().clamp(1.0, 3.0) as u32;
         let accumulated = if still { self.accumulated } else { 0 };
         if still {
-            camera.jitter = halton_jitter(accumulated);
-            // The frames somebody looks at finish on the outline (`Camera::exact_finish`), on
-            // the rung that asks (`DisplayQuality::exact_finish`, every rung since the read is
-            // local), and by the env var for an example or a rung pulled back.
-            // `FIELDFORM_BAKE_FINISH=1` holds every still to its bake, the control arm for a
-            // picture that may or may not be the finish's doing.
-            camera.exact_finish = (view.exact_finish
-                || std::env::var_os("FIELDFORM_EXACT_FINISH").is_some())
-                && std::env::var_os("FIELDFORM_BAKE_FINISH").is_none();
-            if view.occlusion && view.environment.wants_occlusion() {
-                camera.occlusion =
-                    Some(Occlusion::for_scene(look.lights[0].direction, view.scene.1));
-            }
+            offscreen::still_frame(&mut camera, &look, &snapshot, accumulated);
         }
 
         let device = &render_state.device;

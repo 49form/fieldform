@@ -126,9 +126,9 @@ fn smooth_min(a: f32, b: f32, k: f32, n: f32) -> f32 {
 // and **nothing divided**, so a blend of a blend is not short by a factor a link. A radius clear
 // of the join it is the nearer operand, to the bit.
 //
-// The closed form is the circular fillet's. Any other exponent gets the old division, which is
-// sound and is what it had; n = 3 and n = 4 each have a closed form to put here when G2 picks
-// one.
+// The arc's crossing is in closed form at the exponents a fillet is offered -- one, two, three
+// and four (`arc_crossing`, matching its namesake in fieldform-field) -- so nothing a fillet can
+// be is divided; any other exponent gets the old division, which is sound and is what it had.
 //
 // A chamfer -- exponent one -- has its own, simpler: the zero set's middle piece is the segment
 // `x + y = k`, which the diagonal meets where the gaps sum to `k`.
@@ -145,7 +145,7 @@ fn blend_bound(a: f32, b: f32, k: f32, n: f32) -> f32 {
         }
         return select(nearest, -nearest, max(x, 0.0) + max(y, 0.0) > k);
     }
-    if n != 2.0 {
+    if !has_closed_form(n) {
         return smooth_min(a, b, k, n) / pow(2.0, 1.0 / n);
     }
     let x = k - a;
@@ -156,11 +156,60 @@ fn blend_bound(a: f32, b: f32, k: f32, n: f32) -> f32 {
     // The arc, where the diagonal through `(x, y)` crosses it.
     let across = x - y;
     if abs(across) <= k {
-        let along = sqrt(2.0 * k * k - across * across);
+        let along = arc_crossing(across, k, n);
         nearest = min(nearest, abs(along - (x + y)) * 0.5);
     }
-    let inside = length(vec2<f32>(max(x, 0.0), max(y, 0.0))) > k;
+    let inside = pow(max(x, 0.0), n) + pow(max(y, 0.0), n) > pow(k, n);
     return select(nearest, -nearest, inside);
+}
+
+// Whether `blend_bound` has the arc's crossing in closed form at this exponent.
+fn has_closed_form(n: f32) -> bool {
+    return n == 1.0 || n == 2.0 || n == 3.0 || n == 4.0;
+}
+
+// The real cube root, which WGSL does not offer: `pow` of a negative is undefined.
+fn cbrt(v: f32) -> f32 {
+    return sign(v) * pow(abs(v), 1.0 / 3.0);
+}
+
+// Where the diagonal through gaps `(x, y)` crosses the arc, as the sum `x' + y'` there, for a
+// difference `d = x - y` no larger than `k` -- the caller checks. The three equations, in the
+// sum `s`: `s^2 + d^2 = 2k^2` at two, `s^3 + 3d^2 s = 4k^3` at three (Cardano's one real
+// root), `s^4 + 6d^2 s^2 + d^4 = 8k^4` at four (a quadratic in `s^2`). The field's
+// `arc_crossing` is the same three.
+fn arc_crossing(d: f32, k: f32, n: f32) -> f32 {
+    let d2 = d * d;
+    let k2 = k * k;
+    if n == 3.0 {
+        // Cardano's second cube root is of a difference that cancels to noise in single
+        // precision; written as `-d^2 / cbrt(2k^3 + r)` it is the same number with nothing
+        // subtracted. The field's `arc_crossing` says why, and writes it the same way.
+        let k3 = k2 * k;
+        let root = sqrt(4.0 * k3 * k3 + d2 * d2 * d2);
+        let first = cbrt(2.0 * k3 + root);
+        return first - d2 / first;
+    }
+    if n == 4.0 {
+        let s2 = sqrt(8.0 * (d2 * d2 + k2 * k2)) - 3.0 * d2;
+        return sqrt(max(s2, 0.0));
+    }
+    return sqrt(2.0 * k2 - d2);
+}
+
+// How the crossing's sum leans with the difference, `-ds/dd`, which is what the arc's gradient
+// mixes the two operand gradients by: `d / s` at two, `2ds / (s^2 + d^2)` at three, and
+// `d(3s^2 + d^2) / (s(s^2 + 3d^2))` at four -- each by differentiating its equation above.
+fn arc_lean(d: f32, s: f32, n: f32) -> f32 {
+    let d2 = d * d;
+    let s2 = s * s;
+    if n == 3.0 {
+        return 2.0 * d * s / max(s2 + d2, 1e-12);
+    }
+    if n == 4.0 {
+        return d * (3.0 * s2 + d2) / max(s * (s2 + 3.0 * d2), 1e-12);
+    }
+    return d / max(s, 1e-12);
 }
 
 // The gradient of `blend_bound`, **with its length**, for the reason `blend_gradient` carries
@@ -193,7 +242,7 @@ fn blend_bound_normal(
         }
         return gradient;
     }
-    if n != 2.0 {
+    if !has_closed_form(n) {
         // Within both operands' reach the divided form mixes the two gradients as the arc
         // does, and reads short by about as much.
         if k - a > 0.0 && k - b > 0.0 {
@@ -203,7 +252,7 @@ fn blend_bound_normal(
     }
     let x = k - a;
     let y = k - b;
-    let inside = length(vec2<f32>(max(x, 0.0), max(y, 0.0))) > k;
+    let inside = pow(max(x, 0.0), n) + pow(max(y, 0.0), n) > pow(k, n);
     // Each candidate's distance, and the gradient of the *signed* value it would give.
     let by_a = max(abs(a), max(y, 0.0));
     let by_b = max(abs(b), max(x, 0.0));
@@ -217,10 +266,10 @@ fn blend_bound_normal(
     }
     let across = x - y;
     if abs(across) <= k {
-        let along = sqrt(2.0 * k * k - across * across);
+        let along = arc_crossing(across, k, n);
         if abs(along - (x + y)) * 0.5 < nearest {
             // d/d(x, y) of (along - x - y) / 2, and x, y fall as a, b rise.
-            let lean = across / max(along, 1e-12);
+            let lean = arc_lean(across, along, n);
             gradient = 0.5 * ((1.0 + lean) * ga + (1.0 - lean) * gb);
             seam_scale = seam_scale_of(ga, gb);
         }

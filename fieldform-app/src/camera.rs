@@ -9,6 +9,7 @@ use super::*;
 /// composing the previous frame's result), which avoids the slow drift that chaining many
 /// small quaternion multiplications produces — same rationale as `_tumble` in
 /// the reference camera.
+#[derive(Clone)]
 struct TumbleState {
     poi: Point3<f32>,
     start_eye: Point3<f32>,
@@ -29,6 +30,7 @@ struct TumbleState {
 /// `DOLLY_AXIS_LOCK_THRESHOLD` in the reference camera: without this, ordinary hand tremor
 /// during a vertical-only zoom drag leaks tiny horizontal deltas into an unwanted twist
 /// wobble (and vice versa).
+#[derive(Clone, Copy)]
 enum DollyAxis {
     Zoom,
     Twist,
@@ -38,6 +40,7 @@ enum DollyAxis {
 /// from the POI, horizontal motion twists (rolls) the camera around the world-space axis
 /// running through the eye and the POI, so the POI is the fixed point of the roll instead
 /// of the screen centre.
+#[derive(Clone)]
 struct DollyState {
     poi: Point3<f32>,
     start_eye: Point3<f32>,
@@ -73,6 +76,7 @@ fn safe_right(forward: Vector3<f32>, up_hint: Vector3<f32>) -> Vector3<f32> {
 /// target), because POI-anchored tumbling needs to orbit around an arbitrary pivot that
 /// generally isn't `target` — mirroring the reference camera's `view_rotation`/
 /// `view_location`-from-eye model rather than a simple look-at-a-fixed-point camera.
+#[derive(Clone)]
 pub(crate) struct OrbitCamera {
     pub(crate) eye: Point3<f32>,
     pub(crate) target: Point3<f32>,
@@ -121,6 +125,7 @@ pub(crate) struct OrbitCamera {
 /// instead of the model appearing to teleport.
 ///
 /// The target and the distance are untouched throughout. Only where you are standing changes.
+#[derive(Clone)]
 pub(crate) struct SnapAnimation {
     from: UnitQuaternion<f32>,
     pub(crate) to: UnitQuaternion<f32>,

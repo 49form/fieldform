@@ -93,6 +93,14 @@ pub struct Look {
     pub environment_intensity: f32,
     /// What a miss shows, in linear RGB.
     pub background: [f32; 3],
+    /// Whether the picture's alpha is coverage rather than one: a miss contributes nothing and
+    /// a hit contributes its colour at alpha one, averaged over the still's frames into a
+    /// premultiplied image that the lighting pass un-premultiplies before it tonemaps. For a
+    /// saved image that will be placed on some other background; the viewport never asks.
+    ///
+    /// **The caller promises no selection outline with it.** Coverage rides in the HDR
+    /// buffer's alpha, which is the outline's channel, so `selected` must be `None`.
+    pub transparent: bool,
     /// The selection outline's colour, **display-encoded**: it is interface, drawn over the
     /// tonemapped image, so exposure never dims it and it matches the panel's own yellow.
     pub outline: [f32; 3],
@@ -169,6 +177,7 @@ impl Look {
             // The dark neutral the viewport has always had, decoded from its display value
             // (24, 26, 30) so the background does not shift when the shading does.
             background: [0.0093, 0.0107, 0.0137],
+            transparent: false,
             outline: [1.0, 0.85, 0.25],
             outline_radius: 2,
             draft: None,
@@ -208,7 +217,13 @@ impl Look {
             ],
             light_dirs,
             light_colors,
-            background: [self.background[0], self.background[1], self.background[2], 1.0],
+            // `w` is the transparent flag: the spare of a vec4 that is read every pixel anyway.
+            background: [
+                self.background[0],
+                self.background[1],
+                self.background[2],
+                if self.transparent { 1.0 } else { 0.0 },
+            ],
             outline: [self.outline[0], self.outline[1], self.outline[2], 0.0],
             frame: [
                 self.selected.unwrap_or(u32::MAX),
@@ -520,7 +535,13 @@ struct FrameTargets {
 }
 
 impl FrameTargets {
-    fn new(device: &wgpu::Device, generation: u64, width: u32, height: u32) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        generation: u64,
+        width: u32,
+        height: u32,
+        present_format: PresentFormat,
+    ) -> Self {
         let pixels = u64::from(width) * u64::from(height);
         let storage = |label: &str, bytes: u64| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -536,7 +557,7 @@ impl FrameTargets {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: present_format.texture_format(),
             usage: wgpu::TextureUsages::STORAGE_BINDING
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
@@ -608,6 +629,50 @@ pub struct ShadingResources {
     timing: Timing,
     /// The bind groups of the frame being presented, kept across its bands.
     bindings: Option<FrameBindings>,
+    /// What the lit frame's texture holds: 8-bit for the viewport, half floats for a 16-bit
+    /// image. Fixed at construction, since the lighting pass's source names it.
+    present_format: PresentFormat,
+}
+
+/// The format of the texture the lighting pass writes -- see [`ShadingResources::with_present_format`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentFormat {
+    /// Display-encoded 8-bit, which is what egui samples and what every frame on screen is.
+    Rgba8,
+    /// Display-encoded half floats, for a 16-bit PNG written from the values before they were
+    /// quantised -- a 16-bit file expanded from 8-bit bytes would be a lie about its own depth.
+    Rgba16Float,
+}
+
+impl PresentFormat {
+    pub(crate) fn texture_format(self) -> wgpu::TextureFormat {
+        match self {
+            PresentFormat::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
+            PresentFormat::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
+        }
+    }
+
+    /// Bytes per pixel of a texture in this format, for the readback's row stride.
+    pub(crate) fn bytes_per_pixel(self) -> u32 {
+        match self {
+            PresentFormat::Rgba8 => 4,
+            PresentFormat::Rgba16Float => 8,
+        }
+    }
+
+    /// The lighting pass's source with its output declared in this format. One substitution,
+    /// of the one declaration that names it; a source that no longer carries that line is a
+    /// bug this would hide, so the 16-bit arm checks the swap happened.
+    pub(crate) fn shade_source(self) -> String {
+        const DECLARED: &str = "texture_storage_2d<rgba8unorm, write>";
+        match self {
+            PresentFormat::Rgba8 => SHADE.to_string(),
+            PresentFormat::Rgba16Float => {
+                debug_assert_eq!(SHADE.matches(DECLARED).count(), 1, "the present texture is declared once");
+                SHADE.replace(DECLARED, "texture_storage_2d<rgba16float, write>")
+            }
+        }
+    }
 }
 
 impl ShadingResources {
@@ -616,10 +681,25 @@ impl ShadingResources {
         queue: &wgpu::Queue,
         maps: &EnvironmentMaps,
     ) -> Result<Self, RenderError> {
-        crate::codegen::validated(SHADE).map_err(|e| RenderError::Shader(e.to_string()))?;
+        Self::with_present_format(device, queue, maps, PresentFormat::Rgba8)
+    }
+
+    /// As [`Self::new`], with the lit frame written in `present_format`.
+    ///
+    /// The lighting pass declares its output texture's format in its own source, so a
+    /// different format is a different pipeline; the one substitution below is the whole
+    /// difference, and the viewport never asks for anything but 8-bit.
+    pub fn with_present_format(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        maps: &EnvironmentMaps,
+        present_format: PresentFormat,
+    ) -> Result<Self, RenderError> {
+        let source = present_format.shade_source();
+        crate::codegen::validated(&source).map_err(|e| RenderError::Shader(e.to_string()))?;
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shade"),
-            source: wgpu::ShaderSource::Wgsl(SHADE.into()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
 
         let uniform_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
@@ -656,7 +736,7 @@ impl ShadingResources {
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::StorageTexture {
                         access: wgpu::StorageTextureAccess::WriteOnly,
-                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        format: present_format.texture_format(),
                         view_dimension: wgpu::TextureViewDimension::D2,
                     },
                     count: None,
@@ -739,7 +819,13 @@ impl ShadingResources {
             next_generation: 1,
             timing: Timing::new(device, queue),
             bindings: None,
+            present_format,
         })
+    }
+
+    /// The format the lit frame is written in.
+    pub fn present_format(&self) -> PresentFormat {
+        self.present_format
     }
 
     /// Whether a submission this timed is still running on the GPU.
@@ -792,7 +878,7 @@ impl ShadingResources {
             self.current = i;
             return;
         }
-        let fresh = FrameTargets::new(device, self.next_generation, width, height);
+        let fresh = FrameTargets::new(device, self.next_generation, width, height, self.present_format);
         self.next_generation += 1;
         if self.targets.len() < 2 {
             self.targets.push(fresh);
@@ -1011,6 +1097,14 @@ pub struct DisplayImage {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+}
+
+/// A displayed frame read back from a half-float set of targets: sRGB-encoded values in
+/// `[0, 1]`, four per pixel, row by row. See [`Renderer::read_display_f32`].
+pub struct DisplayImageF32 {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<f32>,
 }
 
 impl Renderer {
@@ -1313,12 +1407,40 @@ impl Renderer {
     }
 
     /// The last presented frame, read back as display-encoded bytes — for the examples that
-    /// write an image and the tests that check one. The application never calls this.
+    /// write an image, the tests that check one, and the application's own `snap`, which reads
+    /// the viewport's picture this way and a saved image's tiles too.
+    ///
+    /// Only of an 8-bit set of targets; a half-float one is read by [`Self::read_display_f32`].
     pub fn read_display(&self, shading: &ShadingResources) -> Result<DisplayImage, RenderError> {
+        if shading.present_format != PresentFormat::Rgba8 {
+            return Err(RenderError::Readback);
+        }
+        let (width, height, rgba) = self.read_present_rows(shading)?;
+        Ok(DisplayImage { width, height, rgba })
+    }
+
+    /// The last presented frame of a half-float set of targets, as display-encoded values in
+    /// `[0, 1]`, four per pixel. For a 16-bit image, which wants the values before they were
+    /// quantised to eight bits.
+    pub fn read_display_f32(&self, shading: &ShadingResources) -> Result<DisplayImageF32, RenderError> {
+        if shading.present_format != PresentFormat::Rgba16Float {
+            return Err(RenderError::Readback);
+        }
+        let (width, height, bytes) = self.read_present_rows(shading)?;
+        let rgba = bytes
+            .chunks_exact(2)
+            .map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32())
+            .collect();
+        Ok(DisplayImageF32 { width, height, rgba })
+    }
+
+    /// The present texture's rows, unpadded, in whatever format the targets hold.
+    fn read_present_rows(&self, shading: &ShadingResources) -> Result<(u32, u32, Vec<u8>), RenderError> {
         let targets = shading.targets().ok_or(RenderError::Readback)?;
         let (width, height) = (targets.width, targets.height);
+        let stride = width * shading.present_format.bytes_per_pixel();
         // Rows of a texture copied to a buffer are padded to 256 bytes.
-        let padded = (width * 4).div_ceil(256) * 256;
+        let padded = stride.div_ceil(256) * 256;
         let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("display-readback"),
             size: u64::from(padded) * u64::from(height),
@@ -1348,14 +1470,14 @@ impl Renderer {
             .poll(wgpu::PollType::wait_indefinitely())
             .map_err(|_| RenderError::Readback)?;
         let view = slice.get_mapped_range();
-        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        let mut rows = Vec::with_capacity((stride * height) as usize);
         for row in 0..height {
             let start = (row * padded) as usize;
-            rgba.extend_from_slice(&view[start..start + (width * 4) as usize]);
+            rows.extend_from_slice(&view[start..start + stride as usize]);
         }
         drop(view);
         readback.unmap();
-        Ok(DisplayImage { width, height, rgba })
+        Ok((width, height, rows))
     }
 
     /// The accumulated linear image, for tests that check energy rather than appearance.

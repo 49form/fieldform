@@ -1,0 +1,37 @@
+imported 1 solid(s) from benchmarks/reference-cad/models/827-9999-906.stp in 2.5 s
+reference: 21728 triangles, volume 22866 mm3, box 102.540 x 69.545 x 19.507 mm
+compiled at 0.001 mm in 0.00 s
+
+the reference's surface, read in our field, 210858 points
+  mean 0.0003  median 0.0000  p99 0.0047  p99.9 0.0069  worst 0.0086 mm
+  worst places, at least 5 mm apart:
+    -0.009 mm at (4.04, 44.98, 13.05)
+    -0.009 mm at (4.04, 24.93, 13.08)
+    -0.008 mm at (19.26, 46.09, 13.06)
+    -0.008 mm at (20.40, 27.69, 13.09)
+    -0.006 mm at (64.09, 58.48, 2.79)
+    -0.006 mm at (61.33, 58.96, 7.29)
+    -0.006 mm at (66.99, 59.96, 7.36)
+    -0.005 mm at (58.77, 62.72, 2.96)
+
+our surface, read in the reference's field (true distance), 37614 points
+  mean 0.0003  median 0.0000  p99 0.0052  p99.9 0.0073  worst 0.0081 mm
+  worst places, at least 5 mm apart:
+    +0.008 mm at (21.98, 46.56, 13.28)
+    +0.008 mm at (19.28, 23.77, 13.29)
+    +0.008 mm at (8.34, 43.22, 13.29)
+    +0.008 mm at (4.29, 26.52, 13.27)
+    +0.006 mm at (61.75, 58.77, 8.89)
+    +0.006 mm at (61.74, 58.77, 3.59)
+    +0.005 mm at (66.31, 59.35, 6.58)
+    +0.005 mm at (65.03, 7.06, 2.58)
+
+the solids on a 0.25 mm grid
+  ours 22520, the reference 22518 mm3
+  only ours 4, only the reference 2 mm3: 0.025% of the reference differs
+
+against the limits
+  pass drawing tolerance: worst 0.009 of 0.203 mm
+  pass worst point: 0.009 of 0.1 mm
+  pass 99% of points: 0.005 of 0.05 mm
+  pass volume: 0.025% of 0.1%

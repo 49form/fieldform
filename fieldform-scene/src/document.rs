@@ -562,6 +562,9 @@ pub struct Document {
     pub tessellations: Vec<crate::Tessellation>,
     /// Files written from tessellations, in the order they were made.
     pub exports: Vec<crate::Export>,
+    /// The viewport written as image files, in the order the blocks were made -- backlog
+    /// item 117. A list for the reason the other two are.
+    pub images: Vec<crate::SaveImage>,
     /// Where each node is drawn in the list: inside the one block that owns it, free, or a
     /// variable — see [`Ownership`] and `block-ownership-spec.md`.
     ///
@@ -794,6 +797,7 @@ impl Document {
             relations: std::collections::BTreeMap::new(),
             tessellations: Vec::new(),
             exports: Vec::new(),
+            images: Vec::new(),
             ownership_nodes: HashMap::new(),
             ownership_curves: HashMap::new(),
             pending_ownership_changes: Vec::new(),

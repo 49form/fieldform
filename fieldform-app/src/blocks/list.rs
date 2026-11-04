@@ -21,6 +21,8 @@ pub(crate) enum RowKey {
     Surface(fieldform_scene::QuadMeshId),
     Tessellation(fieldform_scene::TessellationId),
     Export(fieldform_scene::ExportId),
+    /// A Save Image block's row (item 117).
+    Image(fieldform_scene::SaveImageId),
     Import(fieldform_scene::id::SourceId),
     /// A profile row, keyed by its first curve. Its name is `Document::profile_names`
     /// (`profile-group-spec.md` §3.3), and an empty one puts "Profile N" back.
@@ -190,6 +192,8 @@ pub(crate) enum Block {
     Tessellation(fieldform_scene::TessellationId),
     /// A file written from a tessellation — the second.
     Export(fieldform_scene::ExportId),
+    /// The viewport written as an image file — the third output block (item 117).
+    Image(fieldform_scene::SaveImageId),
     /// Everything one file brought in, as one row that opens.
     ///
     /// A STEP assembly is one solid per body — forty of them for a real machine — and forty
@@ -703,7 +707,8 @@ pub(crate) fn nest_rows(
             | Block::Surface(_)
             | Block::Import(_)
             | Block::Tessellation(_)
-            | Block::Export(_) => Vec::new(),
+            | Block::Export(_)
+            | Block::Image(_) => Vec::new(),
         };
         // An owner further down the list holds this row; one that is not is not a row of this
         // list, and the block keeps a row of its own rather than vanishing into nothing.

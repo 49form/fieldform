@@ -117,6 +117,14 @@ pub const INFILL_LATTICE_KEYS: &[&str] = &[
     "phase", "thickness", "offset", "density", "radius", "origin", "axis", "jitter", "seed",
 ];
 
+/// Verbs whose block is a document record rather than a `Node`, each with the test that holds
+/// its fields to its keys in place of `every_field_a_block_has_is_a_key_its_verb_reads`, which
+/// walks `Node` samples and cannot reach these.
+pub const NOT_A_NODE: &[(&str, &str)] = &[(
+    "image.block",
+    "image_tests::every_field_of_the_block_is_a_key_saveimage_reads_or_a_recorded_gap",
+)];
+
 /// The table. Keys are the block's serialized field names wherever one exists; where the
 /// instructions chose a shorter word (`rate`, `r`, `arc`) both are read and both cover the field.
 pub const VERBS: &[Verb] = &[
@@ -562,9 +570,62 @@ pub const VERBS: &[Verb] = &[
     // `rename 'Sphere_0' to=ball`: the row by what it is called, as `variable` takes it, and what
     // it is to be called. The echo's spelling of a name typed into a row (`interaction-spec.md` §6).
     Verb { op: "block.rename", keys: Keys::Declared { reads: &[switch("name"), switch("to")], not_read: &[] } },
+    // The picture keys are the Save Image block's own fields, read by `snap` and `saveimage` alike
+    // (`image_export::read_image_keys`): `ss` covers `supersample`, `bg` covers `background` and
+    // `jpgq` covers `jpeg_quality`, as the design spells them. `size` is read only to be refused by
+    // name, and `block` runs a block's settings. `overlays` is accepted as `none` and refused
+    // otherwise, since the interface's drawing is not the march's.
     Verb {
         op: "view.snap",
-        keys: Keys::Declared { reads: &[switch("file"), switch("view"), switch("zoom"), switch("size")], not_read: &[] },
+        keys: Keys::Declared {
+            reads: &[
+                switch("file"),
+                switch("block"),
+                switch("view"),
+                switch("zoom"),
+                switch("size"),
+                switch("width"),
+                switch("height"),
+                switch("quality"),
+                switch("ss"),
+                switch("bg"),
+                switch("format"),
+                switch("bits"),
+                switch("jpgq"),
+                switch("overlays"),
+                switch("overwrite"),
+            ],
+            not_read: &[],
+        },
+    },
+    // `saveimage`: a Save Image block. The quoted word is its name (`name` is read as the verb's
+    // own), `pattern` is the file name's pattern -- `name` would have been the design's word for
+    // it, and is the block's here as it is every other block's -- and `every` is the number
+    // `capture=seconds` and `capture=commits` take. `part` is the part being edited.
+    Verb {
+        op: "image.block",
+        keys: Keys::Declared {
+            reads: &[
+                switch("name"),
+                key("view", &["view"]),
+                key("width", &["width"]),
+                key("height", &["height"]),
+                key("quality", &["quality"]),
+                key("ss", &["supersample"]),
+                key("bg", &["background"]),
+                key("format", &["format"]),
+                key("bits", &["bits"]),
+                key("jpgq", &["jpeg_quality"]),
+                key("folder", &["folder"]),
+                key("pattern", &["pattern"]),
+                key("overwrite", &["overwrite"]),
+                key("capture", &["capture"]),
+                key("every", &["capture"]),
+                key("max", &["max_count"]),
+                switch("overlays"),
+            ],
+            not_read: &[("id", "drawn fresh"), ("part", "the part being edited")],
+        },
     },
     Verb {
         op: "param.set",
@@ -3024,6 +3085,10 @@ pub(crate) mod tests {
         // The other way: a key or an exception in the table names a field some block has.
         for verb in VERBS {
             let Keys::Declared { reads, not_read } = &verb.keys else { continue };
+            if NOT_A_NODE.iter().any(|(op, _)| *op == verb.op) {
+                // Held by its own test, named beside the op; the covers are its documentation.
+                continue;
+            }
             let Some(fields) = fields_by_op.get(verb.op) else {
                 // A verb that makes no block (`run`, `saveas`) covers no field and needs no
                 // sample; a verb that covers fields must have a block to hold them to.

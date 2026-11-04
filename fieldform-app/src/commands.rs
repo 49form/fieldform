@@ -639,6 +639,11 @@ fn build() -> Vec<Command> {
             .hint("Writes the document to a new file. `saveas file=…` without the dialog."),
         op("file.export_stl", "export", "Export STL...").menu(FILE, 1)
             .hint("Meshes the part and writes it as STL. `export file=… detail=fine` without the dialog."),
+        op("image.block", "saveimage", "Save Image...").menu(FILE, 1).aliases(&["render", "picture", "png", "jpeg"])
+            .hint("A Save Image block: the viewport as a PNG or JPEG at any size, with the settings kept \
+                   in the document. `saveimage width=5000 ss=2 bg=transparent 'hero'` from a line."),
+        op("image.save_again", "saveagain", "Save image again").aliases(&["snapshot again", "render again"])
+            .hint("Saves another picture with the settings used last, to the next free name."),
         op("file.import", "import", "Import...").menu(FILE, 1)
             .hint("STEP, OBJ or IGES — the file says which, and its options are asked after."),
         op("file.exit", "exit", "Exit").menu(FILE, 2).also(&["quit"])
@@ -1497,6 +1502,7 @@ mod tests {
             ("morph", "modify.morph"), ("new", "file.new"), ("draw", "draw.plane"),
             ("section", "view.section"), ("open", "file.open"), ("save", "file.save"),
             ("saveas", "file.save_as"), ("import", "file.import"), ("export", "file.export_stl"),
+            ("saveimage", "image.block"), ("saveagain", "image.save_again"),
             ("tess", "create.tessellate"), ("tessellate", "create.tessellate"),
             ("tesselate", "create.tessellate"), ("undo", "edit.undo"), ("redo", "edit.redo"),
             ("delete", "edit.delete_body"), ("variable", "block.make_variable"),

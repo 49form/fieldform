@@ -14,6 +14,8 @@ mod cage_mesh;
 mod render;
 mod traced;
 mod outputs;
+mod image_export;
+mod image_block;
 mod memory;
 mod menu_hover;
 mod preview;
@@ -100,9 +102,8 @@ use overlay_draw::{
     GUIDE_COLOR, GUIDE_FILL, HOVER_COLOR, HOVER_FILL, PLANE_PREVIEW_FILL, SELECTION_COLOR,
     SELECTION_FILL,
 };
-use script::{
-    ExpectRecord, PendingSnap, SaveAs, Script, ScriptTally, SCRIPT_EXIT_CODE, SNAP_WAIT_MAX,
-};
+use script::{ExpectRecord, SaveAs, Script, ScriptTally, SCRIPT_EXIT_CODE, SNAP_WAIT_MAX};
+use image_export::PendingSnap;
 use console::{
     console_arguments, console_commands, console_words, ends_from_word, parse_value,
     pattern_options_from, side_from_word, split_degree_suffix, wall_thickness_asked, wall_wanted,
@@ -456,6 +457,8 @@ fn install_crash_log() -> std::path::PathBuf {
 mod tests;
 #[cfg(test)]
 mod app_tests;
+#[cfg(test)]
+mod image_tests;
 
 fn main() -> eframe::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -3720,6 +3723,8 @@ struct App {
     expect_results: Vec<ExpectRecord>,
     /// A snapshot waiting for the view to finish its still. See [`PendingSnap`].
     pending_snap: Option<PendingSnap>,
+    /// Everything about running the Save Image blocks, none of it saved (`image_block`).
+    images: image_block::ImageRuns,
     /// What a run has tallied so far, kept across the frames a snapshot waits for. See
     /// [`App::drive_script`].
     script_tally: Option<ScriptTally>,
@@ -4404,6 +4409,7 @@ impl App {
             script_running: false,
             expect_results: Vec::new(),
             pending_snap: None,
+            images: image_block::ImageRuns::default(),
             script_tally: None,
             traced_error_said: None,
             // **Never from a test's `App`.** The file is one name in the temp folder and this
@@ -4896,6 +4902,8 @@ impl App {
                 self.place_or_begin_curve("curve", degree, args);
             }
             "file.export_stl" => self.export_command(args),
+            "image.block" => self.saveimage_command(args),
+            "image.save_again" => self.save_image_again(),
             // `pipe curve=l1 radius=3`; a ramp's name drives the radius.
             "create.pipe" => self.pipe_with_keys(args),
             "create.boolean" => self.apply_boolean(args),
@@ -9623,6 +9631,7 @@ impl eframe::App for App {
         self.guard_close(ui.ctx());
         self.autosave();
         self.drive_snap(ui.ctx());
+        self.drive_captures(ui.ctx());
         self.drive_script(ui.ctx());
         self.drive_agent();
         self.help_windows(ui.ctx());

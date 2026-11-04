@@ -155,6 +155,26 @@ pub struct Camera {
     /// stale, and defaulting off would leave the cull untested by `gpu_matches_cpu` -- which is
     /// the only thing that checks it against the CPU's own field.
     pub cull: bool,
+    /// The image this frame is one tile of, or `None` for a frame that is the whole picture.
+    ///
+    /// An image too large for one set of targets -- a print at ten thousand pixels across
+    /// against a device that binds a storage buffer of 128 MiB -- is drawn as tiles, and every
+    /// tile casts its rays through the *one* projection of the whole image, offset to where the
+    /// tile sits in it: a sub-frustum of the same camera, never a camera aimed at the tile. That
+    /// is what makes the seams invisible, and it is why the offset lives here in the camera and
+    /// not in a second copy of the ray arithmetic. `aspect` is the whole image's.
+    pub tile: Option<ImageTile>,
+}
+
+/// Where a frame sits in the image it is a tile of -- see [`Camera::tile`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageTile {
+    /// The tile's top-left pixel in the whole image.
+    pub x: u32,
+    pub y: u32,
+    /// The whole image's size in pixels, which the projection is of.
+    pub width: u32,
+    pub height: u32,
 }
 
 /// What the march measures beyond the surface: how open it is, and how much of one light
@@ -338,6 +358,7 @@ impl Camera {
             start_at_scene: false,
             // The common case: a program generated from the document it is about to draw.
             cull: true,
+            tile: None,
         }
     }
 }
@@ -358,6 +379,7 @@ pub(crate) struct CameraUniform {
     jitter: [f32; 4],
     band: [u32; 4],
     scene: [f32; 4],
+    tile: [u32; 4],
 }
 
 /// The camera as the shaders read it. Shared by the readback path and the presented one, so
@@ -436,6 +458,11 @@ pub(crate) fn camera_uniform(
             // Zero is how the shader reads "start at the eye" -- see `Camera.scene`.
             if camera.start_at_scene { camera.scene_radius as f32 } else { 0.0 },
         ],
+        // A zero image size is how the shader reads "this frame is the whole picture".
+        tile: match camera.tile {
+            Some(t) => [t.x, t.y, t.width.max(1), t.height.max(1)],
+            None => [0, 0, 0, 0],
+        },
     }
 }
 

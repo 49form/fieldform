@@ -90,9 +90,12 @@ pub use loft::LoftSmooth;
 pub use sides::{AngleSides, Sides};
 pub use id::{
     CageId, CurveId, ExportId, MeshId, NodeId, ParamId, PartId, QuadMeshId, RelationId,
-    TessellationId,
+    SaveImageId, TessellationId,
 };
-pub use output::{Export, MeshDetail, MeshTolerance, Tessellation};
+pub use output::{
+    Capture, Export, ImageBackground, ImageFormat, ImageQuality, MeshDetail, MeshTolerance,
+    SaveImage, Tessellation,
+};
 // `MaterialValues` is named by nothing outside, but the application is handed one in every
 // `Preset::material` it turns into a `Material`, and a type another crate receives is one it
 // should be able to name, which only the root can promise now that `material` is private.

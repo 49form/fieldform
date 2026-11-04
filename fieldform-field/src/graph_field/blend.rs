@@ -159,11 +159,11 @@ pub(crate) fn blend(op: BooleanOp, a: f64, b: f64, k: f64, exponent: f64, k_eff:
 ///
 /// The nearest point of Γ in the max-norm is found along the diagonal `(1, 1)`, since the arc
 /// falls as it runs and a square growing about `(a, b)` first touches it with a corner. With
-/// `x = k − a`, `y = k − b`, the diagonal keeps `x − y` and at the arc `x + y = √(2k² − (x−y)²)`
-/// for n = 2 -- one square root. That closed form is why this is built for the circular (G1)
-/// fillet only: n = 3 and n = 4 have their own, a cube root and two square roots, and each is
-/// a function to add here when G2 chooses its exponent. **Until then any other exponent gets
-/// option A's division**, which is sound and is what it had.
+/// `x = k − a`, `y = k − b`, the diagonal keeps `x − y` and crosses the arc where the sum
+/// `x + y` is [`arc_crossing`]: one square root at n = 2, a cube root at n = 3, two square
+/// roots at n = 4. Those are the exponents a fillet is offered -- G1, G2 and the chamfer's one
+/// -- so **nothing a fillet can be is divided any more**; an exponent with no closed form
+/// still gets option A's division, which is sound and is what it had.
 ///
 /// Still a `LowerBound` and reported as one: inside the join's reach it understates, by up to
 /// 2^(1/n) across the middle of a fillet between square walls.
@@ -186,7 +186,7 @@ pub(crate) fn blend_bound(a: f64, b: f64, k: f64, exponent: f64) -> f64 {
         let inside = x.max(0.0) + y.max(0.0) > k;
         return if inside { -nearest } else { nearest };
     }
-    if exponent != 2.0 {
+    if !has_closed_form(exponent) {
         return smooth_min(a, b, k, exponent) / 2f64.powf(1.0 / exponent);
     }
     let (x, y) = (k - a, k - b);
@@ -195,14 +195,62 @@ pub(crate) fn blend_bound(a: f64, b: f64, k: f64, exponent: f64) -> f64 {
     let mut nearest = a.abs().max(y.max(0.0)).min(b.abs().max(x.max(0.0)));
     // The arc, where the diagonal through the point crosses it -- which it does exactly when
     // the two gaps differ by no more than the radius.
-    let across = x - y;
-    if across.abs() <= k {
-        let along = (2.0 * k * k - across * across).sqrt();
+    if let Some(along) = arc_crossing(x - y, k, exponent) {
         nearest = nearest.min((along - (x + y)).abs() * 0.5);
     }
-    // Inside the blended solid is past Γ: the gaps' norm exceeds the radius.
-    let inside = x.max(0.0).hypot(y.max(0.0)) > k;
+    // Inside the blended solid is past Γ: the gaps' n-norm exceeds the radius.
+    let inside = x.max(0.0).powf(exponent) + y.max(0.0).powf(exponent) > k.powf(exponent);
     if inside { -nearest } else { nearest }
+}
+
+/// Whether [`blend_bound`] has the arc's crossing in closed form at this exponent: the chamfer's
+/// one, G1's two, G2's three, and four.
+pub(crate) fn has_closed_form(exponent: f64) -> bool {
+    matches!(exponent, 1.0 | 2.0 | 3.0 | 4.0)
+}
+
+/// Where the diagonal through gaps `(x, y)` crosses the arc `x'ⁿ + y'ⁿ = kⁿ`, as the sum
+/// `x' + y'` there, or `None` where the diagonal misses the arc's quadrant -- which is when the
+/// gaps differ by more than the radius, `d = x − y` being what the diagonal keeps.
+///
+/// With `x' = (s + d)/2` and `y' = (s − d)/2` the arc's equation in the sum `s` is
+///
+/// ```text
+/// n = 1:  s = k                         the chamfer's segment, no root at all
+/// n = 2:  s² + d² = 2k²               one square root
+/// n = 3:  s³ + 3d²s = 4k³             a depressed cubic with one real root (Cardano)
+/// n = 4:  s⁴ + 6d²s² + d⁴ = 8k⁴       a quadratic in s², two square roots
+/// ```
+///
+/// `blend_bound` and `blend_bound_normal` in the shader's prelude carry the same three, and
+/// `the_blends_bound_is_the_max_norm_distance_to_its_own_zero_set` holds each against the arc
+/// sampled densely.
+pub(crate) fn arc_crossing(d: f64, k: f64, exponent: f64) -> Option<f64> {
+    if d.abs() > k {
+        return None;
+    }
+    let (d2, k2) = (d * d, k * k);
+    if exponent == 1.0 {
+        // The chamfer's middle piece is the segment `x' + y' = k` itself.
+        Some(k)
+    } else if exponent == 2.0 {
+        Some((2.0 * k2 - d2).sqrt())
+    } else if exponent == 3.0 {
+        // Cardano gives `∛(2k³ + r) + ∛(2k³ − r)` with `r = √(4k⁶ + d⁶)`; the second root is of
+        // a difference that cancels to almost nothing, and in the shader's single precision
+        // the cube root of that noise was a tenth of a millimetre on a cone's edge. The two
+        // radicands multiply to `−d⁶`, so the second root is `−d² / ∛(2k³ + r)`: the same
+        // number, with nothing subtracted. Both compilers write it this way.
+        let k3 = k2 * k;
+        let root = (4.0 * k3 * k3 + d2 * d2 * d2).sqrt();
+        let first = (2.0 * k3 + root).cbrt();
+        Some(first - d2 / first)
+    } else if exponent == 4.0 {
+        let s2 = (8.0 * (d2 * d2 + k2 * k2)).sqrt() - 3.0 * d2;
+        Some(s2.max(0.0).sqrt())
+    } else {
+        None
+    }
 }
 
 /// How a profile solid's rims are cut, resolved: the reach typed, the shape's exponent and which
@@ -490,9 +538,9 @@ pub fn taper_ratio(document: &Document, graph: &Graph, node: NodeId) -> f64 {
 ///
 /// `taper` is [`taper_ratio`], nought in a part with no critical marks.
 pub(crate) fn blend_divisor(k: f64, exponent: f64, taper: f64) -> f64 {
-    // [`blend_bound`] divides by nothing: a circular fillet in a part with no critical marks
-    // costs the tracer no steps, and a chain of them costs none either.
-    if k <= 0.0 || (taper <= 0.0 && exponent == 2.0) {
+    // [`blend_bound`] divides by nothing: a fillet of any shape offered, in a part with no
+    // critical marks, costs the tracer no steps, and a chain of them costs none either.
+    if k <= 0.0 || (taper <= 0.0 && has_closed_form(exponent)) {
         return 1.0;
     }
     let steepest = 2f64.powf(1.0 / exponent);
@@ -502,8 +550,8 @@ pub(crate) fn blend_divisor(k: f64, exponent: f64, taper: f64) -> f64 {
 /// How fast a blend's reading can change per millimetre of *radius*, which is what a radius
 /// following a ramp costs ([`super::lipschitz::driven_blend_divisor`]).
 ///
-/// [`blend_bound`] at G1 and at the chamfer is the max-norm distance to the zero set Γ(k), and
-/// Γ moves by at most `dk` when `k` does: its two rays end at `(0, k)` and `(k, 0)`, and the arc
+/// [`blend_bound`] at every shape a fillet is offered is the max-norm distance to the zero set
+/// Γ(k), and Γ moves by at most `dk` when `k` does: its two rays end at `(0, k)` and `(k, 0)`, and the arc
 /// between them is `(k − k·u, k − k·v)` over the unit curve `uⁿ + vⁿ = 1`, whose rate in `k` is
 /// `(1 − u, 1 − v)` with both parts in `[0, 1]`. A distance to a set moves by no more than the
 /// set does, so the rate is **one**.
@@ -515,7 +563,7 @@ pub(crate) fn blend_divisor(k: f64, exponent: f64, taper: f64) -> f64 {
 /// tapering form keeps the constant divisor its proof was made for, so a part with critical
 /// marks takes this rate at every exponent.
 pub(crate) fn blend_radius_rate(exponent: f64, tapers: bool) -> f64 {
-    if !tapers && (exponent == 1.0 || exponent == 2.0) {
+    if !tapers && has_closed_form(exponent) {
         1.0
     } else {
         1.0 + 2f64.powf(-1.0 / exponent)

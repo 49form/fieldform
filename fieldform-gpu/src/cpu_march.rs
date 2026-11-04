@@ -518,9 +518,17 @@ pub fn ruled_out_on_the_cpu(
 }
 
 /// `primary_ray` in `f32`, jitter nought, for pixel `(x, y)` of a `frame`.
+///
+/// Honours [`Camera::tile`] as the shader's `image_uv` does: the pixel is offset to where the
+/// frame sits in the whole picture and divided by the picture's size, so a tiled render
+/// compares against the CPU pixel for pixel.
 pub fn pixel_ray(camera: &Camera, frame: (u32, u32), x: u32, y: u32) -> (V3, V3) {
-    let u = (x as f32 + 0.5) / frame.0 as f32 * 2.0 - 1.0;
-    let v = 1.0 - (y as f32 + 0.5) / frame.1 as f32 * 2.0;
+    let (px, py, w, h) = match camera.tile {
+        Some(t) => ((x + t.x) as f32, (y + t.y) as f32, t.width as f32, t.height as f32),
+        None => (x as f32, y as f32, frame.0 as f32, frame.1 as f32),
+    };
+    let u = (px + 0.5) / w * 2.0 - 1.0;
+    let v = 1.0 - (py + 0.5) / h * 2.0;
     let f = |v: Vector3<f64>| V3::new(v.x as f32, v.y as f32, v.z as f32);
     let half_h = camera.half_height as f32;
     let aspect = camera.aspect as f32;

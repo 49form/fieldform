@@ -1,0 +1,78 @@
+# NIST D2MI part 827-9999-906, heatsink top, rebuilt from its drawing.
+# Millimetres, in the STEP file's own frame: plate corner at the origin, plate bottom at z = 0,
+# datum A (the standoff feet) at z = -4.267.
+#
+# Run with:
+#   fieldform --run benchmarks/reference-cad/d2mi-906.ffc --exit
+# from the repository root, on an empty document. It saves the part beside this script.
+
+# plate, .100 thick, corners chamfered .050
+line p0=1.27,0,0 p1=101.27,0,0 'pl0'
+line p0=101.27,0,0 p1=102.54,1.27,0 'pl1'
+line p0=102.54,1.27,0 p1=102.54,68.275,0 'pl2'
+line p0=102.54,68.275,0 p1=101.27,69.545,0 'pl3'
+line p0=101.27,69.545,0 p1=1.27,69.545,0 'pl4'
+line p0=1.27,69.545,0 p1=0,68.275,0 'pl5'
+line p0=0,68.275,0 p1=0,1.27,0 'pl6'
+line p0=0,1.27,0 p1=1.27,0,0 'pl7'
+extrude profile=pl0 height=2.54 corners=sharp 'Plate'
+# four standoffs below, dia .220 to datum A, R.032 where they meet the plate
+cylinder radius=2.794 from=4.27,4.27,-4.267 to=4.27,4.27,1 'So1'
+cylinder radius=2.794 from=98.27,4.27,-4.267 to=98.27,4.27,1 'So2'
+cylinder radius=2.794 from=13.77,65.27,-4.267 to=13.77,65.27,1 'So3'
+cylinder radius=2.794 from=88.77,65.27,-4.267 to=88.77,65.27,1 'So4'
+boolean in=So1,So2,So3,So4 -u 'Standoffs'
+boolean in=Plate,Standoffs -u radius=0.813 'Base'
+
+# pads below the plate: a square .034 proud, an L .030 proud with an R.135 inside corner
+cube size=25.4,25.4,1.864 centre=32.638,33.185,0.068 'SquarePad'
+line p0=57.315,30.721,-0.762 p1=74.359,30.721,-0.762 'lp0'
+line p0=74.359,30.721,-0.762 p1=74.359,43.522,-0.762 'lp1'
+line p0=74.359,43.522,-0.762 p1=66.84,43.522,-0.762 'lp2'
+line p0=66.84,43.522,-0.762 p1=66.84,40.5,-0.762 'lp3'
+curve2 p=66.84,40.5,-0.762;66.84,37.071,-0.762;63.411,37.071,-0.762 w=1,0.70710678,1 'lp4'
+line p0=63.411,37.071,-0.762 p1=57.315,37.071,-0.762 'lp5'
+line p0=57.315,37.071,-0.762 p1=57.315,30.721,-0.762 'lp6'
+extrude profile=lp0 height=1.762 corners=sharp 'LPad'
+# four pins dia .1875 with full round tops, .768 above datum A
+cylinder radius=2.381 from=6.35,25.4,2 to=6.35,25.4,12.859 'Pin1'
+cylinder radius=2.381 from=6.35,44.45,2 to=6.35,44.45,12.859 'Pin2'
+cylinder radius=2.381 from=20.955,25.4,2 to=20.955,25.4,12.859 'Pin3'
+cylinder radius=2.381 from=20.955,44.45,2 to=20.955,44.45,12.859 'Pin4'
+sphere radius=2.381 centre=6.35,25.4,12.859 'Tip1'
+sphere radius=2.381 centre=6.35,44.45,12.859 'Tip2'
+sphere radius=2.381 centre=20.955,25.4,12.859 'Tip3'
+sphere radius=2.381 centre=20.955,44.45,12.859 'Tip4'
+# two bosses dia .375, .518 above datum A
+cylinder radius=4.762 from=60.325,6.35,2 to=60.325,6.35,8.89 'Boss1'
+cylinder radius=4.762 from=63.5,63.195,2 to=63.5,63.195,8.89 'Boss2'
+# five fins .050 thick: 45 degree lead-in from x 1.412, .050 chamfer at the far top edge
+cube size=64.365,1.27,6.89 centre=67.1825,17.704,5.445 'Fin1'
+cube size=64.365,1.27,6.89 centre=67.1825,26.238,5.445 'Fin2'
+cube size=64.365,1.27,6.89 centre=67.1825,34.773,5.445 'Fin3'
+cube size=64.365,1.27,6.89 centre=67.1825,43.307,5.445 'Fin4'
+cube size=64.365,1.27,6.89 centre=67.1825,51.841,5.445 'Fin5'
+boolean in=Fin1,Fin2,Fin3,Fin4,Fin5 -u 'FinBlocks'
+plane origin=35.865,0,2.54 turn=0,-45,0 'LeadIn'
+plane origin=98.095,0,8.89 turn=0,45,0 'FinChamfer'
+boolean in=FinBlocks,LeadIn,FinChamfer -i 'Fins'
+boolean in=Base,SquarePad,LPad,Pin1,Pin2,Pin3,Pin4,Tip1,Tip2,Tip3,Tip4,Boss1,Boss2,Fins -u 'Solid'
+
+# standoff holes dia .128 through standoff and plate
+cylinder radius=1.626 from=4.27,4.27,-5 to=4.27,4.27,3.5 'Thru1'
+cylinder radius=1.626 from=98.27,4.27,-5 to=98.27,4.27,3.5 'Thru2'
+cylinder radius=1.626 from=13.77,65.27,-5 to=13.77,65.27,3.5 'Thru3'
+cylinder radius=1.626 from=88.77,65.27,-5 to=88.77,65.27,3.5 'Thru4'
+# boss 1: dia .150 x .250 deep, 118 degree point, dia .250 x .125 counterbore
+cylinder radius=3.175 from=60.325,6.35,9.5 to=60.325,6.35,5.715 'Cbore1'
+cylinder radius=1.905 from=60.325,6.35,9.5 to=60.325,6.35,1.3954 'Bore1'
+cone base_radius=13.488 top_radius=0 from=60.325,6.35,9.5 to=60.325,6.35,1.3954 'Point1'
+boolean in=Bore1,Point1 -i 'Drill1'
+# boss 2: dia .1875 x .250 deep, 118 degree point, dia .250 x .100 counterbore
+cylinder radius=3.175 from=63.5,63.195,9.5 to=63.5,63.195,6.35 'Cbore2'
+cylinder radius=2.381 from=63.5,63.195,9.5 to=63.5,63.195,1.10935 'Bore2'
+cone base_radius=13.9644 top_radius=0 from=63.5,63.195,9.5 to=63.5,63.195,1.10935 'Point2'
+boolean in=Bore2,Point2 -i 'Drill2'
+boolean in=Solid,Thru1,Thru2,Thru3,Thru4,Cbore1,Drill1,Cbore2,Drill2 -s 'D2MI-906'
+
+saveas file=benchmarks/reference-cad/d2mi-906.fform

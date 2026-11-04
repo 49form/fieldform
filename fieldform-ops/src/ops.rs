@@ -1309,6 +1309,39 @@ impl Command for SetOutputs {
     }
 }
 
+/// Sets every Save Image block at once -- backlog item 117.
+///
+/// The list whole, before and after, for the reason [`SetOutputs`] holds its two: a create, a
+/// delete, a rename and an edit to a setting are all "the blocks were this and are now that".
+/// Its own command rather than a third list on `SetOutputs`, so an image block's edit is an
+/// entry of its own on the history and does not fold into a tessellation's.
+pub struct SetImages {
+    before: Vec<fieldform_scene::SaveImage>,
+    after: Vec<fieldform_scene::SaveImage>,
+}
+
+impl SetImages {
+    pub fn new(before: Vec<fieldform_scene::SaveImage>, after: Vec<fieldform_scene::SaveImage>) -> Self {
+        Self { before, after }
+    }
+}
+
+impl Command for SetImages {
+    fn name(&self) -> &str {
+        "images.set"
+    }
+
+    fn execute(&mut self, doc: &mut Document) -> Result<(), OpError> {
+        doc.images = self.after.clone();
+        Ok(())
+    }
+
+    fn undo(&mut self, doc: &mut Document) -> Result<(), OpError> {
+        doc.images = self.before.clone();
+        Ok(())
+    }
+}
+
 /// Sets or removes an import's record.
 pub struct SetSource {
     id: fieldform_scene::id::SourceId,

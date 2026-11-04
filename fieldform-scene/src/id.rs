@@ -141,6 +141,7 @@ stable_id!(
     "Identifies a tessellation block: a body of a part, turned into triangles."
 );
 stable_id!(ExportId, "Identifies an export block: a file written from a tessellation.");
+stable_id!(SaveImageId, "Identifies a Save Image block: the viewport written as an image file.");
 stable_id!(NodeId, "Identifies a node inside one part's composition graph.");
 
 /// Draws a fresh 64-bit value.

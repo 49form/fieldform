@@ -1841,6 +1841,7 @@ dependencies = [
  "log",
  "naga",
  "nalgebra",
+ "png",
  "pollster",
  "rayon",
  "rfd",
@@ -2587,6 +2588,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

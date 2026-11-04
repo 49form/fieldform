@@ -513,7 +513,12 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
     // after it, so the lights, the dome, the clearcoat and the occlusion read are skipped and not
     // merely zeroed -- which is where this view being cheaper than a lit one comes from.
     let normals = shading.look.w > 0.5;
-    var color = shading.background.rgb;
+    // A saved image placed on another background later: a miss adds no colour and no coverage,
+    // so what accumulates is premultiplied by coverage and is un-premultiplied at the end. The
+    // lighting is untouched -- the dome still lights and reflects in the part; only the backdrop
+    // behind the silhouette goes.
+    let transparent = shading.background.w > 0.5;
+    var color = select(shading.background.rgb, vec3<f32>(0.0), transparent);
     if hit {
         if normals {
             // The ordinary mapping, so +Z reads mid-blue and a face turning away darkens: the
@@ -543,11 +548,52 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
     // so it is anti-aliased the same way instead of shimmering as the samples move. The first
     // frame simply writes.
     let accumulated = shading.frame.y;
-    var mean = vec4<f32>(color, edge);
+    // **The alpha channel carries hit coverage whenever nothing is selected**, and the outline's
+    // coverage only when something is: the two cannot share the channel, and a saved image
+    // never has a selection (`Look::transparent` says so outright, and an export draws no
+    // interface). Coverage is one for a hit and nought for a miss, which averages to the
+    // silhouette's fractional edge over the jittered frames.
+    let no_outline = shading.frame.x == 0xffffffffu;
+    let covered = transparent || no_outline;
+    let coverage = select(edge, select(0.0, 1.0, hit), covered);
+    var mean = vec4<f32>(color, coverage);
     if accumulated > 0u {
         mean = mix(hdr[index], mean, 1.0 / (f32(accumulated) + 1.0));
     }
     hdr[index] = mean;
+
+    if covered {
+        // **The lit share and the backdrop's share are kept apart at an edge.** The samples that
+        // hit averaged to a colour, which is tonemapped and encoded exactly as an interior hit
+        // is; the samples that missed are the backdrop, which is never tonemapped (a miss keeps
+        // the encode: the colour behind the silhouette is a colour, not light). Mixed *after* the
+        // encode, by coverage, which is what placing a straight-alpha picture on that backdrop
+        // does -- so the opaque render on a white ground and the transparent one laid on white
+        // are the same bytes, and neither carries a rim. Tonemapping the mixture instead, as a
+        // lone `hit` decided before, put the backdrop's share through AgX: dark enough to pass
+        // on the viewport's own near-black, and a grey rim on a white ground.
+        var lit = vec3<f32>(0.0);
+        if mean.a > 0.0 {
+            // The mean of the samples that hit: the backdrop's share taken out, or nought of
+            // it when the picture is transparent and a miss added nothing.
+            let backdrop = select(shading.background.rgb, vec3<f32>(0.0), transparent);
+            lit = max((mean.rgb - (1.0 - mean.a) * backdrop) / mean.a, vec3<f32>(0.0));
+            if !normals {
+                lit = agx(lit * shading.look.y);
+            }
+        }
+        let shown = select(encode_srgb(lit), lit, normals);
+        if transparent {
+            textureStore(present, vec2<i32>(pixel), vec4<f32>(shown, mean.a));
+            return;
+        }
+        var over = mix(encode_srgb(shading.background.rgb), shown, mean.a);
+        if hit && shading.draft_dir.w > 0.5 {
+            over = mix(over, draft_tint(normalize(g.xyz)), shading.draft_params.z);
+        }
+        textureStore(present, vec2<i32>(pixel), vec4<f32>(over, 1.0));
+        return;
+    }
 
     var display = mean.rgb;
     if hit && !normals {
