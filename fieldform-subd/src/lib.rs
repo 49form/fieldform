@@ -24,6 +24,8 @@
 
 mod evaluate;
 mod patch;
+#[cfg(test)]
+mod crease_tests;
 
 pub use evaluate::{faces_influenced_by, LimitSurface, Tessellation};
 
@@ -42,6 +44,12 @@ use nalgebra::{Point3, Vector3};
 ///
 /// Each original quad becomes four new quads, each joining the original vertex, the two
 /// edge points flanking it, and the face point.
+///
+/// **Creased edges follow the sharp rules** (Hoppe et al. 1994; DeRose et al. 1998): a creased
+/// edge's point is its midpoint; a vertex on two creased edges moves to `(e₁ + 6P + e₂)/8` of
+/// their far ends, and one where three or more meet does not move; a dart, with one, is smooth.
+/// Both halves of a creased edge are creased in the result, so refining a creased cage keeps the
+/// limit surface it had.
 pub fn subdivide(cage: &Cage) -> Result<Cage, CageError> {
     let vertex_count = cage.vertex_count();
     let face_count = cage.face_count();
@@ -66,7 +74,12 @@ pub fn subdivide(cage: &Cage) -> Result<Cage, CageError> {
         );
 
         let n_f = n as f64;
-        let updated = (face_avg.coords + edge_mid_avg.coords * 2.0 + p.coords * (n_f - 3.0)) / n_f;
+        let smooth = (face_avg.coords + edge_mid_avg.coords * 2.0 + p.coords * (n_f - 3.0)) / n_f;
+        let updated = match cage.creased_neighbours(v).as_slice() {
+            [a, b] => (cage.vertex_position(*a).coords + p.coords * 6.0 + cage.vertex_position(*b).coords) / 8.0,
+            ends if ends.len() >= 3 => p.coords,
+            _ => smooth,
+        };
         positions.push(Point3::from(updated));
     }
 
@@ -86,6 +99,10 @@ pub fn subdivide(cage: &Cage) -> Result<Cage, CageError> {
             .expect("a closed cage's every edge has two faces");
         let pa = cage.vertex_position(a);
         let pb = cage.vertex_position(b);
+        if cage.is_creased(a, b) {
+            positions.push(Point3::from((pa.coords + pb.coords) / 2.0));
+            continue;
+        }
         let sum = pa.coords + pb.coords + face_centroid(cage, f0).coords + face_centroid(cage, f1).coords;
         positions.push(Point3::from(sum / 4.0));
     }
@@ -122,7 +139,18 @@ pub fn subdivide(cage: &Cage) -> Result<Cage, CageError> {
         }
     }
 
-    Cage::from_faces(positions, &faces)
+    let mut out = Cage::from_faces(positions, &faces)?;
+    if cage.has_creases() {
+        let halves: Vec<(VertexId, VertexId)> = cage
+            .creases()
+            .flat_map(|(a, b)| {
+                let e = VertexId::from_index(edge_index(a, b) as usize);
+                [(a, e), (e, b)]
+            })
+            .collect();
+        out.apply_creases(&halves).expect("both halves of a creased edge are edges of the result");
+    }
+    Ok(out)
 }
 
 /// Applies [`subdivide`] `levels` times.
@@ -155,6 +183,14 @@ pub(crate) fn limit_positions(cage: &Cage) -> Vec<Point3<f64>> {
 /// Exact limit position of a single vertex — see [`limit_positions`].
 pub fn limit_position(cage: &Cage, v: VertexId) -> Point3<f64> {
     let p = cage.vertex_position(v);
+    // On a crease the vertex lands on the crease curve, `(1, 4, 1)/6`; where three or more
+    // creases meet it stays where it is. (A dart takes the smooth mask, which is close and not
+    // exact for it.)
+    match cage.creased_neighbours(v).as_slice() {
+        [a, b] => return Point3::from((cage.vertex_position(*a).coords + p.coords * 4.0 + cage.vertex_position(*b).coords) / 6.0),
+        ends if ends.len() >= 3 => return p,
+        _ => {}
+    }
     let n = cage.valence(v);
     let n_f = n as f64;
 

@@ -15,6 +15,7 @@ use nalgebra::Point3;
 use std::collections::HashMap;
 
 pub mod body;
+pub mod crease;
 pub mod edit;
 pub mod validate;
 pub use body::CageBody;
@@ -221,6 +222,12 @@ pub struct QuadMesh {
     vertices: Vec<Vertex>,
     half_edges: Vec<HalfEdge>,
     faces: Vec<Face>,
+    /// The creased edges, each as (lower, higher) vertex — the stored truth about creases, in a
+    /// deterministic order because files and fingerprints read it. See [`crease`].
+    creases: std::collections::BTreeSet<(VertexId, VertexId)>,
+    /// What the evaluator asks about creases, derived from `creases` and rebuilt whenever it
+    /// changes. Empty while nothing is creased, so an uncreased mesh pays nothing for it.
+    crease_index: crease::CreaseIndex,
 }
 
 impl QuadMesh {
@@ -359,6 +366,8 @@ impl QuadMesh {
             vertices,
             half_edges,
             faces,
+            creases: Default::default(),
+            crease_index: Default::default(),
         }
     }
 
@@ -596,6 +605,17 @@ impl QuadMesh {
                 v.index().hash(&mut h);
             }
         }
+        // **Only when there are any**, so an uncreased mesh keeps the number it always had and
+        // nothing keyed on it is invalidated by this existing. When there are, every cache keyed
+        // on the fingerprint follows a crease edit — otherwise creasing an edge would go on
+        // showing the surface from before it.
+        if !self.creases.is_empty() {
+            self.creases.len().hash(&mut h);
+            for (a, b) in &self.creases {
+                a.index().hash(&mut h);
+                b.index().hash(&mut h);
+            }
+        }
         h.finish()
     }
 
@@ -786,10 +806,29 @@ pub struct MeshSnapshot {
     positions: Vec<[f64; 3]>,
     /// Each face's four vertex indices, wound as they were on the way in.
     faces: Vec<[u32; 4]>,
+    /// The creased edges. **Left out when there are none**, so an uncreased mesh's file is
+    /// byte-for-byte what it was before creases existed; and refused by any build that does not
+    /// know the field, through `deny_unknown_fields` above — which is what keeps an older build
+    /// from opening a creased cage and silently drawing it smooth.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    creases: Vec<CreaseRecord>,
+}
+
+/// A snapshot taken apart: positions, quads and creased edges, as the constructor takes them.
+type SnapshotParts = (Vec<Point3<f64>>, Vec<Vec<u32>>, Vec<(VertexId, VertexId)>);
+
+/// One creased edge in a file: `{ "edge": [12, 13] }`.
+///
+/// **An object rather than a bare pair**, so that the depth, radius and fades the cage-editing
+/// notes plan for can be added to it as fields without changing what a crease looks like.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreaseRecord {
+    edge: [u32; 2],
 }
 
 impl MeshSnapshot {
-    /// The positions and quads of `mesh`, and nothing derived.
+    /// The positions, quads and creases of `mesh`, and nothing derived.
     pub fn of(mesh: &QuadMesh) -> Self {
         Self {
             positions: mesh
@@ -801,27 +840,39 @@ impl MeshSnapshot {
                 .face_ids()
                 .map(|f| mesh.face_vertices(f).map(|v| v.index() as u32))
                 .collect(),
+            creases: mesh
+                .creases()
+                .map(|(a, b)| CreaseRecord { edge: [a.index() as u32, b.index() as u32] })
+                .collect(),
         }
     }
 
-    fn parts(self) -> (Vec<Point3<f64>>, Vec<Vec<u32>>) {
+    fn parts(self) -> SnapshotParts {
         let positions = self.positions.into_iter().map(|[x, y, z]| Point3::new(x, y, z)).collect();
         let faces = self.faces.into_iter().map(|f| f.to_vec()).collect();
-        (positions, faces)
+        let creases = self
+            .creases
+            .into_iter()
+            .map(|c| (VertexId::new(c.edge[0] as usize), VertexId::new(c.edge[1] as usize)))
+            .collect();
+        (positions, faces, creases)
     }
 
     /// The mesh again. A snapshot taken of a mesh the constructor accepted is one it accepts
     /// again, so this cannot fail for one taken by [`Self::of`]; a snapshot read from a file goes
     /// through `QuadMesh`'s own deserialize, which reports the refusal.
     pub fn restore(&self) -> QuadMesh {
-        let (positions, faces) = self.clone().parts();
-        QuadMesh::from_faces(positions, &faces).expect("a snapshot of a valid mesh restores")
+        let (positions, faces, creases) = self.clone().parts();
+        let mut mesh = QuadMesh::from_faces(positions, &faces).expect("a snapshot of a valid mesh restores");
+        mesh.apply_creases(&creases).expect("a snapshot's creases are on its own edges");
+        mesh
     }
 
     /// What this holds, for the undo stack's budget.
     pub fn byte_size(&self) -> usize {
         self.positions.len() * std::mem::size_of::<[f64; 3]>()
             + self.faces.len() * std::mem::size_of::<[u32; 4]>()
+            + self.creases.len() * std::mem::size_of::<CreaseRecord>()
     }
 }
 
@@ -837,8 +888,10 @@ impl serde::Serialize for QuadMesh {
 
 impl<'de> serde::Deserialize<'de> for QuadMesh {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let (positions, faces) = MeshSnapshot::deserialize(d)?.parts();
-        QuadMesh::from_faces(positions, &faces).map_err(serde::de::Error::custom)
+        let (positions, faces, creases) = MeshSnapshot::deserialize(d)?.parts();
+        let mut mesh = QuadMesh::from_faces(positions, &faces).map_err(serde::de::Error::custom)?;
+        mesh.apply_creases(&creases).map_err(serde::de::Error::custom)?;
+        Ok(mesh)
     }
 }
 
@@ -850,8 +903,10 @@ impl serde::Serialize for Cage {
 
 impl<'de> serde::Deserialize<'de> for Cage {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let (positions, faces) = MeshSnapshot::deserialize(d)?.parts();
-        Cage::from_faces(positions, &faces).map_err(serde::de::Error::custom)
+        let (positions, faces, creases) = MeshSnapshot::deserialize(d)?.parts();
+        let mut cage = Cage::from_faces(positions, &faces).map_err(serde::de::Error::custom)?;
+        cage.apply_creases(&creases).map_err(serde::de::Error::custom)?;
+        Ok(cage)
     }
 }
 

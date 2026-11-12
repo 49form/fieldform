@@ -38,11 +38,12 @@ pub(crate) fn twist_would_take(
 ///   which is the question `is_reference_body` already asks and the reason a trimmed lattice is
 ///   not caught by it: a twist divides by a stretch taken from the body's own extent, and an
 ///   attractor and a pattern both reach over one.
-/// - **Rigid or additive**, so it carries anything. A mirror and a transform are motions; an
-///   offset of a point is a sphere, exactly defined, and is a legitimate way to make one — which
-///   is why "a point is never valid" would be the wrong rule.
+/// - **Rigid or additive**, so it carries anything that has a volume.
 /// - **A blend reaches to a point on purpose** (`fieldform-blend-to-a-point`), so it is the one
-///   combiner that takes one.
+///   block that takes one. **Ruled 2026-11-07 by the owner**: "things like the offset tool should
+///   not list items like points ... apply this across all tools". An offset of a point is a sphere
+///   and a mirror of one is a point, which is why they used to take one, but a point in those
+///   lists was read as a solid offered by mistake, and a sphere is its own block.
 ///
 /// A pattern of a point is refused on the owner's ruling and on a fact about the application
 /// rather than the mathematics: the copies would be drawn by nothing and named by nothing. Every
@@ -78,9 +79,9 @@ pub(crate) fn operand_refusal(
             Node::Pattern { .. } => {
                 Some("copies of a point are drawn by nothing and named by nothing")
             }
-            // A blend reaches to one on purpose; an offset of one is a sphere; a mirror and a
-            // transform are motions and carry anything.
-            _ => None,
+            // A blend reaches to one on purpose, and is the only block that does.
+            Node::Blend { .. } => None,
+            _ => Some("a point has no volume; only a blend reaches to one"),
         };
     }
     if unbounded {

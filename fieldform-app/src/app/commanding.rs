@@ -20,12 +20,19 @@ impl App {
             pair_candidates: self.pair_candidates().len(),
             field_drawn: self.field_is_drawn(),
             cage_control: self.control == ControlMesh::Cage,
-            section_on: self.sections.iter().any(|s| s.on),
+            section_on: self.sections().iter().any(|s| s.on),
             occlusion_possible: self.display_quality.occlusion(),
+            reflections_possible: self.display_quality.reflections(),
             control_points: self.show_control_points,
             view_cube: self.show_view_cube,
+            allow_agent: self.allow_agent,
+            agent_launched: self
+                .agent_host
+                .as_ref()
+                .is_some_and(|h| h.mode == crate::agent::server::HostMode::Launch),
             floating_panel: self.floating_panel,
             idle_occlusion: self.idle_occlusion,
+            idle_reflections: self.idle_reflections,
             draft_on: self.draft.enabled,
             grid_on: self.show_grid,
             graph_shown: self.doc.graph_layout.shown,
@@ -70,6 +77,9 @@ impl App {
     /// does is `dispatch`'s; what the interface owes around it — that it was on offer, and later
     /// the pending session and the echo — is said once, here, rather than by each surface.
     pub(crate) fn invoke_command(&mut self, command: &'static commands::Command) {
+        // A join's preview is put back before anything runs, so a key pressed with the list open
+        // -- undo, above all -- acts on the document and not on a preview of it.
+        self.end_join_preview();
         if let Err(why) = (command.context)(&self.command_context()) {
             self.warn(format!("{} is not available — {why}", command.display_name));
             return;
@@ -107,6 +117,7 @@ impl App {
         }
         let moves = self.document_moves;
         let warned = self.console_warnings;
+        self.cage_line = None;
         self.dispatch(command.op, &command.fixed_args());
         // A command that was refused did nothing, and a line that does nothing is not a record of
         // anything: it would be refused again on replay, which T1 found.
@@ -141,7 +152,10 @@ impl App {
             let written = self.echo_log.len();
             self.echo_settle();
             if self.echo_log.len() == written && self.session.is_none() {
-                self.echo_line(command.console_line());
+                // A cage verb is written with the elements it read from the selection, which its
+                // bare word would not say.
+                let line = self.cage_line.take().unwrap_or_else(|| command.console_line());
+                self.echo_line(line);
             }
         }
     }

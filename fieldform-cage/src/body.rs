@@ -322,7 +322,12 @@ fn oriented(mesh: QuadMesh) -> (QuadMesh, usize) {
             }
         }
     }
-    (QuadMesh::from_faces(positions, &faces).expect("reversing whole shells keeps a mesh valid"), flipped)
+    let mut turned = QuadMesh::from_faces(positions, &faces).expect("reversing whole shells keeps a mesh valid");
+    // **Not an edit, and it runs on every mesh the body is given**, so forgetting this would
+    // drop every crease on any edit that happened to turn a shell over. Vertex numbers do not
+    // change, so each crease is where it was.
+    turned.carry_creases(&mesh, |v| vec![v], false);
+    (turned, flipped)
 }
 
 /// The faces of each connected shell.
@@ -374,6 +379,9 @@ pub(crate) fn signed_volume(mesh: &QuadMesh, faces: &[FaceId]) -> f64 {
 /// Whether `point` is inside the shell `faces`, by the parity of a ray's crossings of its quads.
 /// The ray leaves along a direction no edge is likely to lie along exactly.
 fn contains(mesh: &QuadMesh, faces: &[FaceId], point: Point3<f64>) -> bool {
+    // Arbitrary components that happen to be well-known irrationals (Euler's gamma, log10 2), not
+    // a misspelt constant: the lint that reads the second as one is wrong here.
+    #[allow(clippy::approx_constant)]
     let dir = Vector3::new(0.577_215_664_9, 0.301_029_995_7, 0.760_832_8).normalize();
     let mut crossings = 0;
     for &f in faces {

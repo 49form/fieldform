@@ -158,6 +158,41 @@ fn command(cage: CageId, name: &'static str, before: &QuadMesh, after: QuadMesh)
     Box::new(SetCageMesh::new(cage, name, MeshSnapshot::of(before), MeshSnapshot::of(&after)))
 }
 
+/// Creases or uncreases the listed edges: one command, a snapshot pair like every other edit, so
+/// undo puts the creases back exactly.
+///
+/// **A closed cage only.** The crease rules are written for a surface with no rim -- an open mesh's
+/// rim already follows a boundary rule of its own, and a crease running into one has none -- so an
+/// open mesh is refused by name. A cage an edit has opened keeps the creases it had; they come back
+/// with the surface when the hole is closed. An edge that is already as asked is not an error, but
+/// a line that changes nothing at all is, so an empty step never goes on the stack.
+fn set_creases(op: &'static str, args: &Args, doc: &Document, creased: bool) -> Result<Box<dyn Command>, OpError> {
+    let (id, body) = body(op, args, doc)?;
+    let mesh = body.mesh();
+    if mesh.is_open() {
+        return Err(OpError::Failed {
+            op: op.to_string(),
+            detail: "creases are for a closed cage, and this one has a hole — fill or bridge it first".to_string(),
+        });
+    }
+    let listed = edges(op, args, "edges", mesh)?;
+    let mut after = mesh.clone();
+    let mut changed = 0;
+    for &(a, b) in &listed {
+        match after.set_creased(a, b, creased) {
+            Some(true) => changed += 1,
+            Some(false) => {}
+            None => return Err(bad(op, "edges", format!("{}-{} is not an edge of the cage", a.index(), b.index()))),
+        }
+    }
+    if changed == 0 {
+        let state = if creased { "already creased" } else { "not creased" };
+        let what = if listed.len() == 1 { "that edge is" } else { "those edges are" };
+        return Err(OpError::Failed { op: op.to_string(), detail: format!("{what} {state}") });
+    }
+    Ok(command(id, op, mesh, after))
+}
+
 /// The verbs. Each reads its keys, checks every index against the live mesh, runs the primitive
 /// once, and hands back the snapshot pair -- or the primitive's refusal, with nothing built.
 pub(crate) fn register(registry: &mut OpRegistry) {
@@ -336,6 +371,9 @@ pub(crate) fn register(registry: &mut OpRegistry) {
         Ok(command(id, "cage.dissolve_edges", body.mesh(), result.mesh))
     });
 
+    registry.register("cage.crease", |args, doc| set_creases("cage.crease", args, doc, true));
+    registry.register("cage.uncrease", |args, doc| set_creases("cage.uncrease", args, doc, false));
+
     registry.register("cage.set_positions", |args, doc| {
         const OP: &str = "cage.set_positions";
         let (id, body) = body(OP, args, doc)?;
@@ -406,6 +444,49 @@ mod tests {
         stack.execute(&mut doc, fill).unwrap();
         assert!(!doc.cage_is_red(id));
         assert_eq!(doc.cage_body(id).unwrap().euler_characteristic(), 2);
+    }
+
+    /// Crease two edges from the console, undo, redo: the creases come and go with the step, and
+    /// an edge creased twice, or a line that changes nothing, is not a second step.
+    #[test]
+    fn creasing_from_the_console_is_one_step_that_undoes_exactly() {
+        let (mut doc, id) = cube_document();
+        let reg = registry();
+        let mut stack = CommandStack::default();
+        let cmd = reg.build("cage.crease", &args(&[("edges", "0-1,5-1")]), &doc).unwrap();
+        stack.execute(&mut doc, cmd).unwrap();
+        let mesh = doc.cage_body(id).unwrap().mesh();
+        assert!(mesh.is_creased(VertexId::from_index(0), VertexId::from_index(1)));
+        assert!(mesh.is_creased(VertexId::from_index(1), VertexId::from_index(5)));
+        let err = reg.build("cage.crease", &args(&[("edges", "1-0")]), &doc).err().expect("nothing to do");
+        assert!(err.to_string().contains("already creased"), "{err}");
+        let err = reg.build("cage.crease", &args(&[("edges", "0-6")]), &doc).err().expect("not an edge");
+        assert!(err.to_string().contains("not an edge"), "{err}");
+
+        let cmd = reg.build("cage.uncrease", &args(&[("edges", "0-1")]), &doc).unwrap();
+        stack.execute(&mut doc, cmd).unwrap();
+        assert_eq!(doc.cage_body(id).unwrap().mesh().crease_count(), 1);
+        stack.undo(&mut doc);
+        assert_eq!(doc.cage_body(id).unwrap().mesh().crease_count(), 2);
+        stack.undo(&mut doc);
+        assert!(!doc.cage_body(id).unwrap().mesh().has_creases());
+        stack.redo(&mut doc);
+        assert_eq!(doc.cage_body(id).unwrap().mesh().crease_count(), 2);
+    }
+
+    /// An open mesh is refused by name; the creases a cage had before it was opened stay on it.
+    #[test]
+    fn an_open_cage_refuses_a_crease_and_keeps_the_ones_it_had() {
+        let (mut doc, id) = cube_document();
+        let reg = registry();
+        let mut stack = CommandStack::default();
+        let crease = reg.build("cage.crease", &args(&[("edges", "0-1")]), &doc).unwrap();
+        stack.execute(&mut doc, crease).unwrap();
+        let delete = reg.build("cage.delete_faces", &args(&[("faces", "1")]), &doc).unwrap();
+        stack.execute(&mut doc, delete).unwrap();
+        assert_eq!(doc.cage_body(id).unwrap().mesh().crease_count(), 1, "kept through the red state");
+        let err = reg.build("cage.crease", &args(&[("edges", "0-3")]), &doc).err().expect("open");
+        assert!(err.to_string().contains("closed cage"), "{err}");
     }
 
     /// A refusal builds nothing and leaves the document as it was.

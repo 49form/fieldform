@@ -13,13 +13,26 @@
 //! of `wall_thickness`, which is exactly how such a rewrite goes wrong. With ids a rename costs
 //! nothing, and the text is re-rendered from the tree ([`Expression::rerender`]).
 //!
-//! # Nothing spatial
+//! # Two scopes, one grammar
 //!
-//! An expression is one number for the whole document. It may read literals and other
-//! parameters, and nothing else — not a node, a field, a ramp or a point's position. A value
-//! that varied with position would stop the node it drives from being a distance field, and a
-//! ramp is the one construction whose rate of change is known in closed form (see
+//! A *parameter* expression is one number for the whole document. It may read literals and
+//! other parameters, and nothing else — not a node, a field, a ramp or a point's position. A
+//! value that varied with position would stop the node it drives from being a distance field,
+//! and a ramp is the one construction whose rate of change is known in closed form (see
 //! `ParamRef::Field`). Positions get warps, amounts get ramps, constants get expressions.
+//!
+//! A *field* expression (the Expression block, item 40) is the same grammar read in a second
+//! scope, where `x`, `y` and `z` name the point's coordinates in the block's own frame and
+//! anything else is a parameter as before. **The scope is what keeps the parameter rule true**:
+//! the parameter resolver knows no coordinate, so `x` is an unknown name there exactly as it
+//! always was, and nothing about the grammar decides which is which. A field written as
+//! arithmetic is a source, not a parameter.
+//!
+//! **Angles are in degrees in both scopes.** `sin(90)` is one. `Node::Transform` stores its
+//! rotation in degrees because that is a number a person types and reads back, and a `sin()`
+//! that disagreed with the rotation field beside it would be a nasty surprise. So `pi` is a
+//! reserved name and a parse error that says so: pasted radian code parses under a degrees
+//! rule and draws plausible, wrong geometry, and a red caret is the better of the two.
 //!
 //! # No units
 //!
@@ -46,14 +59,15 @@
 //! primary := number | name | '(' expr ')' | function '(' expr (',' expr)* ')'
 //! ```
 //!
-//! Functions are `abs`, `sqrt`, `floor`, `ceil`, `round` of one argument and `min`, `max` of
-//! two or more. Deliberately absent: trigonometry, `log`/`exp`, comparisons, conditionals and
-//! constants such as `pi`. When trig lands its arguments are in **degrees**, because
-//! `Node::Transform` stores rotation in degrees on the grounds that it is a number a person
-//! types and reads back, and a `sin()` disagreeing with the rotation field beside it would be
-//! a nasty surprise; `pi` arrives with radians or not at all.
+//! Functions of one argument: `abs`, `sqrt`, `floor`, `ceil`, `round`, `sin`, `cos`, `tan`,
+//! `exp`, `log`, `sign`; of two: `atan2`, `mod`; of three: `clamp`; of two or more: `min`,
+//! `max`. Trigonometry takes and gives **degrees**. `mod` is the floored remainder, which keeps
+//! the sign of its second argument, so a tiling written with it tiles the negative side too;
+//! `log` is the natural logarithm. Deliberately absent: comparisons, conditionals (`min`, `max`,
+//! `clamp` and `sign` are what to reach for instead) and constants such as `pi`.
 
 use crate::id::ParamId;
+use crate::Axis;
 
 /// An expression as typed, parsed, with the text kept beside the tree for display.
 ///
@@ -65,11 +79,41 @@ pub struct Expression {
     expr: Expr,
 }
 
+/// The point's coordinates are named by the one `Axis` the document has (D9: a pattern's axis
+/// and a coordinate are the same three letters), read here in lower case.
+impl Axis {
+    pub fn letter(self) -> &'static str {
+        match self {
+            Axis::X => "x",
+            Axis::Y => "y",
+            Axis::Z => "z",
+        }
+    }
+
+    fn named(name: &str) -> Option<Self> {
+        match name {
+            "x" => Some(Axis::X),
+            "y" => Some(Axis::Y),
+            "z" => Some(Axis::Z),
+            _ => None,
+        }
+    }
+}
+
+/// What a name resolves to: a parameter in either scope, a coordinate in the field scope only.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Name {
+    Param(ParamId),
+    Coord(Axis),
+}
+
 /// The parsed tree. References are ids — see the module notes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     Number(f64),
     Param(ParamId),
+    /// The point's coordinate: only a field expression ever holds one.
+    Coord(Axis),
     Neg(Box<Expr>),
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Call(Function, Vec<Expr>),
@@ -84,7 +128,7 @@ pub enum BinOp {
     Pow,
 }
 
-/// The functions v1 knows. See the module notes for what is deliberately not here.
+/// The functions known. See the module notes for what is deliberately not here.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Function {
     Abs,
@@ -94,6 +138,66 @@ pub enum Function {
     Floor,
     Ceil,
     Round,
+    /// Degrees in, as every angle here is.
+    Sin,
+    Cos,
+    Tan,
+    /// Degrees out: `atan2(y, x)`.
+    Atan2,
+    Exp,
+    /// Natural.
+    Log,
+    /// Minus one, nought or one.
+    Sign,
+    /// `clamp(v, lo, hi)`.
+    Clamp,
+    /// The floored remainder, `a − b·floor(a / b)`: it keeps the sign of `b`, so a tiling
+    /// written with it tiles the negative side too. The same on the CPU and in the shader.
+    Mod,
+}
+
+impl Function {
+    /// Every function, in the order the help lists them.
+    pub const ALL: [Function; 16] = [
+        Function::Abs,
+        Function::Min,
+        Function::Max,
+        Function::Sqrt,
+        Function::Floor,
+        Function::Ceil,
+        Function::Round,
+        Function::Sin,
+        Function::Cos,
+        Function::Tan,
+        Function::Atan2,
+        Function::Exp,
+        Function::Log,
+        Function::Sign,
+        Function::Clamp,
+        Function::Mod,
+    ];
+
+    /// What the help says beside it.
+    pub fn describes(self) -> &'static str {
+        match self {
+            Function::Abs => "the size of a number",
+            Function::Min => "the least of two or more",
+            Function::Max => "the greatest of two or more",
+            Function::Sqrt => "the square root",
+            Function::Floor => "down to a whole number",
+            Function::Ceil => "up to a whole number",
+            Function::Round => "to the nearest whole number, halves away from nought",
+            Function::Sin => "sine of an angle in degrees",
+            Function::Cos => "cosine of an angle in degrees",
+            Function::Tan => "tangent of an angle in degrees",
+            Function::Atan2 => "the angle of (y, x) in degrees",
+            Function::Exp => "e to the power",
+            Function::Log => "the natural logarithm",
+            Function::Sign => "-1, 0 or 1",
+            Function::Clamp => "clamp(v, lo, hi): v held between lo and hi",
+            Function::Mod => "mod(a, b): the floored remainder, with b's sign",
+        }
+    }
 }
 
 /// Why a text is not an expression, and where it stopped being one.
@@ -109,7 +213,7 @@ pub struct ParseError {
 
 /// Why an expression has no value.
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
-pub(crate) enum EvalError {
+pub enum EvalError {
     /// The step named — `5 / 0`, `sqrt(-4)`, `10 ^ 400` — did not produce a finite number.
     #[error("{0} is not a number")]
     NotFinite(String),
@@ -127,6 +231,24 @@ impl Expression {
         text: &str,
         names: &dyn Fn(&str) -> Option<ParamId>,
     ) -> Result<Self, ParseError> {
+        // The parameter scope: every name is a parameter or nothing, so `x` is unknown here.
+        Self::parse_in(text, &|name| names(name).map(Name::Param))
+    }
+
+    /// Parses `text` in the field scope: `x`, `y` and `z` are the point's coordinates, and
+    /// every other name resolves through `names` as a parameter.
+    pub fn parse_field(
+        text: &str,
+        names: &dyn Fn(&str) -> Option<ParamId>,
+    ) -> Result<Self, ParseError> {
+        Self::parse_in(text, &|name| match Axis::named(name) {
+            Some(axis) => Some(Name::Coord(axis)),
+            None => names(name).map(Name::Param),
+        })
+    }
+
+    /// Parses `text` with `names` saying what each name is: the one parser both scopes use.
+    pub fn parse_in(text: &str, names: &dyn Fn(&str) -> Option<Name>) -> Result<Self, ParseError> {
         let tokens = lex(text)?;
         let mut parser = Parser { tokens, at: 0, names };
         let expr = parser.expr()?;
@@ -144,15 +266,18 @@ impl Expression {
         &self.source
     }
 
-    /// The parsed tree. Evaluation and the reference walk read it from inside this module, so
-    /// only the tests here look at its shape, and only the tests compile this (decision 1.4).
-    #[cfg(test)]
-    fn tree(&self) -> &Expr {
+    /// The parsed tree, for the two compilers that lower a field expression.
+    pub fn tree(&self) -> &Expr {
         &self.expr
     }
 
+    /// Whether any coordinate is read: a field expression, as against a parameter's.
+    pub fn is_spatial(&self) -> bool {
+        self.expr.is_spatial()
+    }
+
     /// Every parameter this reads, each once, in a stable order.
-    pub(crate) fn references(&self) -> Vec<ParamId> {
+    pub fn references(&self) -> Vec<ParamId> {
         let mut out = Vec::new();
         self.expr.collect_references(&mut out);
         out.sort();
@@ -162,7 +287,15 @@ impl Expression {
 
     /// The value, given a value for each parameter it reads.
     pub(crate) fn evaluate(&self, lookup: &dyn Fn(ParamId) -> Option<f64>) -> Result<f64, EvalError> {
-        self.expr.evaluate(lookup)
+        self.expr.evaluate(lookup, None)
+    }
+
+    /// The value at a point of a field expression, with every parameter it reads resolved by
+    /// `lookup`. A step that is not finite is `Err`, as a parameter's is: a written field that
+    /// takes `log` of a negative somewhere in its region has no value there, and the verify
+    /// action counts those rather than the march meeting a NaN.
+    pub fn evaluate_at(&self, lookup: &dyn Fn(ParamId) -> Option<f64>, at: [f64; 3]) -> Result<f64, EvalError> {
+        self.expr.evaluate(lookup, Some(at))
     }
 
     /// The tree written out with the names `names` gives, parenthesised where the tree needs
@@ -179,9 +312,18 @@ impl Expression {
 }
 
 impl Expr {
+    fn is_spatial(&self) -> bool {
+        match self {
+            Expr::Number(_) | Expr::Param(_) => false,
+            Expr::Coord(_) => true,
+            Expr::Neg(x) => x.is_spatial(),
+            Expr::Binary(_, l, r) => l.is_spatial() || r.is_spatial(),
+            Expr::Call(_, args) => args.iter().any(Expr::is_spatial),
+        }
+    }
     fn collect_references(&self, out: &mut Vec<ParamId>) {
         match self {
-            Expr::Number(_) => {}
+            Expr::Number(_) | Expr::Coord(_) => {}
             Expr::Param(id) => out.push(*id),
             Expr::Neg(x) => x.collect_references(out),
             Expr::Binary(_, l, r) => {
@@ -192,20 +334,27 @@ impl Expr {
         }
     }
 
-    fn evaluate(&self, lookup: &dyn Fn(ParamId) -> Option<f64>) -> Result<f64, EvalError> {
+    fn evaluate(&self, lookup: &dyn Fn(ParamId) -> Option<f64>, at: Option<[f64; 3]>) -> Result<f64, EvalError> {
         match self {
             Expr::Number(v) => Ok(*v),
             Expr::Param(id) => lookup(*id).ok_or(EvalError::Unresolved(*id)),
-            Expr::Neg(x) => Ok(-x.evaluate(lookup)?),
+            // Only a field expression holds one, and only a field evaluation hands a point in;
+            // a parameter's resolver cannot make a coordinate, so this arm is never reached from
+            // the parameter scope, and reads as a step with no value if it ever were.
+            Expr::Coord(axis) => match at {
+                Some(p) => Ok(p[*axis as usize]),
+                None => Err(EvalError::NotFinite(axis.letter().to_string())),
+            },
+            Expr::Neg(x) => Ok(-x.evaluate(lookup, at)?),
             Expr::Binary(op, l, r) => {
-                let a = l.evaluate(lookup)?;
-                let b = r.evaluate(lookup)?;
+                let a = l.evaluate(lookup, at)?;
+                let b = r.evaluate(lookup, at)?;
                 finite(op.apply(a, b), || format!("{} {} {}", number(a), op.symbol(), number(b)))
             }
             Expr::Call(function, args) => {
                 let values = args
                     .iter()
-                    .map(|a| a.evaluate(lookup))
+                    .map(|a| a.evaluate(lookup, at))
                     .collect::<Result<Vec<f64>, EvalError>>()?;
                 finite(function.apply(&values), || {
                     let shown: Vec<String> = values.iter().map(|v| number(*v)).collect();
@@ -221,7 +370,7 @@ impl Expr {
         match self {
             Expr::Binary(op, ..) => op.precedence(),
             Expr::Neg(_) => 4,
-            Expr::Number(_) | Expr::Param(_) | Expr::Call(..) => 5,
+            Expr::Number(_) | Expr::Param(_) | Expr::Coord(_) | Expr::Call(..) => 5,
         }
     }
 
@@ -229,6 +378,7 @@ impl Expr {
         match self {
             Expr::Number(v) => number(*v),
             Expr::Param(id) => name_in_expression(&names(*id)),
+            Expr::Coord(axis) => axis.letter().to_string(),
             Expr::Neg(x) => {
                 let inner = x.render(names);
                 // `-(a + b)` and `-(-a)`: anything that is not a leaf goes in parentheses, so a
@@ -319,16 +469,7 @@ impl BinOp {
 
 impl Function {
     fn named(name: &str) -> Option<Self> {
-        Some(match name {
-            "abs" => Function::Abs,
-            "min" => Function::Min,
-            "max" => Function::Max,
-            "sqrt" => Function::Sqrt,
-            "floor" => Function::Floor,
-            "ceil" => Function::Ceil,
-            "round" => Function::Round,
-            _ => return None,
-        })
+        Function::ALL.into_iter().find(|f| f.name() == name)
     }
 
     pub fn name(self) -> &'static str {
@@ -340,17 +481,34 @@ impl Function {
             Function::Floor => "floor",
             Function::Ceil => "ceil",
             Function::Round => "round",
+            Function::Sin => "sin",
+            Function::Cos => "cos",
+            Function::Tan => "tan",
+            Function::Atan2 => "atan2",
+            Function::Exp => "exp",
+            Function::Log => "log",
+            Function::Sign => "sign",
+            Function::Clamp => "clamp",
+            Function::Mod => "mod",
         }
     }
 
-    fn check_arity(self, given: usize) -> Result<(), String> {
+    /// How many arguments it takes: a fixed count, or `None` for two or more.
+    pub fn arity(self) -> Option<usize> {
         match self {
-            Function::Min | Function::Max if given < 2 => {
-                Err(format!("{} takes at least two arguments", self.name()))
-            }
-            Function::Min | Function::Max => Ok(()),
-            _ if given != 1 => Err(format!("{} takes one argument", self.name())),
-            _ => Ok(()),
+            Function::Min | Function::Max => None,
+            Function::Atan2 | Function::Mod => Some(2),
+            Function::Clamp => Some(3),
+            _ => Some(1),
+        }
+    }
+    fn check_arity(self, given: usize) -> Result<(), String> {
+        match self.arity() {
+            None if given < 2 => Err(format!("{} takes at least two arguments", self.name())),
+            None => Ok(()),
+            Some(1) if given != 1 => Err(format!("{} takes one argument", self.name())),
+            Some(n) if given != n => Err(format!("{} takes {n} arguments", self.name())),
+            Some(_) => Ok(()),
         }
     }
 
@@ -365,6 +523,18 @@ impl Function {
             // Half away from zero, which is what `f64::round` does and what a person expects
             // of `round(2.5)`; banker's rounding would read as a bug here.
             Function::Round => args[0].round(),
+            Function::Sin => args[0].to_radians().sin(),
+            Function::Cos => args[0].to_radians().cos(),
+            Function::Tan => args[0].to_radians().tan(),
+            Function::Atan2 => args[0].atan2(args[1]).to_degrees(),
+            Function::Exp => args[0].exp(),
+            Function::Log => args[0].ln(),
+            // Nought at nought, which `f64::signum` does not give (it answers one).
+            Function::Sign => {
+                if args[0] > 0.0 { 1.0 } else if args[0] < 0.0 { -1.0 } else { 0.0 }
+            }
+            Function::Clamp => args[0].max(args[1]).min(args[2]),
+            Function::Mod => args[0] - args[1] * (args[0] / args[1]).floor(),
         }
     }
 }
@@ -501,7 +671,7 @@ fn lex(text: &str) -> Result<Vec<(Token, usize)>, ParseError> {
 struct Parser<'a> {
     tokens: Vec<(Token, usize)>,
     at: usize,
-    names: &'a dyn Fn(&str) -> Option<ParamId>,
+    names: &'a dyn Fn(&str) -> Option<Name>,
 }
 
 impl Parser<'_> {
@@ -598,8 +768,18 @@ impl Parser<'_> {
                         .map_err(|message| ParseError { offset, message })?;
                     return Ok(Expr::Call(function, args));
                 }
+                // Reserved before any lookup, so a parameter called `pi` cannot smuggle radians
+                // back in: the degrees rule is document-wide, and this is the half of it that
+                // turns a pasted radian formula into a caret instead of a plausible wrong shape.
+                if name == "pi" {
+                    return Err(ParseError {
+                        offset,
+                        message: "angles here are in degrees; `pi` is not defined".into(),
+                    });
+                }
                 match (self.names)(&name) {
-                    Some(id) => Ok(Expr::Param(id)),
+                    Some(Name::Param(id)) => Ok(Expr::Param(id)),
+                    Some(Name::Coord(axis)) => Ok(Expr::Coord(axis)),
                     None => Err(ParseError { offset, message: format!("`{name}` is not a parameter") }),
                 }
             }
@@ -697,6 +877,74 @@ mod tests {
         assert_eq!(err("1.2.3"), ParseError { offset: 0, message: "`1.2.3` is not a number".into() });
         assert_eq!(err("1e999"), ParseError { offset: 0, message: "`1e999` is too large".into() });
         assert_eq!(err("2 +").to_string(), "expected a number or a name at column 4");
+    }
+
+    /// The field scope: `x`, `y`, `z` are the point, a name is a parameter, and the functions
+    /// item 40 adds compute what their names say -- in degrees, with the floored `mod` and a
+    /// `sign` that is nought at nought.
+    #[test]
+    fn a_field_expression_reads_the_point_and_every_added_function_computes_what_its_name_says() {
+        let table = table(&["r"]);
+        let names = |name: &str| table.iter().find(|(n, _)| n == name).map(|(_, id)| *id);
+        let at = |text: &str, p: [f64; 3]| {
+            Expression::parse_field(text, &names)
+                .expect(text)
+                .evaluate_at(&|_| Some(5.0), p)
+                .expect(text)
+        };
+        assert_eq!(at("sqrt(x*x + y*y + z*z) - r", [3.0, 4.0, 0.0]), 0.0);
+        assert!(Expression::parse_field("x - r", &names).unwrap().is_spatial());
+        assert!(!Expression::parse_field("2 * r", &names).unwrap().is_spatial());
+        assert!((at("sin(90)", [0.0; 3]) - 1.0).abs() < 1e-12, "degrees");
+        assert!((at("cos(180)", [0.0; 3]) + 1.0).abs() < 1e-12);
+        assert!((at("tan(45)", [0.0; 3]) - 1.0).abs() < 1e-12);
+        assert!((at("atan2(1, 1)", [0.0; 3]) - 45.0).abs() < 1e-12, "degrees out");
+        assert!((at("exp(1)", [0.0; 3]) - std::f64::consts::E).abs() < 1e-12);
+        assert!((at("log(exp(2))", [0.0; 3]) - 2.0).abs() < 1e-12, "natural");
+        assert_eq!(at("sign(-3)", [0.0; 3]), -1.0);
+        assert_eq!(at("sign(0)", [0.0; 3]), 0.0, "nought at nought");
+        assert_eq!(at("clamp(x, 1, 2)", [9.0, 0.0, 0.0]), 2.0);
+        assert_eq!(at("mod(7, 3)", [0.0; 3]), 1.0);
+        assert_eq!(at("mod(-7, 3)", [0.0; 3]), 2.0, "the floored remainder keeps the divisor's sign");
+        assert_eq!(at("mod(7, -3)", [0.0; 3]), -2.0);
+        assert_eq!(at("mod(x, 10)", [-25.0, 0.0, 0.0]), 5.0, "a tiling written with it tiles the negative side");
+        for f in Function::ALL {
+            assert_eq!(Function::named(f.name()), Some(f), "{} is in the table under its name", f.name());
+        }
+    }
+
+    /// The two halves of the degrees ruling, and the scope split that keeps the parameter spec
+    /// true: `pi` is refused with the reason in both scopes, a parameter expression does not
+    /// know `x`, and a parameter called `x` cannot shadow the coordinate in the field scope.
+    #[test]
+    fn pi_is_refused_with_a_word_about_degrees_and_a_parameter_expression_still_refuses_x() {
+        let table = table(&["x", "wall"]);
+        let names = |name: &str| table.iter().find(|(n, _)| n == name).map(|(_, id)| *id);
+        let err = Expression::parse_field("2 * pi", &names).expect_err("pi is reserved");
+        assert_eq!(err.offset, 4);
+        assert!(err.message.contains("degrees") && err.message.contains("`pi`"), "{}", err.message);
+        let err = Expression::parse("pi", &names).expect_err("in the parameter scope too");
+        assert!(err.message.contains("degrees"), "{}", err.message);
+        // The parameter scope: `x` is nobody, even though a parameter is called that here --
+        // that parameter *is* resolved, as a parameter, since the scope has no coordinates.
+        let as_param = Expression::parse("x + 1", &names).expect("x resolves to the parameter named x");
+        assert!(!as_param.is_spatial());
+        let unknown = Expression::parse("y + 1", &names).expect_err("no coordinate in the parameter scope");
+        assert_eq!(unknown.message, "`y` is not a parameter");
+        // The field scope: `x` is the coordinate, and the parameter called `x` is unreachable
+        // by that name, which is what keeps a formula meaning the same thing in every document.
+        let as_coord = Expression::parse_field("x + wall", &names).expect("parses");
+        assert!(as_coord.is_spatial());
+        assert_eq!(as_coord.references().len(), 1, "only `wall` is a parameter here");
+        // Arity is held for the new functions too.
+        assert!(Expression::parse_field("atan2(1)", &names).is_err());
+        assert!(Expression::parse_field("clamp(1, 2)", &names).is_err());
+        assert!(Expression::parse_field("sin(1, 2)", &names).is_err());
+        // And a field expression renders its coordinates back as the letters typed.
+        let e = Expression::parse_field("sqrt(x*x+y*y) - wall", &names).unwrap();
+        let rendered = e.rendered(&|_| "wall".to_string());
+        assert_eq!(rendered, "sqrt(x * x + y * y) - wall");
+        assert_eq!(Expression::parse_field(&rendered, &names).unwrap().tree(), e.tree());
     }
 
     #[test]

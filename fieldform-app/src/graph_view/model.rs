@@ -15,7 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use fieldform_scene::{CurveId, NodeId};
+use fieldform_scene::{CurveId, Family, NodeId};
 
 /// What a node stands for. Curves, profiles and surfaces are not graph nodes of the part but the
 /// notebook lists them as blocks, so the graph draws them as nodes too and the click that selects
@@ -50,6 +50,10 @@ pub(crate) struct Source {
     pub(crate) number: Option<Number>,
     pub(crate) status: Status,
     pub(crate) kind: Kind,
+    /// What the block does in the graph, by the two functions the notebook's rows ask
+    /// (`Node::family`, `Block::family`), so the two views cannot disagree about a block's family
+    /// any more than about its nesting. `None` for a kind this build cannot read.
+    pub(crate) family: Option<Family>,
 }
 
 /// A named number (`reach = 11`), drawn as a variable node with its value in a field.
@@ -115,6 +119,7 @@ pub(crate) struct GNode {
     pub(crate) number: Option<Number>,
     pub(crate) status: Status,
     pub(crate) kind: Kind,
+    pub(crate) family: Option<Family>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -185,6 +190,7 @@ pub(crate) fn build(sources: &[Source]) -> GraphModel {
             number: s.number,
             status: s.status.clone(),
             kind: s.kind,
+            family: s.family,
         });
     }
     model
@@ -210,6 +216,7 @@ mod tests {
             number: None,
             status: Status::Ok,
             kind: Kind::Block,
+            family: Some(Family::Create),
         }
     }
 

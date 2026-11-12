@@ -664,10 +664,12 @@ impl App {
 
         // The section, matching `gizmo_frame`'s order exactly. The two must agree about what
         // the handles belong to, or a drag moves something other than what was drawn.
-        if let Some((index, section)) = self.section_selected.zip(self.selected_section()) {
+        if let Some(section) = self.selected_section()
+            && let Some(before) = self.doc.sections.iter().find(|c| c.id == section.id).copied()
+        {
             self.gizmo_drag = Some(GizmoDrag {
                 drag,
-                target: GizmoTarget::Section { index, before: section },
+                target: GizmoTarget::Section { id: section.id, before, resolved: section },
                 pivot: frame.pivot,
                 readout: String::new(),
             });
@@ -1027,9 +1029,14 @@ impl App {
                     self.move_curve_points_live(m.curve, &to, &m.gesture);
                 }
             }
-            GizmoTarget::Section { index, before } => {
-                if let Some(slot) = self.sections.get_mut(*index) {
-                    *slot = before.with(motion, pivot);
+            GizmoTarget::Section { id, before, resolved } => {
+                // Live in the document and off the stack until the hand comes off. A drag places
+                // the plane by hand: what it was taken from, if anything, is let go of, as a
+                // dragged plane block's typed place would be.
+                let moved = resolved.with(motion, pivot);
+                let placed = placed_section(*before, &moved);
+                if let Some(slot) = self.doc.sections.iter_mut().find(|c| c.id == *id) {
+                    *slot = placed;
                 }
                 self.traced.invalidate(traced::Quality::Draft);
             }
@@ -1122,10 +1129,14 @@ impl App {
     pub(crate) fn end_gizmo(&mut self) {
         let Some(live) = self.gizmo_drag.take() else { return };
         match live.target {
-            // Nothing to commit: the section is not in the document, so there is nothing for
-            // undo to reverse and nothing a save would have written. It was moved live and it
-            // stays where it was left — the same as the camera, which is what it belongs to.
-            GizmoTarget::Section { .. } => {
+            // Put back, then written through the stack as one entry, as a body's drag is.
+            GizmoTarget::Section { id, before, .. } => {
+                let after = self.doc.sections.clone();
+                if let Some(slot) = self.doc.sections.iter_mut().find(|c| c.id == id) {
+                    *slot = before;
+                }
+                self.section_gesture = None;
+                self.set_sections(after, None);
                 self.traced.invalidate(traced::Quality::Final);
             }
             GizmoTarget::Cage { mesh, vertices, before } => {
@@ -1305,8 +1316,8 @@ impl App {
             | GizmoTarget::Body { before_graph, .. } => self.put_back_pressed_graph(before_graph),
             // Put back where the gesture started, like the others. Nothing was committed, so
             // there is nothing on the stack to disagree with this.
-            GizmoTarget::Section { index, before } => {
-                if let Some(slot) = self.sections.get_mut(index) {
+            GizmoTarget::Section { id, before, .. } => {
+                if let Some(slot) = self.doc.sections.iter_mut().find(|c| c.id == id) {
                     *slot = before;
                 }
                 self.traced.invalidate(traced::Quality::Final);

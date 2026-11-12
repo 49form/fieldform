@@ -14,6 +14,7 @@ use crate::outcome::{LineError, LineOutcome};
 
 pub(crate) mod paths;
 pub(crate) mod read;
+pub(crate) mod recovery;
 pub(crate) mod resources;
 pub(crate) mod snapshot;
 pub(crate) mod script;
@@ -45,6 +46,11 @@ pub(crate) struct AgentState {
     /// Calls that have arrived and not yet run, with when they arrived; an attached agent's wait
     /// for the person to finish what they are doing.
     pub(crate) held: std::collections::VecDeque<(server::Job, std::time::Instant)>,
+    /// The revision this host's unsaved-work file holds, so a call that changed nothing does not
+    /// write it again (`recovery.rs`).
+    pub(crate) checkpoint_revision: Option<u64>,
+    /// What another host had left unsaved, copied here when this one started.
+    pub(crate) recovered: Option<recovery::Recovered>,
     /// A test's stand-in for a gesture of the person's, which a headless app cannot start.
     #[cfg(test)]
     pub(crate) pretend_busy: bool,
@@ -254,6 +260,8 @@ impl App {
         self.agent.depth = stepped.then(|| self.stack.history().0.len());
         // A `new` or an `open` is kept with no step to show for it, since it clears the history.
         let kept = stepped || self.revision != revision_before;
+        // Before answering, so a host ended the moment it replies has already kept the call.
+        self.keep_agent_checkpoint();
         RunResponse { ok: !failed, kept, revision_before, revision_after: self.revision, lines: results, error: call_error }
     }
 
@@ -342,6 +350,10 @@ impl App {
         }
         // Whatever the agent last kept is no longer on top.
         self.agent.depth = None;
+        // Kept like a run's, or a host ended now would hand back the step just taken back.
+        if !names.is_empty() {
+            self.keep_agent_checkpoint();
+        }
         Ok((names, self.revision))
     }
 
@@ -366,6 +378,17 @@ impl App {
             // The viewport, not the document: `sample` and `measure` already read the edit, and a
             // `snapshot` waits for this to clear. Never the same thing as `busy`, which is a person.
             "compiling": self.traced.is_compiling().is_some(),
+            // A minimised window still answers every tool but `snapshot`, which needs it drawn.
+            "window": if self.window_hidden { "minimised" } else { "shown" },
+            // What another host left unsaved, copied into this one's folder when it started.
+            "recovered": self.agent.recovered.as_ref().map(|r| serde_json::json!({
+                "file": r.file.display().to_string(),
+                "from": r.from.display().to_string(),
+                "age_seconds": r.age.as_secs(),
+                "line": format!("open file=\"{}\"", r.file.to_string_lossy().replace('\\', "/")),
+            })),
+            // An unsaved document is kept here after every call, for the next host to hand back.
+            "unsaved_work_kept_in": self.agent.roots.first().map(|r| r.display().to_string()),
         })
     }
 

@@ -37,7 +37,7 @@ pub use command::{Command, CommandStack, OpError, StackMark, DEFAULT_BYTE_LIMIT}
 pub use fieldform_scene::Document;
 pub use keymap::{Keymap, Modifiers, Shortcut};
 pub use ops::{
-    Batch, Named, OwnershipSnapshot, SetControlPoints, SetControlWeights, SetCurve, SetImages,
+    Batch, Named, OwnershipSnapshot, SetControlPoints, SetControlWeights, SetCurve, SetCombs, SetImages, SetSections,
     SetName, SetOutputs, SetOwnership, SetParameter, SetPartGraph, SetPartMaterial, SetRelation, SetShown,
     SetSketch, SetSource, SetSurface, SetSurfaceAxis, SetSurfacePoint, SetSurfacePositions, SetVertexPositions, SetVisible,
 };

@@ -25,6 +25,8 @@ use fieldform_ops::{Args, Value};
 use layout::{Layout, HEADER, ROW};
 use model::{GraphModel, Kind, Number, Source, Status, WireKind};
 
+use crate::blocks::list::Block;
+
 /// Below this zoom, nodes draw as header-only blocks and literals are hidden (§6).
 const LOD_ZOOM: f32 = 0.55;
 
@@ -58,6 +60,49 @@ pub(crate) enum CurveRow {
     Inside(CurveId),
 }
 
+/// What the notebook already says is wrong with each block of a part, asked once for the part.
+///
+/// **One reading for both views**, so a block flagged in the graph is flagged on its row and the
+/// other way round: an empty input here or below is an error (`incomplete_in`), an approximate
+/// fillet a warning (`approximate_blends`, the `≈` beside a radius). Kept by the notebook against
+/// the same count its list is kept against, since asking per row per frame is a graph walk each.
+#[derive(Debug, Default)]
+pub(crate) struct BlockStatuses {
+    holed: HashSet<NodeId>,
+    approximate: HashSet<NodeId>,
+}
+
+impl BlockStatuses {
+    pub(crate) fn of(doc: &Document, graph: &Graph) -> Self {
+        Self {
+            holed: doc.incomplete_in(graph),
+            approximate: fieldform_field::approximate_blends(doc, graph).into_iter().collect(),
+        }
+    }
+
+    /// A block's status. An error outranks a warning: a fillet that cannot be evaluated has no
+    /// radius to be approximate about.
+    pub(crate) fn node(&self, id: NodeId) -> Status {
+        if self.holed.contains(&id) {
+            Status::Error("An input is empty here or below, so this cannot be evaluated".into())
+        } else if self.approximate.contains(&id) {
+            Status::Warning("Approximate: the radius will not be the radius typed".into())
+        } else {
+            Status::Ok
+        }
+    }
+}
+
+/// A named number's status: the same `None` every `ParamRef::resolve` caller refuses — a division
+/// by zero, or a reference to another failure.
+pub(crate) fn parameter_status(doc: &Document, id: fieldform_scene::ParamId) -> Status {
+    if doc.parameter_value(id).is_none() {
+        Status::Error("Its expression does not compute".into())
+    } else {
+        Status::Ok
+    }
+}
+
 /// The notebook's rows as the graph reads them: one [`Source`] per node of the part, in row order.
 pub(crate) fn sources(
     doc: &Document,
@@ -68,10 +113,8 @@ pub(crate) fn sources(
     eye: &dyn Fn(NodeId) -> Option<bool>,
     curve_row: &dyn Fn(CurveId) -> CurveRow,
 ) -> Vec<Source> {
-    // What the notebook already marks, asked once for the part: the same two questions its rows
-    // ask (`incomplete_in` for an empty slot, `approximate_blends` for the `≈` beside a radius).
-    let holed = doc.incomplete_in(graph);
-    let approximate: HashSet<NodeId> = fieldform_field::approximate_blends(doc, graph).into_iter().collect();
+    // What the notebook already marks, asked once for the part: the same reading its rows ask.
+    let statuses = BlockStatuses::of(doc, graph);
     // The named numbers first, by name, as the notebook lists them: inputs, above what reads them.
     let mut numbers: Vec<_> = doc.parameters.values().collect();
     numbers.sort_by(|a, b| a.name.cmp(&b.name));
@@ -90,13 +133,8 @@ pub(crate) fn sources(
                 value: doc.parameter_value(p.id).unwrap_or(f64::NAN),
                 editable: matches!(p.value, ParamValue::Literal(_)),
             }),
-            // The same `None` every `ParamRef::resolve` caller refuses: a division by zero, or a
-            // reference to another failure.
-            status: if doc.parameter_value(p.id).is_none() {
-                Status::Error("Its expression does not compute".into())
-            } else {
-                Status::Ok
-            },
+            status: parameter_status(doc, p.id),
+            family: Block::Parameter(p.id).family(graph),
         })
         .collect();
     // Curves, then surfaces: inputs the notebook lists above what reads them, in the notebook's own
@@ -122,6 +160,7 @@ pub(crate) fn sources(
             eye: None,
             number: None,
             status: Status::Ok,
+            family: Block::Curve(c).family(graph),
             kind,
         });
     }
@@ -137,6 +176,7 @@ pub(crate) fn sources(
             number: None,
             status: Status::Ok,
             kind: Kind::Surface,
+            family: Block::Surface(s).family(graph),
         });
     }
     out.extend(listed
@@ -199,13 +239,8 @@ pub(crate) fn sources(
                 eye: eye(id),
                 number: None,
                 kind: Kind::Block,
-                status: if holed.contains(&id) {
-                    Status::Error("An input is empty here or below, so this cannot be evaluated".into())
-                } else if approximate.contains(&id) {
-                    Status::Warning("Approximate: the radius will not be the radius typed".into())
-                } else {
-                    Status::Ok
-                },
+                status: statuses.node(id),
+                family: Block::Node(id).family(graph),
             })
         }));
     out
@@ -522,20 +557,14 @@ impl GraphView {
             } else {
                 (visuals.widgets.inactive.bg_fill, visuals.window_fill)
             };
-            let flag = match &n.status {
-                Status::Ok => None,
-                Status::Warning(_) => Some(visuals.warn_fg_color),
-                Status::Error(_) => Some(visuals.error_fg_color),
-            };
-            let stroke = match (picked, flag) {
-                (_, Some(colour)) => egui::Stroke::new(2.0_f32, colour),
-                (true, None) => visuals.selection.stroke,
-                (false, None) => egui::Stroke::new(1.0_f32, visuals.widgets.noninteractive.bg_stroke.color),
-            };
+            // **The card's stroke is the row's**: the family's, or the warning or the error
+            // stroke where the block has a problem, by the one rule both views draw with
+            // (`theme::frame_paint`). Selection never changes it; a selected card wears the
+            // selection ring just inside, whether or not it is flagged.
+            let paint = crate::theme::frame_paint(n.family, &n.status, &visuals);
             let radius = 4.0 * self.zoom;
-            painter.rect(r, radius, body_fill, stroke, egui::StrokeKind::Inside);
-            // A flagged node that is also selected keeps both: the selection ring sits just inside.
-            if picked && flag.is_some() {
+            painter.rect_filled(r, radius, body_fill);
+            if picked {
                 painter.rect_stroke(r.shrink(2.5), radius, visuals.selection.stroke, egui::StrokeKind::Inside);
             }
             if let Status::Warning(why) | Status::Error(why) = &n.status {
@@ -543,11 +572,23 @@ impl GraphView {
             }
             let header = egui::Rect::from_min_size(r.min, egui::vec2(r.width(), HEADER * self.zoom));
             painter.rect_filled(header, radius, header_fill);
+            // The frame over both, and the family's bar down the header's left edge -- the same
+            // two elements a row wears in the notebook.
+            crate::theme::FramePaint { bar: None, ..paint }.paint(&painter, r);
+            if let Some((colour, hollow)) = paint.bar {
+                let bar = crate::theme::bar_rect(header);
+                let rounding = egui::CornerRadius { nw: radius.min(255.0) as u8, ..Default::default() };
+                if hollow {
+                    painter.rect_stroke(bar, rounding, egui::Stroke::new(1.0_f32, colour), egui::StrokeKind::Inside);
+                } else {
+                    painter.rect_filled(bar, rounding, colour);
+                }
+            }
             // The owned bracket: a block pulled out of its parent keeps a mark saying it is
-            // nested, not a variable.
+            // nested, not a variable. Below the header, where the family's bar does not reach.
             if n.owned {
                 painter.line_segment(
-                    [r.left_top() + egui::vec2(0.0, 2.0), r.left_bottom() - egui::vec2(0.0, 2.0)],
+                    [header.left_bottom() + egui::vec2(0.0, 2.0), r.left_bottom() - egui::vec2(0.0, 2.0)],
                     egui::Stroke::new(3.0 * self.zoom.max(0.6), visuals.widgets.noninteractive.fg_stroke.color),
                 );
             }

@@ -181,6 +181,26 @@ pub(crate) trait QuadTopology {
     fn valence(&self, v: VertexId) -> Option<usize>;
     fn vertex_position(&self, v: VertexId) -> Point3<f64>;
     fn adjacent_faces(&self, v: VertexId) -> Vec<FaceId>;
+    /// The face a half-edge belongs to.
+    fn face_of(&self, he: HalfEdgeId) -> FaceId;
+    /// Whether anything is creased at all: the one question an uncreased mesh is asked, so the
+    /// crease rules below cost it nothing.
+    fn has_sharp(&self) -> bool {
+        false
+    }
+    /// Whether this half-edge's edge is creased.
+    fn is_sharp(&self, _he: HalfEdgeId) -> bool {
+        false
+    }
+    /// How many creased edges meet at `v`, and whether exactly two of them run straight through
+    /// an interior vertex of four faces -- the one creased vertex a bicubic patch still describes.
+    fn crease_class(&self, _v: VertexId) -> (usize, bool) {
+        (0, false)
+    }
+    /// The far ends of the creased edges at `v`.
+    fn crease_ends(&self, _v: VertexId) -> Vec<VertexId> {
+        Vec::new()
+    }
     fn adjacent_vertices(&self, v: VertexId) -> Vec<VertexId> {
         // Every mesh here is all-quad, so a vertex's edge-neighbours are exactly the two
         // corners flanking it in each incident face.
@@ -242,6 +262,21 @@ impl QuadTopology for QuadMesh {
     fn adjacent_vertices(&self, v: VertexId) -> Vec<VertexId> {
         QuadMesh::adjacent_vertices(self, v)
     }
+    fn face_of(&self, he: HalfEdgeId) -> FaceId {
+        self.half_edge(he).face
+    }
+    fn has_sharp(&self) -> bool {
+        self.has_creases()
+    }
+    fn is_sharp(&self, he: HalfEdgeId) -> bool {
+        QuadMesh::is_sharp(self, he)
+    }
+    fn crease_class(&self, v: VertexId) -> (usize, bool) {
+        (self.creases_at(v), self.crease_runs_straight(v))
+    }
+    fn crease_ends(&self, v: VertexId) -> Vec<VertexId> {
+        self.creased_neighbours(v)
+    }
 }
 
 impl QuadTopology for Cage {
@@ -279,6 +314,21 @@ impl QuadTopology for Cage {
     fn adjacent_vertices(&self, v: VertexId) -> Vec<VertexId> {
         self.mesh().adjacent_vertices(v)
     }
+    fn face_of(&self, he: HalfEdgeId) -> FaceId {
+        self.mesh().half_edge(he).face
+    }
+    fn has_sharp(&self) -> bool {
+        self.mesh().has_creases()
+    }
+    fn is_sharp(&self, he: HalfEdgeId) -> bool {
+        self.mesh().is_sharp(he)
+    }
+    fn crease_class(&self, v: VertexId) -> (usize, bool) {
+        (self.mesh().creases_at(v), self.mesh().crease_runs_straight(v))
+    }
+    fn crease_ends(&self, v: VertexId) -> Vec<VertexId> {
+        self.mesh().creased_neighbours(v)
+    }
 }
 
 /// Gathers the 4x4 control grid for a face, or `None` if no single bicubic patch describes
@@ -312,13 +362,29 @@ pub(crate) fn regular_grid<M: QuadTopology + ?Sized>(
     face: FaceId,
 ) -> Option<[[Point3<f64>; 4]; 4]> {
     let corners = mesh.face_vertices(face);
+    let creased = mesh.has_sharp();
     // **Regular means regular for the kind of vertex it is.** An interior vertex needs four
     // faces; a vertex on the boundary needs two, which is what makes its reflected fan regular,
     // and a mesh corner has one. Anything else is extraordinary and descends instead.
-    let regular = |v: VertexId| match mesh.valence(v) {
-        Some(4) => true,
-        Some(1) | Some(2) => mesh.vertex_on_boundary(v),
-        _ => false,
+    //
+    // **A creased vertex is regular only where the crease runs straight through it**: four faces,
+    // the two creased edges opposite, so each side is two faces against a straight boundary --
+    // today's boundary vertex, twice. A dart, a corner the crease turns, three creases meeting, or
+    // a crease through a vertex of other valence all descend. The turn is the one to watch: its
+    // one-face side looks exactly like a mesh corner, whose reflection pins the surface to the
+    // vertex where the crease rule smooths through it, and the two would not meet.
+    let regular = |v: VertexId| {
+        if creased {
+            let (k, straight) = mesh.crease_class(v);
+            if k > 0 {
+                return k == 2 && straight && mesh.valence(v) == Some(4) && !mesh.vertex_on_boundary(v);
+            }
+        }
+        match mesh.valence(v) {
+            Some(4) => true,
+            Some(1) | Some(2) => mesh.vertex_on_boundary(v),
+            _ => false,
+        }
     };
     if !corners.iter().copied().all(regular) {
         return None;
@@ -326,10 +392,20 @@ pub(crate) fn regular_grid<M: QuadTopology + ?Sized>(
 
     let h = mesh.face_half_edges(face);
     let pos = |v: VertexId| mesh.vertex_position(v);
+    // **A creased edge is a boundary to the walk, and only to the walk.** On each side of a sharp
+    // crease subdivision never reads the other side -- a creased edge's point is its midpoint and
+    // a crease vertex's reads only its crease neighbours -- so each side is exactly an open mesh
+    // whose rim is the crease, and the boundary reflection below is exact for it. `twin` itself
+    // is untouched: valence, rings and the patch's bookkeeping still need the real neighbour.
+    let sharp = |he: HalfEdgeId| creased && mesh.is_sharp(he);
+    let ends_here = |he: HalfEdgeId| mesh.on_boundary(he) || sharp(he);
 
     // The two outer vertices across the edge `he`, returned as
     // (adjacent to he's origin, adjacent to he's destination).
     let across = |he: HalfEdgeId| -> Option<(VertexId, VertexId)> {
+        if sharp(he) {
+            return None;
+        }
         let t = mesh.twin(he)?;
         let n1 = mesh.next(t); // origin = he's origin
         let n2 = mesh.next(n1);
@@ -339,7 +415,12 @@ pub(crate) fn regular_grid<M: QuadTopology + ?Sized>(
 
     // `next(twin(he))` is the next half-edge sharing he's origin, so rotating twice lands on
     // the face diagonally opposite this one at that corner.
-    let rotate = |he: HalfEdgeId| -> Option<HalfEdgeId> { Some(mesh.next(mesh.twin(he)?)) };
+    let rotate = |he: HalfEdgeId| -> Option<HalfEdgeId> {
+        if sharp(he) {
+            return None;
+        }
+        Some(mesh.next(mesh.twin(he)?))
+    };
     let diagonal = |he: HalfEdgeId| -> Option<VertexId> {
         let r = rotate(rotate(he)?)?;
         let n1 = mesh.next(r);
@@ -364,7 +445,7 @@ pub(crate) fn regular_grid<M: QuadTopology + ?Sized>(
                 g[slots[1].0][slots[1].1] = Some(pos(b));
                 Some(())
             }
-            None => mesh.on_boundary(he).then_some(()),
+            None => ends_here(he).then_some(()),
         }
     };
     edge([(1, 0), (2, 0)], h[0], &mut g)?; // v = 0 edge
@@ -384,6 +465,14 @@ pub(crate) fn regular_grid<M: QuadTopology + ?Sized>(
     // **Reflect what is still missing, rows before corners.** `P₋₁ = 2·P₀ − P₁` about the
     // boundary row. Doing the rows first is what lets a corner fall out of the same rule
     // applied twice rather than needing one of its own.
+    //
+    // **A corner is reflected across the side that ends, not always in `v`.** It used to be
+    // reflected in `v` whichever side was the boundary, which is right only when the `v` side is
+    // one or both are: beside a boundary running in `v` it gave `4·P₁₁ − 2·P₂₁ − 2·P₁₂ + P₂₂`
+    // where the boundary rule's `2·P₁₀ − P₂₀` belongs, so the face's edge was not the boundary's
+    // B-spline and the face beyond it, which reflects the same point as a row, disagreed with it
+    // at the shared corner. Invisible on a flat panel, where the two coincide; a crease is a
+    // boundary in either direction on every face beside it, which is how it came to light.
     let reflect = |g: &mut [[Option<Point3<f64>>; 4]; 4], into: (usize, usize), about: (usize, usize), from: (usize, usize)| {
         if g[into.0][into.1].is_some() {
             return;
@@ -398,12 +487,14 @@ pub(crate) fn regular_grid<M: QuadTopology + ?Sized>(
         reflect(&mut g, (0, k), (1, k), (2, k)); // outward in u, before
         reflect(&mut g, (3, k), (2, k), (1, k)); // outward in u, after
     }
-    for (corner, about, from) in [
-        ((0, 0), (0, 1), (0, 2)),
-        ((3, 0), (3, 1), (3, 2)),
-        ((3, 3), (3, 2), (3, 1)),
-        ((0, 3), (0, 2), (0, 1)),
+    // Each corner with the face's edge on its `u` side, and the reflection across each side.
+    for (corner, u_side, across_u, across_v) in [
+        ((0, 0), h[3], ((1, 0), (2, 0)), ((0, 1), (0, 2))),
+        ((3, 0), h[1], ((2, 0), (1, 0)), ((3, 1), (3, 2))),
+        ((3, 3), h[1], ((2, 3), (1, 3)), ((3, 2), (3, 1))),
+        ((0, 3), h[3], ((1, 3), (2, 3)), ((0, 2), (0, 1))),
     ] {
+        let (about, from) = if ends_here(u_side) { across_u } else { across_v };
         reflect(&mut g, corner, about, from);
     }
 
@@ -445,6 +536,22 @@ fn descend(u: f64, v: f64) -> (usize, f64, f64) {
 /// `None` where the vertex's ring is incomplete, since the mask needs every neighbour.
 fn limit_position_on<M: QuadTopology + ?Sized>(mesh: &M, v: VertexId) -> Option<Point3<f64>> {
     let n = mesh.valence(v)?;
+    // A vertex on a crease converges along the crease curve: a uniform cubic B-spline of the
+    // crease's vertices, whose limit mask is `(1, 4, 1)/6`. Where three or more creases meet the
+    // vertex does not move at all. (A dart takes the smooth mask below, which is close and not
+    // exact; the descent only reads it where it has shrunk to nothing.)
+    if mesh.has_sharp() {
+        let ends = mesh.crease_ends(v);
+        let p = mesh.vertex_position(v);
+        match ends.len() {
+            0 | 1 => {}
+            2 => {
+                let (a, b) = (mesh.vertex_position(ends[0]), mesh.vertex_position(ends[1]));
+                return Some(Point3::from((a.coords + p.coords * 4.0 + b.coords) / 6.0));
+            }
+            _ => return Some(p),
+        }
+    }
     let n_f = n as f64;
     let p = mesh.vertex_position(v);
 
@@ -474,8 +581,41 @@ fn limit_position_on<M: QuadTopology + ?Sized>(mesh: &M, v: VertexId) -> Option<
 /// Area-weighted normal at a vertex, on any [`QuadMesh`] — used only at extraordinary
 /// vertices, where no single bicubic patch covers the point.
 fn vertex_normal_on<M: QuadTopology + ?Sized>(mesh: &M, v: VertexId) -> Vector3<f64> {
+    normal_over(mesh, &mesh.adjacent_faces(v))
+}
+
+/// The same, over only the faces round `v` on `face`'s side of any crease through it -- the
+/// normal of the side a sample is on. Over every face, a corner where creases meet would shade
+/// each of its sides with the average of all of them.
+fn fan_normal_on<M: QuadTopology + ?Sized>(mesh: &M, v: VertexId, face: FaceId) -> Vector3<f64> {
+    if !mesh.has_sharp() || mesh.crease_class(v).0 == 0 {
+        return vertex_normal_on(mesh, v);
+    }
+    let mut fan = vec![face];
+    let mut stack = vec![face];
+    while let Some(f) = stack.pop() {
+        let corners = mesh.face_vertices(f);
+        let Some(k) = corners.iter().position(|&c| c == v) else { continue };
+        let h = mesh.face_half_edges(f);
+        for he in [h[k], h[(k + 3) % 4]] {
+            if mesh.is_sharp(he) {
+                continue;
+            }
+            if let Some(t) = mesh.twin(he) {
+                let g = mesh.face_of(t);
+                if !fan.contains(&g) {
+                    fan.push(g);
+                    stack.push(g);
+                }
+            }
+        }
+    }
+    normal_over(mesh, &fan)
+}
+
+fn normal_over<M: QuadTopology + ?Sized>(mesh: &M, faces: &[FaceId]) -> Vector3<f64> {
     let mut acc = Vector3::zeros();
-    for f in mesh.adjacent_faces(v) {
+    for &f in faces {
         let c = mesh.face_vertices(f);
         let p: Vec<_> = c.iter().map(|&x| mesh.vertex_position(x)).collect();
         acc += (p[1] - p[0]).cross(&(p[2] - p[0]));
@@ -770,6 +910,15 @@ impl LimitSurface {
         // original edge — keyed by the edge's two vertex indices (lower first) and how far
         // along that direction the point sits, so either face resolves to the same key.
         let mut edges_seen: HashMap<(usize, usize, usize), u32> = HashMap::new();
+        // **A sample on a crease belongs to two sides with two normals.** The weld evaluates a
+        // shared sample once, for whichever face reaches it first, so without this the second
+        // side would shade with the first side's normal. Each side's own normal is kept per
+        // triangle corner instead, and the welded vertex gets their bisector -- the normal a
+        // closest point exactly on the crease reads, which does not depend on which face came
+        // first.
+        let creased = self.cage.has_creases();
+        let mut crease_sums: HashMap<u32, Vector3<f64>> = HashMap::new();
+        let mut crease_corner_normals: Vec<(u32, [Vector3<f64>; 3])> = Vec::new();
 
         for face in self.cage.face_ids() {
             let c = self.cage.face_vertices(face);
@@ -800,6 +949,37 @@ impl LimitSurface {
                         }
                     };
                     grid[i * (n + 1) + j] = idx;
+                }
+            }
+
+            // This face's own normal at each of its samples on a crease, keyed by grid slot.
+            let mut own: HashMap<usize, Vector3<f64>> = HashMap::new();
+            if creased {
+                let mesh = &self.cage;
+                let on_crease = |i: usize, j: usize| -> bool {
+                    match (i == 0, i == n, j == 0, j == n) {
+                        (true, _, true, _) => mesh.creases_at(c[0]) > 0,
+                        (_, true, true, _) => mesh.creases_at(c[1]) > 0,
+                        (_, true, _, true) => mesh.creases_at(c[2]) > 0,
+                        (true, _, _, true) => mesh.creases_at(c[3]) > 0,
+                        (_, _, true, _) => mesh.is_creased(c[0], c[1]),
+                        (_, true, _, _) => mesh.is_creased(c[1], c[2]),
+                        (_, _, _, true) => mesh.is_creased(c[3], c[2]),
+                        (true, _, _, _) => mesh.is_creased(c[0], c[3]),
+                        _ => false,
+                    }
+                };
+                for i in 0..=n {
+                    for j in 0..=n {
+                        if !on_crease(i, j) {
+                            continue;
+                        }
+                        let (_, nrm) = self
+                            .evaluate_with_normal_ref(face, i as f64 / n as f64, j as f64 / n as f64)
+                            .expect("prewarmed above");
+                        own.insert(i * (n + 1) + j, nrm);
+                        *crease_sums.entry(grid[i * (n + 1) + j]).or_insert_with(Vector3::zeros) += nrm;
+                    }
                 }
             }
 
@@ -853,6 +1033,17 @@ impl LimitSurface {
                     let b = grid[(i + 1) * (n + 1) + j];
                     let cc = grid[(i + 1) * (n + 1) + j + 1];
                     let d = grid[i * (n + 1) + j + 1];
+                    if !own.is_empty() {
+                        let slot = |i: usize, j: usize| i * (n + 1) + j;
+                        let corner = |s: usize, idx: u32| own.get(&s).copied().unwrap_or(normals[idx as usize]);
+                        let (s00, s10, s11, s01) = (slot(i, j), slot(i + 1, j), slot(i + 1, j + 1), slot(i, j + 1));
+                        if [s00, s10, s11].iter().any(|s| own.contains_key(s)) {
+                            crease_corner_normals.push((triangles.len() as u32, [corner(s00, a), corner(s10, b), corner(s11, cc)]));
+                        }
+                        if [s00, s11, s01].iter().any(|s| own.contains_key(s)) {
+                            crease_corner_normals.push((triangles.len() as u32 + 1, [corner(s00, a), corner(s11, cc), corner(s01, d)]));
+                        }
+                    }
                     triangles.push([a, b, cc]);
                     triangles.push([a, cc, d]);
                     let at = |i: usize, j: usize| [i as f64 / n as f64, j as f64 / n as f64];
@@ -871,6 +1062,12 @@ impl LimitSurface {
             }
         }
 
+        for (idx, sum) in crease_sums {
+            if let Some(m) = sum.try_normalize(1e-12) {
+                normals[idx as usize] = m;
+            }
+        }
+
         Tessellation {
             positions,
             normals,
@@ -878,6 +1075,7 @@ impl LimitSurface {
             triangle_faces,
             triangle_uvs,
             triangle_gradients,
+            crease_corner_normals,
         }
     }
 }
@@ -910,6 +1108,11 @@ pub struct Tessellation {
     /// Alongside `triangle_uvs` and per triangle for the same reason: a welded vertex belongs to
     /// several faces and has different coordinates — and so different gradients — in each.
     pub triangle_gradients: Vec<[[Vector3<f64>; 2]; 3]>,
+    /// The triangles touching a crease, each with its own side's normal at every corner, in
+    /// triangle order. **Sparse because a crease is a few edges of a large cage**: per corner for
+    /// every triangle of a 24 576-face cage at level 4 would be about 900 MB. Empty on an
+    /// uncreased cage, whose `normals` are already one per side because there is one side.
+    pub crease_corner_normals: Vec<(u32, [Vector3<f64>; 3])>,
 }
 
 /// Resolves a face-grid corner to a global vertex index, evaluating and caching it once per
@@ -1020,7 +1223,7 @@ fn walk(
     let corner = deepest.face_vertices(pf)[0];
     Some((
         limit_position_on(deepest, corner)?,
-        vertex_normal_on(deepest, corner),
+        fan_normal_on(deepest, corner, pf),
     ))
 }
 

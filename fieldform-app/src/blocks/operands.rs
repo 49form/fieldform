@@ -121,6 +121,7 @@ impl App {
                 Some(read) => self.shown_label(offered, read, "none"),
                 None => String::new(),
             };
+            self.last_reference_field = None;
             if let Some(picked) = self.reference_field_in(
                 ui,
                 salt,
@@ -131,6 +132,23 @@ impl App {
                 DropsFrom::block(|n| n),
             ) {
                 slot.fill(picked);
+            }
+            // **Right-click the field to clear it** (the owner, 2026-11-07: "u should be able to RMB
+            // click on it and CLEAR should be an option"): the same edit as the Clear beside it,
+            // where the hand already is.
+            if !slot.is_empty()
+                && let Some(field) = self.last_reference_field.take()
+            {
+                field.context_menu(|ui| {
+                    if ui
+                        .button("Clear")
+                        .on_hover_text("Take this block out of the slot. It becomes a body of its own again.")
+                        .clicked()
+                    {
+                        slot.clear();
+                        ui.close();
+                    }
+                });
             }
             // Read after the field, so the rest of the row shows the state the slot is about to
             // be in rather than the one this frame's typing left behind — the blend row's rule.

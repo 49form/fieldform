@@ -25,6 +25,7 @@ mod curve;
 mod document;
 mod ends;
 mod expression;
+mod written;
 mod eye;
 mod frame;
 mod helix;
@@ -45,6 +46,8 @@ mod sketch;
 mod surface_axis;
 mod surface_point;
 mod output;
+mod section_cut;
+mod comb;
 mod unit;
 
 pub use curve::{Curve, CurveData, CurveError, JOINED_MM};
@@ -57,14 +60,15 @@ pub use document::{
     Document, ExpressionError, EyeFlag, GraphLayout, ImportSettings, ImportSource, InputKind, InputPort,
     ListReadings, Nesting, NodeMeta, ParamValue, Parameter, ParameterError, Part, RenameError,
 };
-pub use expression::{Expression, ParseError};
+pub use expression::{BinOp, EvalError, Expr, Expression, Function, Name, ParseError};
+pub use written::{Written, WrittenClaim};
 pub use eye::{
     drawn_graph, draws_as_overlay_in, eye_flag_by, eye_flag_in, is_visible_among, is_visible_in,
     shown_ingredients_in,
 };
 pub use graph::{
     no_turn, Attractor, Turn,
-    Axis, Banding, BooleanOp, CellMap, Continuity, Critical, Graph,
+    Axis, Banding, BooleanOp, CellMap, Continuity, Critical, Family, Graph,
     LatticeCell,
     Fillet, LatticePhase, Node, Operand, ParamRef, PatternKind, RampShape, RimEnds, Rims,
     UnknownNode, uniform_factor,
@@ -90,7 +94,12 @@ pub use loft::LoftSmooth;
 pub use sides::{AngleSides, Sides};
 pub use id::{
     CageId, CurveId, ExportId, MeshId, NodeId, ParamId, PartId, QuadMeshId, RelationId,
-    SaveImageId, TessellationId,
+    SaveImageId, SectionCutId, TessellationId, CombId,
+};
+pub use section_cut::SectionCut;
+pub use comb::{
+    curvature_vector, fitted_scale, fitted_scale_path, path_backwards, read_comb, read_comb_path, CombReading,
+    CurvatureComb, JointReading, Tooth,
 };
 pub use output::{
     Capture, Export, ImageBackground, ImageFormat, ImageQuality, MeshDetail, MeshTolerance,

@@ -157,6 +157,7 @@ impl TracedView {
                             let mut camera = camera;
                             camera.jitter = [0.0, 0.0];
                             camera.occlusion = None;
+                            camera.reflections = None;
                             let pixels = (draft_pixels / WARM_SHARE).ceil() as u32;
                             if let Some(ticket) =
                                 renderer.warm_rows(shading, &camera, budget, pixels)
@@ -173,6 +174,7 @@ impl TracedView {
                                     still_frame: None,
                                     skipped: 0,
                                     warm: true,
+                                    reflections: false,
                                 });
                             }
                         }
@@ -393,6 +395,7 @@ impl TracedView {
                     still_frame: still.then_some((accumulated + 1, still_frames)),
                     skipped: if still { 0 } else { std::mem::take(&mut self.draft_skipped) },
                     warm: false,
+                    reflections: camera.reflections.is_some(),
                 }),
                 Err(e) => {
                     self.error = Some(format!("field render failed: {e}"));

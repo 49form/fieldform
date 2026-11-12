@@ -496,6 +496,21 @@ impl Serialize for Node {
         let value = match self {
             Node::Cage(cage) => json_object([(KIND, json(&"cage")?), ("cage", json(cage)?)]),
             Node::Mesh(mesh) => json_object([(KIND, json(&"mesh")?), ("mesh", json(mesh)?)]),
+            // The text alone: its tree is parsed back under the document's names on read.
+            // The frame only when it says something, as every aimed block writes it.
+            Node::Expression { text, frame, size, divisor, claim } => {
+                let mut fields = vec![
+                    (KIND, json(&"expression")?),
+                    ("text", json(&text.source().to_string())?),
+                    ("size", json(size)?),
+                    ("divisor", json(divisor)?),
+                    ("claim", json(claim)?),
+                ];
+                if !frame.is_default() {
+                    fields.push(("frame", json(frame)?));
+                }
+                json_fields(fields.into_iter())
+            }
             Node::Sphere { centre, radius } => json_object([
                 (KIND, json(&"sphere")?),
                 ("centre", json(centre)?),
@@ -1114,6 +1129,7 @@ impl<'de> Deserialize<'de> for Node {
             "cage" => &[KIND, "cage"],
             "mesh" => &[KIND, "mesh"],
             "sphere" => &[KIND, "centre", "radius"],
+            "expression" => &[KIND, "text", "frame", "size", "divisor", "claim"],
             // Both, because a `"cube"` written by an older build still has to open. Only
             // `"cuboid"` is ever written.
             "cube" => &[KIND, "centre", "size", "turn"],
@@ -1400,6 +1416,13 @@ impl<'de> Deserialize<'de> for Node {
             "sphere" => Node::Sphere {
                 centre: read(kind, "centre", field("centre")?)?,
                 radius: read(kind, "radius", field("radius")?)?,
+            },
+            "expression" => Node::Expression {
+                text: crate::Written::unparsed(read::<String, _>(kind, "text", field("text")?)?),
+                frame: read_frame(kind, object)?,
+                size: read(kind, "size", field("size")?)?,
+                divisor: read(kind, "divisor", field("divisor")?)?,
+                claim: read(kind, "claim", field("claim")?)?,
             },
             // One number in all three slots, which is what a cube is. Migrated on read rather
             // than kept as a second kind: two ways to say "box" in the format is two things a

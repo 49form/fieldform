@@ -38,6 +38,8 @@ jobs:
         run: cargo test --lib --bins --tests $CRATES
       - name: SPDX headers present
         run: python3 tools/release/add_spdx_headers.py --check
+      - name: the block-family colours stay apart under colour-vision deficiency
+        run: python3 tools/design/family_palette_check.py
       - name: the two binaries stay split
         run: |
           set -euo pipefail

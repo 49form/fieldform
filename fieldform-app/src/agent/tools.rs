@@ -198,6 +198,29 @@ impl App {
     }
 }
 
+/// The refusal for an argument `tool` does not declare, if `args` carries one.
+///
+/// **Refused, not ignored**, as the console refuses a key a verb does not read. A client that
+/// passed `snapshot out=…` was told nothing and found no file; an argument dropped silently is a
+/// call that did something other than what was asked and said it succeeded.
+pub(crate) fn undeclared_argument(tool: &str, args: &Map<String, J>) -> Option<LineError> {
+    let (_, _, schema, _) = definitions().into_iter().find(|(name, ..)| *name == tool)?;
+    let declared = schema.get("properties").and_then(J::as_object)?;
+    let mut unknown: Vec<&str> = args.keys().map(String::as_str).filter(|k| !declared.contains_key(*k)).collect();
+    if unknown.is_empty() {
+        return None;
+    }
+    unknown.sort_unstable();
+    let accepted: Vec<String> = declared.keys().cloned().collect();
+    let takes = if accepted.is_empty() { "it takes no arguments".to_string() } else { format!("it takes {}", accepted.join(", ")) };
+    let mut e = tool_error("unknown_key", format!("`{tool}` does not take `{}`: {takes}", unknown.join("`, `")));
+    e.verb = Some(tool.to_string());
+    e.key = Some(unknown[0].to_string());
+    e.did_you_mean = crate::outcome::nearest(unknown[0], accepted.iter().map(String::as_str));
+    e.accepted = accepted;
+    Some(e)
+}
+
 /// The tools this host offers, as `(name, description, schema, read_only)`.
 pub(crate) fn definitions() -> Vec<(&'static str, &'static str, J, bool)> {
     let none = json!({ "type": "object", "properties": {}, "additionalProperties": false });
@@ -290,8 +313,15 @@ pub(crate) fn definitions() -> Vec<(&'static str, &'static str, J, bool)> {
         ),
         (
             "snapshot",
-            "A picture of the viewport as a PNG, from a named view (iso, front, back, left, right, top, bottom) or the current one. The picture is the viewport's own size, and taking it moves this host's camera.",
-            json!({ "type": "object", "properties": { "view": { "type": "string", "enum": ["iso", "front", "back", "left", "right", "top", "bottom", "current"] } } }),
+            "A picture of the viewport as a PNG, from a named view (iso, front, back, left, right, top, bottom) or the current one. The picture is the viewport's own size, and taking it moves this host's camera. With file, the PNG is also kept there.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "view": { "type": "string", "enum": ["iso", "front", "back", "left", "right", "top", "bottom", "current"] },
+                    "file": { "type": "string", "description": "Also keep the picture at this .png path, under a root (relative to the first)." },
+                    "allow_overwrite": { "type": "boolean", "description": "Replace `file` if it exists." }
+                }
+            }),
             true,
         ),
         (

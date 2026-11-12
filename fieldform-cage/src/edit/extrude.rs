@@ -164,6 +164,19 @@ pub fn lift(mesh: &QuadMesh, faces: &[FaceId], mode: Mode) -> Result<Lift, EditE
         ),
         e => EditError::bug("lift", e),
     })?;
+    // A border vertex is now two: the original stays at the base, the duplicate is on the cap.
+    // An edge on the region's rim exists at the base and stays creased there; an edge inside the
+    // region found its border ends on the cap, and is creased there instead.
+    let mut built = built;
+    built.carry_creases(
+        mesh,
+        |v| {
+            let mut out = vec![v];
+            out.extend(regions.iter().filter_map(|r| r.duplicate.get(&v).copied()));
+            out
+        },
+        false,
+    );
     Ok(Lift {
         result: EditResult {
             mesh: built,
@@ -286,8 +299,10 @@ pub fn extrude_boundary_edges(
         quads.push(vec![b.index() as u32, a.index() as u32, duplicate[&a].index() as u32, duplicate[&b].index() as u32]);
     }
     let (nv, nf) = (positions.len(), quads.len());
+    let mut new = rebuild("extrude_boundary_edges", positions, &quads)?;
+    new.carry_creases(mesh, |v| vec![v], false);
     Ok(EditResult {
-        mesh: rebuild("extrude_boundary_edges", positions, &quads)?,
+        mesh: new,
         new_vertices: (original_vertices..nv).map(VertexId::from_index).collect(),
         new_faces: (original_faces..nf).map(FaceId::from_index).collect(),
         replaced: HashMap::new(),

@@ -807,6 +807,127 @@ pub(crate) fn ungroup_commands(
     (commands, removed)
 }
 
+/// The control-point index of a curve end.
+fn end_index(doc: &Document, end: fieldform_scene::CurveEnd) -> Option<usize> {
+    let n = doc.curve(end.curve)?.control_points().len();
+    (n >= 2).then_some(match end.end {
+        fieldform_scene::End::Start => 0,
+        fieldform_scene::End::End => n - 1,
+    })
+}
+
+/// Holds one join: both ends on one point block, made where they meet if neither sits on one.
+///
+/// **What makes a join's ends move together**, which a continuity alone does not: a joint relation
+/// claims the follower's points *beside* its end and never the end itself, so without this a drag
+/// of either curve carried its end away and left the other behind, with the relation still
+/// claiming a tangent at a corner that had come apart (the owner, 2026-11-07: linked points "should
+/// stay magnetically connected until u RMB click and break it"). A closed loop's corners were
+/// already held this way when the loop closed; this is the same point, made for one join.
+///
+/// Refused, with what claims it, when a relation derives one of the two ends: a point a relation
+/// owns is not a block's to move (the rule [`join_loop_commands`] keeps for the same reason).
+pub(crate) fn hold_join_commands(
+    doc: &Document,
+    part: PartId,
+    ends: [fieldform_scene::CurveEnd; 2],
+    at: Point3<f64>,
+) -> Result<Vec<Box<dyn fieldform_ops::Command>>, String> {
+    let mut commands: Vec<Box<dyn fieldform_ops::Command>> = Vec::new();
+    let mut indexed = Vec::new();
+    for end in ends {
+        let index = end_index(doc, end).ok_or("a curve of the join is gone")?;
+        if let Some(record) = fieldform_scene::relation::owners_of(doc, end.curve, index, None)
+            .first()
+            .and_then(|owner| doc.relations.get(owner))
+        {
+            return Err(format!("{} owns that end, so it cannot be held", record.relation.describe(doc)));
+        }
+        indexed.push((end.curve, index));
+    }
+    let on: Vec<Option<NodeId>> =
+        indexed.iter().map(|(c, i)| doc.curve(*c).and_then(|c| c.placed_on(*i))).collect();
+    let node = match (on[0], on[1]) {
+        (Some(_), Some(_)) => return Ok(commands),
+        (Some(p), None) | (None, Some(p)) => p,
+        (None, None) => {
+            let Some(before) = doc.parts.get(&part).map(|p| p.graph.clone()) else {
+                return Err("the part is gone".to_string());
+            };
+            let mut graph = before.clone();
+            let node = graph.add(Node::Point {
+                at: [ParamRef::Literal(at.x), ParamRef::Literal(at.y), ParamRef::Literal(at.z)],
+            });
+            commands.push(Box::new(SetPartGraph::new(part, before, graph)));
+            node
+        }
+    };
+    for ((curve, index), was_on) in indexed.into_iter().zip(on) {
+        if was_on.is_some() {
+            continue;
+        }
+        let Some(was) = doc.curve(curve).cloned() else { continue };
+        let mut now = was.clone();
+        now.place_on(index, Some(node));
+        commands.push(Box::new(SetCurve::new(curve, Some(was), Some(now))));
+    }
+    Ok(commands)
+}
+
+/// Lets one join go: the continuity between its two ends taken out, both ends off the point they
+/// share, and the point removed when nothing else reads it or sits on it. Nothing moves.
+/// Whether there was anything to let go.
+pub(crate) fn release_join_commands(
+    doc: &Document,
+    part: PartId,
+    ends: [fieldform_scene::CurveEnd; 2],
+) -> Vec<Box<dyn fieldform_ops::Command>> {
+    let mut commands: Vec<Box<dyn fieldform_ops::Command>> = Vec::new();
+    if let Some((id, _)) = crate::blocks::list::joint_relation_between(doc, ends[0], ends[1])
+        && let Some(record) = doc.relations.get(&id)
+    {
+        commands.push(Box::new(SetRelation::remove(id, record.clone())));
+    }
+    let mut freed: Vec<NodeId> = Vec::new();
+    let mut released: Vec<fieldform_scene::Curve> = Vec::new();
+    for end in ends {
+        let Some(index) = end_index(doc, end) else { continue };
+        let Some(was) = released.iter().find(|c| c.id == end.curve).cloned().or_else(|| doc.curve(end.curve).cloned())
+        else {
+            continue;
+        };
+        let Some(node) = was.placed_on(index) else { continue };
+        let mut now = was.clone();
+        now.place_on(index, None);
+        released.retain(|c| c.id != end.curve);
+        released.push(now);
+        if !freed.contains(&node) {
+            freed.push(node);
+        }
+    }
+    for now in &released {
+        if let Some(was) = doc.curve(now.id).cloned() {
+            commands.push(Box::new(SetCurve::new(now.id, Some(was), Some(now.clone()))));
+        }
+    }
+    if let Some(before) = doc.parts.get(&part).map(|p| p.graph.clone()) {
+        let mut graph = before.clone();
+        let mut removed = false;
+        for node in freed {
+            let sat_on = doc.curves.iter().any(|(id, c)| {
+                released.iter().find(|r| r.id == *id).unwrap_or(c).sits_on().any(|n| n == node)
+            });
+            if !graph.is_consumed(node) && !sat_on && graph.remove(node) {
+                removed = true;
+            }
+        }
+        if removed {
+            commands.push(Box::new(SetPartGraph::new(part, before, graph)));
+        }
+    }
+    commands
+}
+
 /// The relations naming any of `curves`, as records, so a delete can take them along.
 fn relations_naming(
     doc: &Document,
@@ -828,6 +949,12 @@ pub(crate) fn delete_curves_commands(doc: &Document, curves: &[CurveId]) -> Vec<
     let mut commands: Vec<Box<dyn fieldform_ops::Command>> = Vec::new();
     for (id, record) in relations_naming(doc, curves) {
         commands.push(Box::new(SetRelation::remove(id, record)));
+    }
+    // And every curvature comb reading one, for the same reason: a comb of nothing is clutter
+    // with an error on it, and undo puts the curve back before the comb that reads it.
+    if doc.combs.iter().any(|c| curves.contains(&c.curve)) {
+        let kept = doc.combs.iter().filter(|c| !curves.contains(&c.curve)).cloned().collect();
+        commands.push(Box::new(fieldform_ops::SetCombs::new(doc.combs.clone(), kept)));
     }
     for id in curves {
         if let Some(curve) = doc.curve(*id).cloned() {

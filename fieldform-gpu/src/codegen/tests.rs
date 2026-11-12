@@ -2636,6 +2636,178 @@
         }
     }
 
+    /// A plate with `n` holes drilled through it: a box, then `n` cylinders cut from it in one
+    /// difference. The shape most machined parts are, and the one that made a reference part
+    /// take a minute to compile.
+    fn drilled(n: usize) -> (fieldform_scene::Document, Graph) {
+        let doc = fieldform_scene::Document::new();
+        let mut graph = Graph::empty();
+        let plate = graph.add(Node::Cuboid {
+            edge: Default::default(),
+            centre: fieldform_scene::Place::At([lit(0.0); 3]),
+            size: [lit(400.0), lit(60.0), lit(10.0)],
+            turn: fieldform_scene::no_turn(),
+        });
+        let mut inputs = vec![plate.into()];
+        for i in 0..n {
+            let x = -180.0 + 12.0 * i as f64;
+            inputs.push(
+                graph
+                    .add(Node::Cylinder {
+                        edge: Default::default(),
+                        ends: fieldform_scene::Ends::between(
+                            fieldform_scene::Place::At([lit(x), lit(0.0), lit(-10.0)]),
+                            fieldform_scene::Place::At([lit(x), lit(0.0), lit(10.0)]),
+                        ),
+                        radius: lit(3.0),
+                    })
+                    .into(),
+            );
+        }
+        graph.add(Node::Boolean { op: BooleanOp::Difference, inputs });
+        (doc, graph)
+    }
+
+    /// `n` of one plain primitive in a row, unioned: every shape a run of primitives admits.
+    fn row(shape: &str, n: usize) -> (fieldform_scene::Document, Graph) {
+        let doc = fieldform_scene::Document::new();
+        let mut graph = Graph::empty();
+        let mut inputs = Vec::new();
+        for i in 0..n {
+            let x = 30.0 * i as f64;
+            let at = |z: f64| fieldform_scene::Place::At([lit(x), lit(0.0), lit(z)]);
+            let ends = fieldform_scene::Ends::between(at(0.0), at(20.0));
+            let node = match shape {
+                "cylinders" => Node::Cylinder { edge: Default::default(), ends, radius: lit(5.0) },
+                "cones" => Node::Cone { edge: Default::default(), ends, base_radius: lit(6.0), top_radius: lit(2.0) },
+                "capsules" => Node::Capsule { ends, start_radius: lit(5.0), end_radius: lit(3.0) },
+                "spheres" => Node::Sphere { centre: at(0.0), radius: lit(8.0) },
+                "boxes" => Node::Cuboid {
+                    edge: Default::default(),
+                    centre: at(0.0),
+                    size: [lit(10.0), lit(12.0), lit(14.0)],
+                    turn: fieldform_scene::no_turn(),
+                },
+                "tori" => Node::Torus {
+                    centre: at(0.0),
+                    major_radius: lit(9.0),
+                    minor_radius: lit(2.0),
+                    turn: fieldform_scene::no_turn(),
+                },
+                other => unreachable!("no row of {other}"),
+            };
+            inputs.push(graph.add(node).into());
+        }
+        graph.add(Node::Boolean { op: BooleanOp::Union, inputs });
+        (doc, graph)
+    }
+
+    /// Each row's name, its call, and the slots a member takes in the table.
+    const ROWS: [(&str, &str, usize); 6] = [
+        ("cylinders", "cylinder", 7),
+        ("cones", "cone", 8),
+        ("capsules", "capsule", 8),
+        ("spheres", "sphere", 4),
+        ("boxes", "cuboid", 6),
+        ("tori", "torus", 5),
+    ];
+
+    /// The slot agreement, on every kind of primitive run and on a difference's tools: every slot
+    /// the text names exists, and after the last of them comes exactly the run's table.
+    ///
+    /// The `7u`, `8u`, `4u`, `6u` and `5u` the prelude's walks step by are written once in WGSL
+    /// and once in `Primitive::slots`, and nothing but this holds them to the same number: a
+    /// mismatch reads the next member's centre as this one's radius and draws a plausible part.
+    #[test]
+    fn a_looped_run_of_primitives_pushes_the_same_slots_in_both_passes() {
+        let mut cases: Vec<(String, fieldform_scene::Document, Graph, usize)> = Vec::new();
+        for n in [2usize, 3, RUN_FLOOR, 5, 8, 16] {
+            // Below the floor the members are written out and there is no table.
+            let table = |each: usize| if n >= RUN_FLOOR { n * each } else { 0 };
+            let (doc, graph) = drilled(n);
+            cases.push((format!("{n} holes"), doc, graph, table(7)));
+            for (shape, _, each) in ROWS {
+                let (doc, graph) = row(shape, n);
+                cases.push((format!("{n} {shape}"), doc, graph, table(each)));
+            }
+        }
+        for (what, doc, graph, table) in cases {
+            let program = generate(&doc, &graph).expect("generates");
+            let highest = program
+                .source
+                .split("params[")
+                .skip(1)
+                .filter_map(|rest| rest.split(']').next())
+                .filter_map(|s| s.trim().parse::<usize>().ok())
+                .max()
+                .expect("the shader reads parameters");
+            assert_eq!(
+                highest + 1 + table,
+                program.params.len(),
+                "with {what} the shader names {} slots, the table is {table}, and the program declares {}",
+                highest + 1,
+                program.params.len()
+            );
+        }
+    }
+
+    /// **The point of the change, said as a property:** a hole added to a drilled plate changes
+    /// the numbers the shader reads and not one byte of the shader, so it is drawn without a
+    /// compile. And a run of each primitive is one walk, at the floor and above it.
+    #[test]
+    fn a_hole_added_to_a_drilled_plate_changes_the_buffer_and_not_the_shader() {
+        let source = |n: usize| {
+            let (doc, graph) = drilled(n);
+            generate(&doc, &graph).expect("generates")
+        };
+        let base = source(RUN_FLOOR);
+        for n in [RUN_FLOOR + 1, 8, 16, 32] {
+            let more = source(n);
+            assert_eq!(more.source, base.source, "{n} holes compile to the text {RUN_FLOOR} did");
+            assert!(more.params.len() > base.params.len(), "and read more numbers");
+        }
+        let body = field_body(&base.source);
+        assert_eq!(body.matches("cylinder_run_distance(").count(), 1, "the holes are one walk");
+        assert_eq!(body.matches("cylinder_distance(").count(), 0, "and none is written out");
+        assert_eq!(body.matches("cuboid_distance(").count(), 1, "the plate is the one thing cut from");
+
+        for (shape, call, _) in ROWS {
+            for n in [RUN_FLOOR, 8, 16] {
+                let (doc, graph) = row(shape, n);
+                let program = generate(&doc, &graph).expect("generates");
+                let body = field_body(&program.source);
+                assert_eq!(body.matches(&format!("{call}_run_distance(")).count(), 1, "{n} {shape} are one walk");
+                assert_eq!(body.matches(&format!("{call}_distance(")).count(), 0, "with none of {n} {shape} written out");
+            }
+            // Below the floor they are written out, as pipes and blades are.
+            let (doc, graph) = row(shape, RUN_FLOOR - 1);
+            let program = generate(&doc, &graph).expect("generates");
+            assert_eq!(
+                field_body(&program.source).matches(&format!("{call}_distance(")).count(),
+                RUN_FLOOR - 1,
+                "{} {shape} are written out",
+                RUN_FLOOR - 1
+            );
+        }
+    }
+
+    /// The first operand of a difference is what is cut from, and never a tool: a cylinder cut by
+    /// cylinders keeps its own call and the run is the tools after it.
+    #[test]
+    fn the_first_operand_of_a_difference_is_never_part_of_a_run() {
+        let (doc, mut graph) = row("cylinders", RUN_FLOOR + 1);
+        let union = graph.roots()[0];
+        let Some(Node::Boolean { inputs, .. }) = graph.node(union).cloned() else { unreachable!() };
+        graph.remove(union);
+        graph.add(Node::Boolean { op: BooleanOp::Difference, inputs });
+        let program = generate(&doc, &graph).expect("generates");
+        let body = field_body(&program.source);
+        assert_eq!(body.matches("cylinder_distance(").count(), 1, "the cylinder cut from");
+        assert_eq!(body.matches("cylinder_run_distance(").count(), 1, "and one walk of the tools");
+        // The count the walk reads is the number of tools, not of operands.
+        assert!(program.params.contains(&ParamRef::Literal(RUN_FLOOR as f64)), "a run of {RUN_FLOOR} tools");
+    }
+
     /// The same property on the other kind of run: a fan of blades writes one walk.
     ///
     /// **Its own test rather than a loop over both kinds**, because the two leave different things
@@ -3427,7 +3599,9 @@
         // One guard box between them, and a cull extent for each.
         assert_eq!(program.body_boxes.iter().filter(|b| b.is_some()).count(), 1);
         let base = program.cull_base.expect("two bodies cull");
-        assert_eq!(program.params.len(), base + 12, "six slots for each of the two bodies");
+        // Then nothing but the two runs' tables: each body's four spheres are a run, whose four
+        // slots a member are laid after every slot the text names.
+        assert_eq!(program.params.len(), base + 12 + 2 * 4 * 4, "six slots for each of the two bodies");
 
         // Both bodies' extents are there and each is wider than the body it bounds. The plain
         // body spans -5 to 5; the latticed one 35 to 45, cut by a gyroid that reaches no further.

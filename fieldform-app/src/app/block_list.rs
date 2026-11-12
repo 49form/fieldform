@@ -4,7 +4,43 @@
 
 use crate::console_keys::RowCalled;
 use crate::*;
+#[cfg(test)]
+use crate::blocks::list::DrawnFrame;
 
+
+/// What a reference field's key names, so a field holding a variable can be drawn as a chip in
+/// that variable's family. One impl per kind of key a field takes.
+pub(crate) trait ChipKey: Copy + PartialEq {
+    fn names(self) -> Named;
+}
+
+/// The block or curve a reference names.
+#[derive(Clone, Copy)]
+pub(crate) enum Named {
+    Node(NodeId),
+    Curve(CurveId),
+}
+
+impl ChipKey for NodeId {
+    fn names(self) -> Named {
+        Named::Node(self)
+    }
+}
+
+impl ChipKey for CurveId {
+    fn names(self) -> Named {
+        Named::Curve(self)
+    }
+}
+
+impl ChipKey for fieldform_scene::Attractor {
+    fn names(self) -> Named {
+        match self {
+            fieldform_scene::Attractor::Curve(id) => Named::Curve(id),
+            fieldform_scene::Attractor::Point(id) => Named::Node(id),
+        }
+    }
+}
 
 /// Whether a reference field's suggestion list is drawn this frame (item 109).
 ///
@@ -21,6 +57,26 @@ pub(crate) fn show_reference_list(has_focus: bool, was_open: bool, pointer_in_la
 /// or the reopening of item 109 returns by a shorter route.
 pub(crate) fn reference_list_open_next(drawn: bool, chosen: bool) -> bool {
     drawn && !chosen
+}
+
+/// Where a reference field's list opens, and how tall it may be: below the field if `wanted` fits
+/// there, otherwise on whichever side has more room, never past the edge of `screen` and never
+/// over the field. Answers `(above, max_height)`.
+///
+/// **Never over the field** (the owner, 2026-11-07: a list that "gets too long and its close the
+/// bottom of the screen ... covers the input field"). The list was always placed below, and egui
+/// keeps an area on screen by sliding it up, which near the bottom slid it over the text box being
+/// typed into. Opening above when the room is there, and scrolling inside the room there is when
+/// it is not, keeps the field in sight either way.
+pub(crate) fn reference_list_placement(field: egui::Rect, screen: egui::Rect, wanted: f32) -> (bool, f32) {
+    const GAP: f32 = 2.0;
+    let below = (screen.bottom() - field.bottom() - GAP).max(0.0);
+    let above = (field.top() - screen.top() - GAP).max(0.0);
+    if wanted <= below || below >= above {
+        (false, below)
+    } else {
+        (true, above)
+    }
 }
 impl App {
     /// The row of a closed loop of curves: one line collapsed, its curves in walk order when
@@ -46,11 +102,15 @@ impl App {
         nesting: &fieldform_scene::Nesting,
     ) {
         let Some(members) = self.profiles.members(key).map(|m| m.to_vec()) else { return };
+        let open = self.profiles.is_open(key);
         let flat = fieldform_field::loop_is_flat(&self.doc, &members);
         // Whether the loop is held together by joints (§4): every end on a point, some, or
-        // none. Said in the header because it decides what a drag on a corner does.
+        // none. Said in the header because it decides what a drag on a corner does. An open
+        // profile is held at every join by what makes it one, and its two free ends never are.
         let (held, total) = self.profile_hold(&members);
-        let hold = if held == 0 {
+        let hold = if open {
+            ""
+        } else if held == 0 {
             ""
         } else if held == total {
             ", held"
@@ -85,7 +145,11 @@ impl App {
                     |ui| grip_mark(ui),
                 )
                 .response
-                .on_hover_text("Drag onto a block's profile field to extrude or revolve this loop");
+                .on_hover_text(if open {
+                    "Drag onto a block's curve field to use this open profile"
+                } else {
+                    "Drag onto a block's profile field to extrude or revolve this loop"
+                });
                 // **The real state, and clickable — it used to be hardcoded bright.** The mark said
                 // "variable" about every profile regardless, and offered no way to make one, so an
                 // extruded profile looked declared and could not be taken out of the extrude. That
@@ -131,7 +195,10 @@ impl App {
             })
             .body(|ui| {
                 ui.label(
-                    egui::RichText::new(if flat {
+                    egui::RichText::new(if open {
+                        "Open curves held end to end at every join — extruded with a wall, \
+                         swept, or read by a comb as one. Break a join to take it apart."
+                    } else if flat {
                         "A closed loop on one plane — can be extruded or revolved"
                     } else {
                         "A closed loop, not flat — can be revolved or swept, not extruded"
@@ -153,22 +220,27 @@ impl App {
                     if matches!(self.folded_curve_row(id, nesting), Some(Block::Curve(_))) {
                         continue;
                     }
-                    self.curve_block(ui, id, nesting.readers_of_curve(id));
-                    // A member whose ends sit on nothing while the rest are held — a curve
-                    // pasted back in, most likely — is marked, since dragging it moves it
-                    // alone and takes it out of the loop (§4.4).
-                    let loose = held > 0
-                        && self.doc.curve(id).is_some_and(|c| {
-                            let n = c.control_points().len();
-                            n >= 2 && c.placed_on(0).is_none() && c.placed_on(n - 1).is_none()
-                        });
-                    if loose {
-                        ui.label(
-                            egui::RichText::new("not held — join to hold it")
-                                .small()
-                                .color(ui.visuals().warn_fg_color),
-                        );
-                    }
+                    // Framed as every row is: the curves inside a profile row are Curve rows of
+                    // their own, inside the profile's frame.
+                    self.framed_block(ui, Block::Curve(id), nesting, |app, ui| {
+                        app.curve_block(ui, id, nesting.readers_of_curve(id));
+                        // A member whose ends sit on nothing while the rest are held — a curve
+                        // pasted back in, most likely — is marked, since dragging it moves it
+                        // alone and takes it out of the loop (§4.4).
+                        let loose = held > 0
+                            && !open
+                            && app.doc.curve(id).is_some_and(|c| {
+                                let n = c.control_points().len();
+                                n >= 2 && c.placed_on(0).is_none() && c.placed_on(n - 1).is_none()
+                            });
+                        if loose {
+                            ui.label(
+                                egui::RichText::new("not held — join to hold it")
+                                    .small()
+                                    .color(ui.visuals().warn_fg_color),
+                            );
+                        }
+                    });
                 }
                 // The joints, inside the row rather than in the list: a thirty-curve loop
                 // adds thirty points and zero visible rows (§4.3).
@@ -176,8 +248,11 @@ impl App {
                     ui.separator();
                     ui.label(egui::RichText::new("Joints").weak());
                     for point in joints {
-                        self.node_block(ui, point, &[], nesting.references_of(point), false, nesting, None);
-                        self.joint_controls(ui, point);
+                        // A joint is a point block, so Reference: dashed, inside the profile.
+                        self.framed_block(ui, Block::Node(point), nesting, |app, ui| {
+                            app.node_block(ui, point, &[], nesting.references_of(point), false, nesting, None);
+                            app.joint_controls(ui, point);
+                        });
                     }
                 }
                 // Then the relations naming a member (§3.2), each marked when it was found not
@@ -279,7 +354,8 @@ impl App {
             | Block::Surface(_)
             | Block::Tessellation(_)
             | Block::Export(_)
-            | Block::Image(_) => 0,
+            | Block::Image(_)
+            | Block::Comb(_) => 0,
         };
         let mut out: Vec<Block> = variables.into_iter().map(Block::Parameter).collect();
         // **With the inputs, above the things that read them.** A surface is not built from
@@ -379,11 +455,46 @@ impl App {
     /// `nesting` is the caller's, `Document::nesting_in` of the part on screen, because the rows
     /// are drawn from it too ([`Self::block_row`]): one walk a frame for the lot.
     pub(crate) fn nested_blocks(&self, nesting: &fieldform_scene::Nesting) -> Vec<BlockRow> {
-        nest_rows(
+        let mut rows = nest_rows(
             self.ordered_blocks(nesting),
             nesting,
             &|seed| fieldform_field::loop_from(&self.doc, seed, None).unwrap_or_default(),
-        )
+        );
+        // **A comb directly below what it reads**: below the top-level row its curve is drawn
+        // in -- the curve's own, the profile it is folded into, the import it arrived in or the
+        // block that owns any of those -- as a variable lands above what reads it. Placed after
+        // the nesting rather than before, because a comb is not a reader: it nests in nothing
+        // and moves nothing, and a profile inside an extrude would otherwise leave its comb
+        // above the extrude. One whose curve has no row here goes above the outputs.
+        fn holds(app: &App, row: &BlockRow, curve: CurveId) -> bool {
+            let here = match row.block {
+                Block::Curve(id) => id == curve,
+                Block::Profile(key) => app.profiles.key_of(curve) == Some(key),
+                Block::Import(source) => app.doc.sources.get(&source).is_some_and(|s| s.curves.contains(&curve)),
+                _ => false,
+            };
+            here || row.inside.iter().any(|inner| holds(app, inner, curve))
+        }
+        for comb in self.comb_blocks() {
+            let Some(curve) = self.comb_curve(comb) else { continue };
+            let at = match rows.iter().position(|row| holds(self, row, curve)) {
+                // After its curve's row and any comb already placed under it.
+                Some(row) => {
+                    let mut at = row + 1;
+                    while matches!(rows.get(at).map(|r| r.block), Some(Block::Comb(_))) {
+                        at += 1;
+                    }
+                    at
+                }
+                None => rows
+                    .iter()
+                    .position(|r| matches!(r.block, Block::Tessellation(_) | Block::Export(_) | Block::Image(_)))
+                    .unwrap_or(rows.len()),
+            };
+            let row = BlockRow { block: Block::Comb(comb), inside: Vec::new(), nested: false, readers: 0, references: Vec::new() };
+            rows.insert(at, row);
+        }
+        rows
     }
 
     /// The blocks, in the order they were made, with nothing above what it is made from.
@@ -1096,11 +1207,12 @@ impl App {
         let surface_axis = self.doc.surface_axes.get(&id).copied();
 
         let header = format!("{name}  ·  curve");
-        let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
             ui.ctx(),
             ui.make_persistent_id(("curve", id.raw())),
             false,
         );
+        self.open_for_reveal(&mut state, ui.ctx(), RowKey::Curve(id));
         state
             .show_header(ui, |ui| {
                 // A curve is drawn as reference geometry, so it hides like anything else that
@@ -1849,10 +1961,16 @@ impl App {
             .selected_body
             .map(RowKey::Node)
             .or(self.selected_curve.map(RowKey::Curve));
-        if now != self.followed {
+        // A curve clicked to be edited opens its own row too -- and again when it was already
+        // selected and its row has been closed since, since the click is the same request.
+        let picked = self.curve_picked.take().map(RowKey::Curve).filter(|p| Some(*p) == now);
+        if now != self.followed || picked.is_some() {
             self.followed = now;
             self.reveal = now.map(|target| {
-                let open = self.rows_above(target);
+                let mut open = self.rows_above(target);
+                if picked == Some(target) {
+                    open.insert(target);
+                }
                 let left = REVEAL_SETTLE_FRAMES + REVEAL_FRAMES_PER_ROW * open.len() as u32;
                 Reveal { target, open, left, reached: false }
             });
@@ -1957,37 +2075,135 @@ impl App {
         nesting: &fieldform_scene::Nesting,
         holder: Option<NodeId>,
     ) {
-        // **A box around each block, closed at the bottom.** Expanding one used to leave its
-        // contents running straight into the next row: the collapsing header draws a line down its
-        // left and stops, so where one block ended and the next began was something you worked out
-        // from indentation. Enclosing the whole thing -- header, parameters and contents together
-        // -- means the boundary is drawn rather than inferred, and it grows and shrinks with the
-        // block because the frame wraps the collapsing state rather than sitting beside it.
-        let frame = egui::Frame::new()
-            .stroke(egui::Stroke::new(
-                1.0_f32,
-                ui.visuals().widgets.noninteractive.bg_stroke.color,
-            ))
-            .corner_radius(4.0)
-            .inner_margin(egui::Margin::symmetric(4, 3));
-        frame.show(ui, |ui| {
+        self.framed_block(ui, row.block, nesting, |app, ui| match row.block {
+            Block::Parameter(id) => app.parameter_block(ui, id),
+            Block::Curve(id) => app.curve_block(ui, id, row.readers),
+            Block::Surface(id) => app.surface_block(ui, id),
+            Block::Tessellation(id) => app.tessellation_block(ui, id),
+            Block::Export(id) => app.export_block(ui, id),
+            Block::Image(id) => app.image_block(ui, id),
+            Block::Comb(id) => app.comb_block(ui, id),
+            Block::Node(id) => {
+                app.node_block(ui, id, &row.inside, &row.references, row.nested, nesting, holder)
+            }
+            Block::Import(source) => app.import_block(ui, source, nesting),
+            Block::Profile(key) => app.profile_block(ui, key, nesting),
+        });
+    }
+
+    /// **The frame and the bar every row of the list wears**, in its family's colour (the
+    /// block-family notes, section 4): a 1 pt rounded outline round the header and, when open,
+    /// the body, and a 3 pt bar down its left edge. Every row comes through here — a row of its
+    /// own, a row nested in a block, a profile's curves and joints, an import's solids — so a
+    /// nested row's frame is drawn inside its holder's, concentric, and an expanded tree reads as
+    /// nested coloured frames whose kind shows before their names do.
+    ///
+    /// **A box around each block, closed at the bottom**, as before the colours: the collapsing
+    /// header draws a line down its left and stops, so where one block ended and the next began
+    /// was something worked out from indentation. The frame wraps the collapsing state rather than
+    /// sitting beside it, so it grows and shrinks with the block.
+    ///
+    /// **Nothing else on the row is coloured**: text, chevron, eye, V and fields keep the theme's,
+    /// and so does the background. The frame's stroke gives way to the warning or the error stroke
+    /// where the block has a problem, and the bar keeps the family ([`crate::theme::frame_paint`],
+    /// the rule the graph view's cards draw with too); a hidden body's frame and bar are dimmed with
+    /// it. Selection, hover, collapse, nesting, a rename or a declaration never change either.
+    ///
+    /// Laid out by an `egui::Frame` with no stroke of its own, then painted from the frame's own
+    /// rectangle once its contents are known, so the outline encloses the body egui lays out after
+    /// the header and not the header alone.
+    pub(crate) fn framed_block(
+        &mut self,
+        ui: &mut egui::Ui,
+        block: Block,
+        nesting: &fieldform_scene::Nesting,
+        add: impl FnOnce(&mut Self, &mut egui::Ui),
+    ) {
+        let family = block.family(self.part_graph());
+        let status = self.block_status(block);
+        let mut paint = crate::theme::frame_paint(family, &status, ui.visuals());
+        if self.row_hidden(block, nesting) {
+            paint = paint.dimmed(crate::theme::DIMMED);
+        }
+        let pad = crate::theme::FRAME_PADDING as i8;
+        let frame = egui::Frame::new().inner_margin(egui::Margin {
+            left: (crate::theme::BAR_WIDTH + crate::theme::FRAME_PADDING) as i8,
+            right: pad,
+            top: pad,
+            bottom: pad,
+        });
+        #[cfg(test)]
+        let drawn = {
+            let at = self.drawn_frames.len();
+            let parent = self.open_frames.last().copied();
+            self.drawn_frames.push(DrawnFrame { block, rect: egui::Rect::NOTHING, parent, paint });
+            self.open_frames.push(at);
+            at
+        };
+        let shown = frame.show(ui, |ui| {
             // Full width, so the right-hand edge lines up down the list instead of following
             // whichever label happens to be longest.
             ui.set_width(ui.available_width());
-            match row.block {
-                Block::Parameter(id) => self.parameter_block(ui, id),
-                Block::Curve(id) => self.curve_block(ui, id, row.readers),
-                Block::Surface(id) => self.surface_block(ui, id),
-                Block::Tessellation(id) => self.tessellation_block(ui, id),
-                Block::Export(id) => self.export_block(ui, id),
-                Block::Image(id) => self.image_block(ui, id),
-                Block::Node(id) => {
-                    self.node_block(ui, id, &row.inside, &row.references, row.nested, nesting, holder)
-                }
-                Block::Import(source) => self.import_block(ui, source, nesting),
-                Block::Profile(key) => self.profile_block(ui, key, nesting),
-            }
+            add(self, ui);
         });
+        let rect = shown.response.rect;
+        paint.paint(ui.painter(), rect);
+        // The legend there is: the family and its rule, on the bar.
+        if let Some(family) = family {
+            ui.interact(
+                crate::theme::bar_rect(rect),
+                shown.response.id.with("family bar"),
+                egui::Sense::hover(),
+            )
+            .on_hover_text(family.hover_line());
+        }
+        #[cfg(test)]
+        {
+            self.open_frames.pop();
+            self.drawn_frames[drawn].rect = rect;
+        }
+    }
+
+    /// What the notebook says is wrong with a row's block, by the reading the graph view's cards
+    /// are drawn from: an empty input or an approximate fillet for a block, an expression that does
+    /// not compute for a named number, and nothing for the rest.
+    pub(crate) fn block_status(&self, block: Block) -> crate::graph_view::model::Status {
+        match block {
+            Block::Node(id) => self.block_statuses().node(id),
+            Block::Parameter(id) => crate::graph_view::parameter_status(&self.doc, id),
+            _ => crate::graph_view::model::Status::Ok,
+        }
+    }
+
+    /// The family a reference field's chip is drawn in, or `None` where the field is not a chip:
+    /// it names a block or curve that is not a variable — an owned one, drawn underneath it — or
+    /// a block this build cannot read. A chip takes the family of what the variable holds, so a
+    /// chip to a declared boolean is Combine's and one to a curve is Curve's.
+    pub(crate) fn chip_family(&self, named: Named) -> Option<fieldform_scene::Family> {
+        match named {
+            Named::Node(id) => (self.doc.ownership(BlockKey::Node(id)) == Ownership::Variable)
+                .then(|| self.part_graph().node(id).and_then(Node::family))
+                .flatten(),
+            Named::Curve(id) => (self.doc.ownership(BlockKey::Curve(id)) == Ownership::Variable)
+                .then_some(fieldform_scene::Family::Curve),
+        }
+    }
+
+    /// Whether a row stands for something its eye has hidden: a body or an overlay block turned
+    /// off, a hidden curve, or a profile every curve of which is. An ingredient something consumes
+    /// is not hidden, only not drawn on its own, and keeps its frame at full strength.
+    fn row_hidden(&self, block: Block, nesting: &fieldform_scene::Nesting) -> bool {
+        match block {
+            Block::Node(id) => {
+                (nesting.is_root(id) || self.draws_as_overlay(id)) && !self.is_visible(id)
+            }
+            Block::Curve(id) => self.hidden_curves.contains(&id),
+            Block::Profile(key) => self
+                .profiles
+                .members(key)
+                .is_some_and(|m| !m.is_empty() && m.iter().all(|c| self.hidden_curves.contains(c))),
+            _ => false,
+        }
     }
 
     /// A block let go over the list: `onto` is the row it landed above, or `None` for the end.
@@ -2213,6 +2429,7 @@ impl App {
                 RowKey::Tessellation(_) => fieldform_scene::Tessellation::DEFAULT_NAME.to_string(),
                 RowKey::Export(_) => fieldform_scene::Export::DEFAULT_NAME.to_string(),
                 RowKey::Image(_) => fieldform_scene::SaveImage::DEFAULT_NAME.to_string(),
+                RowKey::Comb(_) => fieldform_scene::CurvatureComb::DEFAULT_NAME.to_string(),
                 RowKey::Import(_) => "Import".to_string(),
                 RowKey::Profile(key) => {
                     format!("Profile {}", self.profiles.number(key).unwrap_or(0))
@@ -2267,6 +2484,7 @@ impl App {
                     RowKey::Image(id) => {
                         self.rename_output(outputs::BlockRef::Image(id), text.trim())
                     }
+                    RowKey::Comb(id) => self.rename_comb(id, text.trim()),
                     RowKey::Import(source) => {
                         self.rename_output(outputs::BlockRef::Import(source), text.trim())
                     }
@@ -2331,6 +2549,7 @@ impl App {
                     .find(|b| b.id == id)
                     .and_then(|b| b.name.clone())
                     .unwrap_or_default(),
+                RowKey::Comb(id) => self.comb_given_name(id),
                 RowKey::Export(id) => self
                     .doc
                     .exports
@@ -2554,7 +2773,7 @@ impl App {
     /// second block at it.
     ///
     /// Returns the reference to switch to, if this frame chose one.
-    pub(crate) fn reference_field<K: Copy + PartialEq>(
+    pub(crate) fn reference_field<K: ChipKey>(
         &mut self,
         ui: &mut egui::Ui,
         salt: impl std::hash::Hash,
@@ -2574,7 +2793,7 @@ impl App {
     /// answers with the reference chosen and never with "clear": where a field can be emptied
     /// there is a control for that beside it, not a convention about an empty box (an empty box
     /// already means *nothing typed yet*, which is why the two cannot share one).
-    pub(crate) fn reference_field_in<K: Copy + PartialEq>(
+    pub(crate) fn reference_field_in<K: ChipKey>(
         &mut self,
         ui: &mut egui::Ui,
         salt: impl std::hash::Hash,
@@ -2591,12 +2810,25 @@ impl App {
             None => settled.clone(),
         };
 
-        let response = ui.add(
-            egui::TextEdit::singleline(&mut text)
-                .id(fid)
-                .desired_width(118.0)
-                .hint_text(kind.hint()),
-        );
+        // **A field holding a variable is a chip in that variable's family** (the block-family
+        // notes, section 4.3): a pill, its stroke the family's and its fill the tint, dashed for
+        // Reference. A field holding an owned block is not one — that block opens underneath it
+        // in its own frame — and nor is an empty field.
+        let chip = current.and_then(|k| self.chip_family(k.names()));
+        let behind = ui.painter().add(egui::Shape::Noop);
+        let mut edit = egui::TextEdit::singleline(&mut text)
+            .id(fid)
+            .desired_width(118.0)
+            .hint_text(kind.hint());
+        if chip.is_some() {
+            // The pill is the field's frame, so the field draws none of its own over the tint.
+            edit = edit.frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(8, 2)));
+        }
+        let response = ui.add(edit);
+        self.last_reference_field = Some(response.clone());
+        if let Some(family) = chip {
+            crate::theme::paint_chip(ui.painter(), behind, response.rect, family, ui.visuals().dark_mode);
+        }
         let mut picked = None;
 
         // **The drop is offered on the field itself.** A `TextEdit` senses the pointer for its own
@@ -2731,12 +2963,27 @@ impl App {
             let near = suggested(choices, &typed, showing);
             if !near.is_empty() {
                 drawn = true;
-                egui::Area::new(area_id)
-                    .order(egui::Order::Foreground)
-                    .fixed_pos(response.rect.left_bottom() + egui::vec2(0.0, 2.0))
+                // How tall the list wants to be: last frame's, or rows times a row until it has one.
+                let row = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
+                let wanted = ui
+                    .ctx()
+                    .memory(|m| m.area_rect(area_id))
+                    .map_or(near.len() as f32 * row + 16.0, |r| r.height());
+                let (above, room) =
+                    reference_list_placement(response.rect, ui.ctx().content_rect(), wanted);
+                let area = egui::Area::new(area_id).order(egui::Order::Foreground);
+                let area = if above {
+                    area.pivot(egui::Align2::LEFT_BOTTOM)
+                        .fixed_pos(response.rect.left_top() - egui::vec2(0.0, 2.0))
+                } else {
+                    area.fixed_pos(response.rect.left_bottom() + egui::vec2(0.0, 2.0))
+                };
+                area.constrain(false)
                     .show(ui.ctx(), |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
                             ui.set_max_width(response.rect.width().max(160.0));
+                            // The frame's own margins come out of the room first.
+                            egui::ScrollArea::vertical().max_height((room - 16.0).max(row)).show(ui, |ui| {
                             for (key, label, refusal) in near {
                                 // What the field already holds, said on the row rather than by
                                 // the row's absence. Still clickable, which costs nothing and is
@@ -2768,6 +3015,7 @@ impl App {
                                     }
                                 }
                             }
+                            });
                         });
                     });
             }
@@ -3029,7 +3277,7 @@ impl App {
         if let Some(id) = self.curve_named(&wanted) {
             named.push(RowCalled::Curve(id));
         }
-        for key in self.profiles.loops.iter().map(|l| l[0]) {
+        for key in self.profiles.keys() {
             match self.doc.profile_names.get(&key) {
                 Some(n) if n.eq_ignore_ascii_case(&wanted) => named.push(RowCalled::Profile(key)),
                 Some(_) => {}

@@ -144,6 +144,7 @@ mod tests {
             number: None,
             status: Default::default(),
             kind: crate::graph_view::model::Kind::Block,
+            family: None,
         };
         vec![mk(1, true, vec![]), mk(2, false, vec![1]), mk(3, false, vec![1]), mk(4, true, vec![]), mk(5, false, vec![4, 1])]
     }

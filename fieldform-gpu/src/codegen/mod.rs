@@ -366,6 +366,7 @@ fn expand_frames(document: &fieldform_scene::Document, graph: &Graph) -> Graph {
             Node::Lattice { frame, .. }
             | Node::Twist { frame, .. }
             | Node::Coil { frame, .. }
+            | Node::Expression { frame, .. }
             | Node::Thread { frame, .. } => !frame.is_default(),
             // Every scale, aimed or not: a uniform one is rewritten into the placement it is,
             // and a non-uniform one about the world's axes is left as it stands below.
@@ -398,6 +399,10 @@ fn expand_frames(document: &fieldform_scene::Document, graph: &Graph) -> Graph {
                 Node::Lattice { cell, map, phase, frame: fieldform_scene::Frame::default() },
             ),
             // A coil and a thread are leaves built about `+Z`, aimed as a lattice is.
+            Some(Node::Expression { text, frame, size, divisor, claim }) => (
+                frame,
+                Node::Expression { text, frame: fieldform_scene::Frame::default(), size, divisor, claim },
+            ),
             Some(Node::Coil { frame, diameter, size, section, hand }) => (
                 frame,
                 Node::Coil { frame: fieldform_scene::Frame::default(), diameter, size, section, hand },
@@ -1334,6 +1339,8 @@ fn generate_inner(
     let mut mask_taken = false;
     // And up to thirty-two operands of its joins: see `OperandMasks`.
     let mut operand_masks = OperandMasks { on: mask_operands, used: 0, of: Vec::new() };
+    let mut run_tables: Vec<(usize, Vec<ParamRef>)> = Vec::new();
+    let run_members = primitive_run_members(graph, &order, run_floor);
     for (index, (parent, node_id, offset)) in plan.contexts.iter().enumerate() {
         let point = PointEmitter {
             document,
@@ -1371,6 +1378,12 @@ fn generate_inner(
 
     for (id, ctx) in &plan.emit {
         let (id, ctx) = (*id, *ctx);
+        // A member of a run of primitives is read by the run's walk from the table and nowhere
+        // else, so it takes no name and no slot: the names and slots of everything else are then
+        // the same however many members the run has. Both passes skip the same nodes.
+        if run_members.contains(&id) {
+            continue;
+        }
         let node = graph.node(id).ok_or(CodegenError::DanglingNode(id))?;
         let n = slot.len();
         let p = format!("p{ctx}");
@@ -1396,6 +1409,7 @@ fn generate_inner(
             scale_slots: &scale_slots,
             pattern_loops: &pattern_loops,
             operand_masks: &mut operand_masks,
+            run_tables: &mut run_tables,
             node,
             id,
             ctx,
@@ -1418,6 +1432,7 @@ fn generate_inner(
             | Node::Coil { .. }
             | Node::Thread { .. }
             | Node::Hole { .. }
+            | Node::Expression { .. }
             | Node::Capsule { .. } => emit.leaf(),
             Node::Lattice { cell, map, phase, frame: _ } => emit.lattice(cell, map, phase)?,
             Node::Extrude { outline, sweep, start, height, sides, draft, corners, rims } => {
@@ -1538,6 +1553,13 @@ fn generate_inner(
     };
     // Reset first, so a critical surface that is itself a blended body is measured at its full
     // radii -- which is how the field compiles it, from its own subtree with no marks.
+    // **The runs' tables, last of all**, after every slot the text names by number. Each header
+    // learns where its table starts here, so a member more or less moves nothing the shader names
+    // -- only the buffer grows. See `primitive_run_members`.
+    for (header, table) in run_tables {
+        params[header] = ParamRef::Literal(params.len() as f64);
+        params.extend(table);
+    }
     let set_gap = if gap_function.is_empty() {
         ""
     } else {
@@ -2068,6 +2090,9 @@ struct NodeEmitter<'a> {
     scale_slots: &'a HashMap<usize, String>,
     pattern_loops: &'a HashMap<usize, PatternLoop>,
     operand_masks: &'a mut OperandMasks,
+    /// Each run of primitives' header slot and its members' numbers, laid at the end of the
+    /// buffer once every other slot is in: see [`primitive_run_members`].
+    run_tables: &'a mut Vec<(usize, Vec<ParamRef>)>,
     /// The node, and the context it is emitted in.
     node: &'a Node,
     id: NodeId,
@@ -2095,6 +2120,28 @@ impl NodeEmitter<'_> {
             Node::Mesh(mesh) => {
                 let i = intern(&mut cages, BakedLeaf::Mesh(*mesh));
                 format!("sample_baked({i}u, {p})")
+            }
+            // The written field: its text lowered as arithmetic over the point, its parameters
+            // slots and its literals compiled in (the text is structure, a literal in it has no
+            // handle to drag), over the divisor's slot, cut to the region's box. See
+            // `written_wgsl` for the arithmetic and `written_cut` in the prelude for the cut.
+            Node::Expression { text, size, divisor, .. } => {
+                let Some(expression) = text.expression() else {
+                    // Refused by the field's compile before any shader is generated; here it
+                    // can only be a text nothing has parsed, which draws nothing rather than
+                    // something that looks right.
+                    return "1e30".to_string();
+                };
+                let s = push_point(&mut params, size);
+                let k = params.len();
+                params.push(divisor.clone());
+                let mut slots = std::collections::HashMap::new();
+                for id in expression.references() {
+                    slots.insert(id, params.len());
+                    params.push(ParamRef::Named(id));
+                }
+                let value = written_wgsl(expression.tree(), &slots, &p);
+                format!("written_cut(({value}) / params[{k}], cuboid_distance({p}, vec3<f32>(0.0), {s}))")
             }
             Node::Sphere { centre, radius } => {
                 let c = place_slots(&mut params, graph, document, id, centre);
@@ -2626,6 +2673,7 @@ impl NodeEmitter<'_> {
             mut subtrees,
             mut blocks_before,
             operand_masks,
+            run_tables,
             id,
             n,
             p,
@@ -2688,6 +2736,16 @@ impl NodeEmitter<'_> {
                             }
                         }
                     }
+                    // The header's first slot, where the table will start: filled in once every
+                    // other slot is in, which is what keeps the table from moving anything.
+                    RunKind::Primitives(shape, members) => {
+                        let mut table = Vec::new();
+                        for member in members {
+                            shape.push(&mut table, document, graph, *member);
+                        }
+                        params.push(ParamRef::Literal(0.0));
+                        run_tables.push((base, table));
+                    }
                 }
                 let count = params.len();
                 params.push(ParamRef::Literal(run.len() as f64));
@@ -2708,8 +2766,9 @@ impl NodeEmitter<'_> {
                 // body; named, there is one. The normal pass has always done this, as
                 // `pr{n}`, and the value pass was the half that had not.
                 let (walk, _) = run.kind.walkers();
+                let table = run_table_start(&run.kind, base);
                 blocks_before.push(format!(
-                    "    let r{n} = {walk}({first}u, {base}u, u32(params[{count}]), {p});\n"
+                    "    let r{n} = {walk}({first}u, {table}, u32(params[{count}]), {p});\n"
                 ));
                 named.push((format!("r{n}"), None));
                 for input in inputs.iter().skip(run.at + run.len()) {
@@ -3780,6 +3839,7 @@ fn normal_function(
     // keeps their parameter counting in step. See `looped_run`.
     run_floor: usize,
 ) -> Result<String, CodegenError> {
+    let run_members = primitive_run_members(graph, order, run_floor);
     let mut slot: HashMap<(NodeId, usize), usize> = HashMap::new();
     let mut params = 0usize;
 
@@ -4071,6 +4131,12 @@ fn normal_function(
 
     for (id, ctx) in &plan.emit {
         let (id, ctx) = (*id, *ctx);
+        // A member of a run of primitives is read by the run's walk from the table and nowhere
+        // else, so it takes no name and no slot: the names and slots of everything else are then
+        // the same however many members the run has. Both passes skip the same nodes.
+        if run_members.contains(&id) {
+            continue;
+        }
         let node = graph.node(id).ok_or(CodegenError::DanglingNode(id))?;
         let n = slot.len();
         let p = format!("p{ctx}");
@@ -4103,6 +4169,47 @@ fn normal_function(
                 (
                     format!("sphere_distance({p}, {c}, params[{r}])"),
                     format!("sphere_normal({p}, {c})"),
+                )
+            }
+            // The same slots the value pass pushed, and a central difference of the same
+            // written value for the normal: an expression has no analytic gradient to emit
+            // short of differentiating the tree, and six readings of a short text are cheap.
+            Node::Expression { text, size, .. } => {
+                let s = point_slots(&mut params, size);
+                let k = params;
+                params += 1;
+                let mut slots = std::collections::HashMap::new();
+                if let Some(expression) = text.expression() {
+                    for id in expression.references() {
+                        slots.insert(id, params);
+                        params += 1;
+                    }
+                }
+                let value_at = |at: &str| -> String {
+                    match text.expression() {
+                        Some(expression) => {
+                            let v = written_wgsl(expression.tree(), &slots, at);
+                            format!("written_cut(({v}) / params[{k}], cuboid_distance({at}, vec3<f32>(0.0), {s}))")
+                        }
+                        None => "1e30".to_string(),
+                    }
+                };
+                let h = "0.002";
+                let along = |dx: &str, dy: &str, dz: &str| -> String {
+                    format!(
+                        "({} - {})",
+                        value_at(&format!("({p} + vec3<f32>({dx}, {dy}, {dz}))")),
+                        value_at(&format!("({p} - vec3<f32>({dx}, {dy}, {dz}))"))
+                    )
+                };
+                (
+                    value_at(&p),
+                    format!(
+                        "normalize(vec3<f32>({}, {}, {}))",
+                        along(h, "0.0", "0.0"),
+                        along("0.0", h, "0.0"),
+                        along("0.0", "0.0", h)
+                    ),
                 )
             }
             Node::Cuboid { size, edge, .. } => {
@@ -4534,10 +4641,12 @@ fn normal_function(
                         // count's own slot. Counted rather than resolved — nothing here reads a
                         // number, which is why the two passes cannot disagree about a value.
                         params += run.slots();
-                        let count = base + run.len() * run.kind.slots_each();
+                        // The count is the run's last slot in place, whichever kind.
+                        let count = base + run.slots() - 1;
                         let (_, walk) = run.kind.walkers();
+                        let table = run_table_start(&run.kind, base);
                         blocks_before.push(format!(
-                            "    let pr{n} = {walk}({first}u, {base}u, \
+                            "    let pr{n} = {walk}({first}u, {table}, \
                              u32(params[{count}]), {p});\n"
                         ));
                         values.push(format!("pr{n}.w"));
@@ -6605,6 +6714,7 @@ fn pattern_prune_floor(
             | Node::Cylinder { .. }
             | Node::Cone { .. }
             | Node::Capsule { .. }
+            | Node::Expression { .. }
             | Node::Torus { .. } => Ok(()),
             Node::Pipe { .. } => {
                 *divisor = divisor.max(fieldform_field::driven_pipe_divisor(document, graph, id));
@@ -7722,7 +7832,10 @@ const WALL_RUN_FLOOR: usize = 2;
 /// then is contiguous in the final list the normal pass asks about.
 fn run_first_curve(curves: &[CurveUse], run: Option<&OperandRun>) -> Option<usize> {
     let run = run?;
-    let first = curves.iter().position(|x| *x == run.curves[0])?;
+    // A run of primitives reads no binding, so there is no stretch to check and nothing to start
+    // it at; the walks take a `first` only so every run is called alike.
+    let Some(head) = run.curves.first() else { return Some(0) };
+    let first = curves.iter().position(|x| x == head)?;
     for (k, want) in run.curves.iter().enumerate().skip(1) {
         if curves.get(first + k) != Some(want) {
             return None;
@@ -7759,6 +7872,105 @@ enum RunKind {
     /// make every thick extrude in a run carry four slots and a branch it never takes, and
     /// would change the text generated for a document with no wall in it.
     Walls(Vec<NodeId>),
+    /// Plain primitives of one shape: no binding, and the slots their single arm pushes.
+    ///
+    /// The nodes rather than the numbers, as for extrudes: a centre or an end may be a place
+    /// taken from another block, which `place_slots` and `push_ends` resolve at emission.
+    Primitives(Primitive, Vec<NodeId>),
+}
+
+/// A block that is nothing but numbers, and so can be walked by a loop over its slots.
+///
+/// **A hard edge only.** A cut or rounded edge compiles to the `_edge_` call with its shape's
+/// exponent a literal in the text, so two edged members could differ in code, not data. A turned
+/// cuboid or torus never reaches a boolean as itself: `with_turns_expanded_using` wraps it in a
+/// placement, which is not a primitive, so a member here is always sampled at the boolean's point.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Primitive {
+    Cylinder,
+    Cone,
+    Capsule,
+    Sphere,
+    Cuboid,
+    Torus,
+}
+
+impl Primitive {
+    fn of(node: &Node) -> Option<Primitive> {
+        match node {
+            Node::Cylinder { edge, .. } if edge.is_plainly_hard() => Some(Primitive::Cylinder),
+            Node::Cone { edge, .. } if edge.is_plainly_hard() => Some(Primitive::Cone),
+            Node::Capsule { .. } => Some(Primitive::Capsule),
+            Node::Sphere { .. } => Some(Primitive::Sphere),
+            Node::Cuboid { edge, .. } if edge.is_plainly_hard() => Some(Primitive::Cuboid),
+            Node::Torus { .. } => Some(Primitive::Torus),
+            _ => None,
+        }
+    }
+
+    /// The slots one member takes, in the order its single arm in `leaf` pushes them: the same
+    /// numbers the `7u`, `8u`, `4u`, `6u` and `5u` in the prelude's walks step by.
+    fn slots(self) -> usize {
+        match self {
+            Primitive::Cylinder => 7,
+            Primitive::Cone | Primitive::Capsule => 8,
+            Primitive::Sphere => 4,
+            Primitive::Cuboid => 6,
+            Primitive::Torus => 5,
+        }
+    }
+
+    fn walkers(self) -> (&'static str, &'static str) {
+        match self {
+            Primitive::Cylinder => ("cylinder_run_distance", "cylinder_run_nearest"),
+            Primitive::Cone => ("cone_run_distance", "cone_run_nearest"),
+            Primitive::Capsule => ("capsule_run_distance", "capsule_run_nearest"),
+            Primitive::Sphere => ("sphere_run_distance", "sphere_run_nearest"),
+            Primitive::Cuboid => ("cuboid_run_distance", "cuboid_run_nearest"),
+            Primitive::Torus => ("torus_run_distance", "torus_run_nearest"),
+        }
+    }
+
+    /// Pushes one member's slots through the very helpers its single arm uses, so the run and
+    /// the call cannot disagree about where a number is.
+    fn push(
+        self,
+        params: &mut Vec<ParamRef>,
+        document: &fieldform_scene::Document,
+        graph: &Graph,
+        member: NodeId,
+    ) {
+        match graph.node(member) {
+            Some(Node::Cylinder { ends, radius, .. }) => {
+                push_ends(params, document, graph, member, ends);
+                params.push(*radius);
+            }
+            Some(Node::Cone { ends, base_radius, top_radius, .. }) => {
+                push_ends(params, document, graph, member, ends);
+                params.push(*base_radius);
+                params.push(*top_radius);
+            }
+            Some(Node::Capsule { ends, start_radius, end_radius }) => {
+                push_ends(params, document, graph, member, ends);
+                params.push(*start_radius);
+                params.push(*end_radius);
+            }
+            Some(Node::Sphere { centre, radius }) => {
+                place_slots(params, graph, document, member, centre);
+                params.push(*radius);
+            }
+            Some(Node::Cuboid { centre, size, .. }) => {
+                place_slots(params, graph, document, member, centre);
+                push_point(params, size);
+            }
+            Some(Node::Torus { centre, major_radius, minor_radius, .. }) => {
+                place_slots(params, graph, document, member, centre);
+                params.push(*major_radius);
+                params.push(*minor_radius);
+            }
+            _ => unreachable!("`looped_run` admits only {self:?}s here"),
+        }
+    }
 }
 
 impl RunKind {
@@ -7774,6 +7986,7 @@ impl RunKind {
             RunKind::Pipes(_) => 1,
             RunKind::Extrudes(_) => 9 + DEPTH_SLOTS,
             RunKind::Walls(_) => 9 + DEPTH_SLOTS + 4,
+            RunKind::Primitives(shape, _) => shape.slots(),
         }
     }
 
@@ -7783,6 +7996,7 @@ impl RunKind {
         match self {
             RunKind::Pipes(_) | RunKind::Extrudes(_) => 1,
             RunKind::Walls(_) => WALL_PARTS.len(),
+            RunKind::Primitives(..) => 0,
         }
     }
 
@@ -7792,6 +8006,7 @@ impl RunKind {
             RunKind::Pipes(_) => ("pipe_run_distance", "pipe_run_nearest"),
             RunKind::Extrudes(_) => ("extrude_run_distance", "extrude_run_nearest"),
             RunKind::Walls(_) => ("wall_extrude_run_distance", "wall_extrude_run_nearest"),
+            RunKind::Primitives(shape, _) => shape.walkers(),
         }
     }
 
@@ -7831,13 +8046,58 @@ struct OperandRun {
 impl OperandRun {
     /// How many members, which is not how many bindings: a wall is read from three.
     fn len(&self) -> usize {
-        self.curves.len() / self.kind.bindings_each()
+        match &self.kind {
+            RunKind::Primitives(_, members) => members.len(),
+            kind => self.curves.len() / kind.bindings_each(),
+        }
     }
 
     /// Every slot the run pushes, the count's own included — what the normal pass advances by.
+    ///
+    /// **Two for primitives, whatever their number**: where the table starts and how long it
+    /// is. The table itself goes at the end of the buffer (`primitive_run_members` says why), so
+    /// in place a run of primitives is the same two slots at four members or forty.
     fn slots(&self) -> usize {
-        self.len() * self.kind.slots_each() + 1
+        match self.kind {
+            RunKind::Primitives(..) => 2,
+            _ => self.len() * self.kind.slots_each() + 1,
+        }
     }
+}
+
+/// Where a run's walk finds its members' slots, as the walk's second argument: a literal index
+/// for the runs whose members are written in place, and the header's own slot for primitives,
+/// whose table is laid at the end of the buffer and could not be named by a literal without the
+/// text changing with every member before it.
+fn run_table_start(kind: &RunKind, header: usize) -> String {
+    match kind {
+        RunKind::Primitives(..) => format!("u32(params[{header}])"),
+        _ => format!("{header}u"),
+    }
+}
+
+/// Every node read only by a run of primitives, which both passes skip.
+///
+/// **What makes a hole added to a drilled plate cost no compile.** A pipe's or an extrude's run
+/// still emits each member on its own -- its line goes unreferenced and is dropped, its slots
+/// stay -- so the names and slot indices after it move with the member count, and the text
+/// changes. A primitive reads nothing but numbers, so its members need not be emitted at all:
+/// skipped here they take no name, and their numbers go into a table laid after every other slot,
+/// which the run finds through a header in place. Then the only thing a new member changes is the
+/// buffer, and the shader the app is drawing with is the shader it would compile.
+///
+/// One function for both passes, over the same order, so they skip the same nodes.
+fn primitive_run_members(graph: &Graph, order: &[NodeId], floor: usize) -> HashSet<NodeId> {
+    let mut members = HashSet::new();
+    for id in order {
+        let Some(Node::Boolean { op, inputs }) = graph.node(*id) else { continue };
+        if let Some(OperandRun { kind: RunKind::Primitives(_, ids), .. }) =
+            looped_run(*op, graph, inputs, floor)
+        {
+            members.extend(ids);
+        }
+    }
+    members
 }
 
 /// The longest run of a union's operands that may be walked rather than written out, or `None`.
@@ -7853,9 +8113,13 @@ impl OperandRun {
 /// - **A filled slot.** A hole is not a pipe and not an extrude, so it ends a run where it stands
 ///   -- and it is read here rather than refused, because this walks the whole graph before
 ///   `generate` has refused anything, a floating holed block included.
-/// - **A union.** `min` is commutative and associative, so a run may be folded in any order and
-///   in place. A difference and an intersection are neither indifferent to order nor uniform in
-///   sign across the list, and the measured shape is a union.
+/// - **A union, or a difference's tools.** `min` is commutative and associative, so a run may be
+///   folded in any order and in place. A difference's tools are a `min` too, negated once by the
+///   fold, so a run may stand anywhere after the operand cut from. An intersection is a `max`
+///   throughout and is not walked.
+/// - **Or a plain primitive**: a hard-edged cylinder, cone or box, a capsule, a sphere or a torus,
+///   which reads nothing but its own slots. Its members are skipped by both passes and read from a
+///   table at the end of the buffer (`primitive_run_members`), so a member more changes no text.
 /// - **A pipe whose radius is a plain number.** A driven radius compiles to the offset expression
 ///   instead — a different body, with a divisor of its own — so it cannot share a loop body. An
 ///   extrude needs no condition of this sort: every number on it is already a parameter slot, and
@@ -7885,9 +8149,16 @@ fn looped_run(
     inputs: &[Operand],
     floor: usize,
 ) -> Option<OperandRun> {
-    if !matches!(op, BooleanOp::Union) {
-        return None;
-    }
+    // **A difference's tools as well as a union's operands.** Cutting `b1`, `b2`, ... from `a` is
+    // `max(a, -b1, -b2, ...)`, which is `max(a, -min(b1, b2, ...))`: the tools fold as a union
+    // and the fold negates the result as it negates any tool. So a run may stand anywhere after
+    // the first operand, which is the one thing cut from and never a tool. An intersection is a
+    // `max` all through and is not walked: a run's walk is a minimum.
+    let start = match op {
+        BooleanOp::Union => 0,
+        BooleanOp::Difference => 1,
+        BooleanOp::Intersection => return None,
+    };
     // Every consumer of every node, and every use of a curve as a spine, counted once for the
     // whole graph rather than per candidate.
     let mut consumers: HashMap<NodeId, usize> = HashMap::new();
@@ -7936,8 +8207,19 @@ fn looped_run(
         }
         Some(id)
     };
+    // A primitive this boolean alone consumes, and its shape. A second consumer is refused for
+    // the reason an extrude's is: its own line would still be read, and the run would be a second
+    // copy of it rather than a replacement.
+    // And not a critical surface, whose own value the gap function reads by name -- a member has
+    // no name, being read only from the table.
+    let primitive_of = |slot: &Operand| -> Option<(Primitive, NodeId)> {
+        let id = slot.source()?;
+        let shape = Primitive::of(graph.node(id)?)?;
+        let critical = graph.critical().iter().any(|mark| mark.node == id);
+        (consumers.get(&id).copied().unwrap_or(0) == 1 && !critical).then_some((shape, id))
+    };
     let mut best: Option<OperandRun> = None;
-    let mut at = 0usize;
+    let mut at = start;
     while at < inputs.len() {
         // Every stretch from here, of which at most one can be non-empty — a node is a pipe, a
         // thick extrude or a thin one and never two of them — so whichever starts at `at` is
@@ -7974,6 +8256,17 @@ fn looped_run(
                     .collect(),
                 RunKind::Walls(walls),
             ))
+        } else if let Some((shape, _)) = inputs.get(at).and_then(|s| primitive_of(s)) {
+            // A stretch of one shape: a cylinder beside a cone ends both, as a pipe beside an
+            // extrude does, since a loop has one body.
+            let mut members = Vec::new();
+            while let Some((next, id)) = inputs.get(at + members.len()).and_then(|s| primitive_of(s)) {
+                if next != shape {
+                    break;
+                }
+                members.push(id);
+            }
+            Some((Vec::new(), RunKind::Primitives(shape, members)))
         } else {
             None
         };
@@ -8074,3 +8367,66 @@ mod rims_tests;
 /// an open-section sweep. Shaped as a thin extrude's program is, and held to the same things.
 #[cfg(test)]
 mod thin_revolve_and_sweep_tests;
+
+/// A written field's tree as WGSL over the point `p`, with every parameter it reads at the slot
+/// `slots` gives it and every literal compiled in. The one transcription the shader gets;
+/// `fieldform_scene::Expression::evaluate_at` is the CPU's, and `gpu_matches_cpu`'s written
+/// scenes hold the two together, function by function.
+///
+/// Where the two languages differ, the shader is bent to the CPU: `pow` of a negative base is
+/// `pow_signed`, `round` is half away from nought, trigonometry is in degrees and `mod` is the
+/// floored remainder -- each a helper in the prelude named for what it matches.
+pub(crate) fn written_wgsl(
+    expr: &fieldform_scene::Expr,
+    slots: &std::collections::HashMap<fieldform_scene::ParamId, usize>,
+    p: &str,
+) -> String {
+    use fieldform_scene::{BinOp, Expr, Function};
+    match expr {
+        Expr::Number(v) => {
+            // A literal that reads back as a float: `2.0`, `1e-5`, never `2`.
+            let text = format!("{v:?}");
+            if text.contains(['.', 'e', 'E', 'n', 'i']) { text } else { format!("{text}.0") }
+        }
+        Expr::Param(id) => format!("params[{}]", slots.get(id).copied().unwrap_or(0)),
+        Expr::Coord(axis) => format!("{p}.{}", axis.letter()),
+        Expr::Neg(x) => format!("(-({}))", written_wgsl(x, slots, p)),
+        Expr::Binary(op, l, r) => {
+            let (a, b) = (written_wgsl(l, slots, p), written_wgsl(r, slots, p));
+            match op {
+                BinOp::Add => format!("({a} + {b})"),
+                BinOp::Sub => format!("({a} - {b})"),
+                BinOp::Mul => format!("({a} * {b})"),
+                BinOp::Div => format!("({a} / {b})"),
+                BinOp::Pow => format!("pow_signed({a}, {b})"),
+            }
+        }
+        Expr::Call(function, args) => {
+            let a: Vec<String> = args.iter().map(|x| written_wgsl(x, slots, p)).collect();
+            match function {
+                Function::Abs => format!("abs({})", a[0]),
+                Function::Min | Function::Max => {
+                    let word = if *function == Function::Min { "min" } else { "max" };
+                    let mut out = a.last().cloned().unwrap_or_default();
+                    for x in a.iter().rev().skip(1) {
+                        out = format!("{word}({x}, {out})");
+                    }
+                    out
+                }
+                Function::Sqrt => format!("sqrt({})", a[0]),
+                Function::Floor => format!("floor({})", a[0]),
+                Function::Ceil => format!("ceil({})", a[0]),
+                Function::Round => format!("round_away({})", a[0]),
+                Function::Sin => format!("sin(radians({}))", a[0]),
+                Function::Cos => format!("cos(radians({}))", a[0]),
+                Function::Tan => format!("tan(radians({}))", a[0]),
+                Function::Atan2 => format!("degrees(atan2({}, {}))", a[0], a[1]),
+                Function::Exp => format!("exp({})", a[0]),
+                Function::Log => format!("log({})", a[0]),
+                Function::Sign => format!("sign({})", a[0]),
+                Function::Clamp => format!("clamp({}, {}, {})", a[0], a[1], a[2]),
+                Function::Mod => format!("mod_floored({}, {})", a[0], a[1]),
+            }
+        }
+    }
+}

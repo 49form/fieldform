@@ -190,6 +190,18 @@ fn every_kind_with_every_edge() -> Vec<Case> {
         },
         vec![d, w, o],
     );
+    let (s, k, o) = (n(), n(), n());
+    case(
+        "a written field with a driven size and divisor, aimed at a block",
+        Node::Expression {
+            text: fieldform_scene::Written::unparsed("x"),
+            frame: Frame::From { node: o },
+            size: [driven(s), lit(20.0), lit(20.0)],
+            divisor: driven(k),
+            claim: fieldform_scene::WrittenClaim::LowerBound,
+        },
+        vec![s, k, o],
+    );
     let (l, c, o) = (n(), n(), n());
     case(
         "a thread of a driven length and clearance, aimed at a block",
@@ -607,6 +619,7 @@ fn kind(node: &Node) -> &'static str {
         Node::Torus { .. } => "torus",
         Node::Capsule { .. } => "capsule",
         Node::Coil { .. } => "coil",
+        Node::Expression { .. } => "expression",
         Node::Thread { .. } => "thread",
         Node::Hole { .. } => "hole",
         Node::Pipe { .. } => "pipe",
@@ -634,7 +647,7 @@ fn kind(node: &Node) -> &'static str {
 fn the_sample_holds_every_kind() {
     let held: std::collections::BTreeSet<&str> =
         every_kind_with_every_edge().iter().map(|case| kind(&case.node)).collect();
-    assert_eq!(held.len(), 34, "a kind of node has no case: {held:?}");
+    assert_eq!(held.len(), 35, "a kind of node has no case: {held:?}");
 }
 
 /// **A node's inputs are its operands, then what drives its parameters, then what it is pointed

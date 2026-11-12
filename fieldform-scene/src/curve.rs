@@ -665,33 +665,152 @@ impl Curve {
         lo - 1
     }
 
-    /// The `degree + 1` non-zero B-spline basis functions at `t`, by Cox-de Boor.
+    /// The `degree + 1` non-zero B-spline basis functions at `t`, by Cox-de Boor: the first row
+    /// of [`Self::basis_derivatives`], so there is one triangle and not two.
     fn basis(&self, span: usize, t: f64) -> Vec<f64> {
+        self.basis_derivatives(span, t, 0).swap_remove(0)
+    }
+
+    /// The non-zero basis functions in `span` at `t` and their derivatives to order `order`:
+    /// row `k` is the `k`-th derivative. The NURBS Book's A2.3, which builds the same triangle
+    /// Cox-de Boor does and reads the derivatives off it.
+    ///
+    /// Row 0 is the same arithmetic in the same order as the plain recurrence, so `evaluate` is
+    /// unchanged to the bit by sharing it. Rows past the degree are zero, as a polynomial's are.
+    fn basis_derivatives(&self, span: usize, t: f64, order: usize) -> Vec<Vec<f64>> {
         let p = self.degree;
-        let mut n = vec![0.0; p + 1];
+        let u = &self.knots;
+        // `ndu[j][r]` with `r < j` holds knot differences (the lower triangle), `r >= j` the
+        // basis functions of degree `j` (the upper).
+        let mut ndu = vec![vec![0.0; p + 1]; p + 1];
         let mut left = vec![0.0; p + 1];
         let mut right = vec![0.0; p + 1];
-        n[0] = 1.0;
-
+        ndu[0][0] = 1.0;
         for j in 1..=p {
-            left[j] = t - self.knots[span + 1 - j];
-            right[j] = self.knots[span + j] - t;
+            left[j] = t - u[span + 1 - j];
+            right[j] = u[span + j] - t;
             let mut saved = 0.0;
             for r in 0..j {
-                let denom = right[r + 1] + left[j - r];
+                ndu[j][r] = right[r + 1] + left[j - r];
                 // A zero denominator means a repeated knot makes this basis function vanish;
                 // the standard algorithm's convention is that the term contributes nothing.
-                let temp = if denom.abs() < f64::EPSILON {
-                    0.0
-                } else {
-                    n[r] / denom
-                };
-                n[r] = saved + right[r + 1] * temp;
+                let temp = if ndu[j][r].abs() < f64::EPSILON { 0.0 } else { ndu[r][j - 1] / ndu[j][r] };
+                ndu[r][j] = saved + right[r + 1] * temp;
                 saved = left[j - r] * temp;
             }
-            n[j] = saved;
+            ndu[j][j] = saved;
         }
-        n
+        let mut ders = vec![vec![0.0; p + 1]; order + 1];
+        for (j, d) in ders[0].iter_mut().enumerate() {
+            *d = ndu[j][p];
+        }
+        let divide = |a: f64, b: f64| if b.abs() < f64::EPSILON { 0.0 } else { a / b };
+        let top = order.min(p);
+        let mut a = [vec![0.0; p + 1], vec![0.0; p + 1]];
+        for r in 0..=p {
+            let (mut s1, mut s2) = (0, 1);
+            a[0][0] = 1.0;
+            for k in 1..=top {
+                let mut d = 0.0;
+                let rk = r as isize - k as isize;
+                let pk = p - k;
+                if rk >= 0 {
+                    a[s2][0] = divide(a[s1][0], ndu[pk + 1][rk as usize]);
+                    d = a[s2][0] * ndu[rk as usize][pk];
+                }
+                let j1 = if rk >= -1 { 1 } else { (-rk) as usize };
+                let j2 = if r <= pk + 1 { k - 1 } else { p - r };
+                for j in j1..=j2 {
+                    let at = (rk + j as isize) as usize;
+                    a[s2][j] = divide(a[s1][j] - a[s1][j - 1], ndu[pk + 1][at]);
+                    d += a[s2][j] * ndu[at][pk];
+                }
+                if r <= pk {
+                    a[s2][k] = divide(-a[s1][k - 1], ndu[pk + 1][r]);
+                    d += a[s2][k] * ndu[r][pk];
+                }
+                ders[k][r] = d;
+                std::mem::swap(&mut s1, &mut s2);
+            }
+        }
+        let mut factor = p as f64;
+        for (k, row) in ders.iter_mut().enumerate().skip(1).take(top) {
+            for d in row.iter_mut() {
+                *d *= factor;
+            }
+            factor *= (p - k) as f64;
+        }
+        ders
+    }
+
+    /// The point on the curve at `t` and its first two derivatives, clamped to the domain,
+    /// weights included.
+    ///
+    /// **The rational curve's derivatives anywhere**, as [`Self::start_derivatives`] has them at
+    /// the start: the homogeneous sums projected with `R' = (A' - w'R)/w` and
+    /// `R'' = (A'' - 2w'R' - w''R)/w`. A curvature read from the control polygon is wrong on every
+    /// weighted arc, and one read from a tessellation moves with the tessellation.
+    pub fn derivatives(&self, t: f64) -> (Point3<f64>, nalgebra::Vector3<f64>, nalgebra::Vector3<f64>) {
+        let (lo, hi) = self.domain();
+        let t = t.clamp(lo, hi);
+        self.derivatives_in_span(self.span(t), t)
+    }
+
+    /// [`Self::derivatives`] with the span given rather than found, so a caller at an interior
+    /// knot can ask for the derivatives from either side of it ([`Self::breaks`]). A span past
+    /// the curve's is clamped to the last one that is.
+    pub fn derivatives_in_span(
+        &self,
+        span: usize,
+        t: f64,
+    ) -> (Point3<f64>, nalgebra::Vector3<f64>, nalgebra::Vector3<f64>) {
+        let p = self.degree;
+        let span = span.clamp(p, self.control_points.len() - 1);
+        let ders = self.basis_derivatives(span, t, 2);
+        let zero = nalgebra::Vector3::zeros();
+        let (mut a, mut a1, mut a2) = (zero, zero, zero);
+        let (mut w, mut w1, mut w2) = (0.0, 0.0, 0.0);
+        for i in 0..=p {
+            let index = span - p + i;
+            let weight = self.weights[index];
+            let h = self.control_points[index].coords * weight;
+            a += h * ders[0][i];
+            a1 += h * ders[1][i];
+            a2 += h * ders[2][i];
+            w += weight * ders[0][i];
+            w1 += weight * ders[1][i];
+            w2 += weight * ders[2][i];
+        }
+        if w.abs() < f64::EPSILON {
+            // As `evaluate`: only every contributing weight underflowing reaches here.
+            return (self.control_points[span - p], zero, zero);
+        }
+        let r = a / w;
+        let r1 = (a1 - r * w1) / w;
+        let r2 = (a2 - r1 * (2.0 * w1) - r * w2) / w;
+        (Point3::from(r), r1, r2)
+    }
+
+    /// The interior knots where the curve may not be twice differentiable -- multiplicity at
+    /// least `degree - 1`, so curvature can step there -- each as the span to its left, the span
+    /// to its right and the knot. A single-span curve has none.
+    pub fn breaks(&self) -> Vec<(usize, usize, f64)> {
+        let (lo, hi) = self.domain();
+        let n = self.control_points.len();
+        let mut out = Vec::new();
+        let mut i = self.degree + 1;
+        while i < n {
+            let value = self.knots[i];
+            let mut m = 1;
+            while i + m < n && self.knots[i + m] == value {
+                m += 1;
+            }
+            if value > lo && value < hi && m + 1 >= self.degree {
+                out.push((i - 1, i + m - 1, value));
+            }
+            i += m;
+        }
+        out
     }
 
     /// The point on the curve at parameter `t`, clamped to the domain.
@@ -1129,6 +1248,103 @@ mod tests {
             Err(CurveError::EmptyDomain)
         );
     }
+
+    /// A clamped curve of `degree` through a fixed wander of points, weighted or not.
+    fn wander(degree: usize, weighted: bool) -> Curve {
+        let points: Vec<Point3<f64>> = (0..=degree)
+            .map(|i| {
+                let x = i as f64;
+                Point3::new(10.0 * x, 7.0 * (x * 1.3).sin(), 3.0 * (x * 0.7).cos())
+            })
+            .collect();
+        let weights = (0..=degree).map(|i| if weighted { 0.6 + 0.35 * i as f64 % 1.1 } else { 1.0 }).collect();
+        let mut knots = vec![0.0; degree + 1];
+        knots.extend(vec![1.0; degree + 1]);
+        Curve::new(CurveId::new(), "wander", degree, points, weights, knots, false).unwrap()
+    }
+
+    fn close(a: nalgebra::Vector3<f64>, b: nalgebra::Vector3<f64>) -> bool {
+        (a - b).norm() <= 1e-12 * (1.0 + a.norm().max(b.norm()))
+    }
+
+    /// The general derivative and the closed-form start agree at both ends, at every degree the
+    /// tools offer, plain and weighted -- the end through `reversed()`, whose start it is. The
+    /// joint relations read the start form, a comb reads this one, and a G2 joint must read as
+    /// one to both.
+    #[test]
+    fn derivatives_at_the_domain_ends_agree_with_start_derivatives() {
+        for degree in 1..=9 {
+            for weighted in [false, true] {
+                let c = wander(degree, weighted);
+                let (lo, hi) = c.domain();
+                let (p, d1, d2) = c.derivatives(lo);
+                let (s1, s2) = c.start_derivatives();
+                assert!((p - c.control_points()[0]).norm() < 1e-12);
+                // A weighted line's second derivative is not nothing -- the weights reparametrise
+                // it -- but it lies along the tangent, so it bends nothing; the start form
+                // answers zero for it, and only the tangent is compared there.
+                let line = degree == 1;
+                assert!(close(d1, s1) && (line || close(d2, s2)), "degree {degree} weighted {weighted}: {d1} {d2} vs {s1} {s2}");
+                assert!(!line || d1.cross(&d2).norm() < 1e-9 * d1.norm().powi(2), "a line's bends nothing");
+                // At the end, the reversed curve's start runs the other way: the first
+                // derivative changes sign and the second does not.
+                let (_, e1, e2) = c.derivatives(hi);
+                let (r1, r2) = c.reversed().start_derivatives();
+                assert!(close(e1, -r1) && (line || close(e2, r2)), "degree {degree} weighted {weighted} at the end");
+            }
+        }
+    }
+
+    /// Against fourth-order central differences of `evaluate` on a weighted degree-7 curve with
+    /// two interior knots: a check of the A2.3 triangle and the rational projection against
+    /// arithmetic that shares neither.
+    #[test]
+    fn derivatives_match_finite_differences_on_a_degree_7_curve() {
+        let degree = 7;
+        let points: Vec<Point3<f64>> = (0..10)
+            .map(|i| {
+                let x = i as f64;
+                Point3::new(4.0 * x, 5.0 * (x * 0.9).sin(), 2.0 * (x * 0.4).cos())
+            })
+            .collect();
+        let weights = vec![1.0, 0.8, 1.3, 0.7, 1.1, 0.9, 1.4, 0.6, 1.0, 1.2];
+        let mut knots = vec![0.0; degree + 1];
+        knots.extend([0.4, 0.7]);
+        knots.extend(vec![1.0; degree + 1]);
+        let c = Curve::new(CurveId::new(), "seven", degree, points, weights, knots, false).unwrap();
+        let h = 1e-3;
+        for i in 1..=30 {
+            let t = 0.02 + 0.96 * i as f64 / 31.0;
+            let f = |dt: f64| c.evaluate(t + dt).coords;
+            let fd1 = (-f(2.0 * h) + f(h) * 8.0 - f(-h) * 8.0 + f(-2.0 * h)) / (12.0 * h);
+            let fd2 = (-f(2.0 * h) + f(h) * 16.0 - f(0.0) * 30.0 + f(-h) * 16.0 - f(-2.0 * h)) / (12.0 * h * h);
+            let (p, d1, d2) = c.derivatives(t);
+            assert!((p.coords - f(0.0)).norm() < 1e-12, "the point is evaluate's at t={t}");
+            assert!((d1 - fd1).norm() <= 1e-7 * d1.norm().max(1.0), "first at t={t}: {d1} vs {fd1}");
+            assert!((d2 - fd2).norm() <= 1e-6 * d2.norm().max(1.0), "second at t={t}: {d2} vs {fd2}");
+        }
+    }
+
+    /// A polyline's corners are where it breaks, and the derivatives either side are the two
+    /// segments' directions -- read from the spans either side, not averaged across the corner.
+    #[test]
+    fn a_polyline_breaks_at_its_corners_and_each_side_has_its_own_tangent() {
+        let c = Curve::polyline(
+            CurveId::new(),
+            "corner",
+            vec![Point3::new(0.0, 0.0, 0.0), Point3::new(10.0, 0.0, 0.0), Point3::new(10.0, 10.0, 0.0)],
+            false,
+        )
+        .unwrap();
+        let breaks = c.breaks();
+        assert_eq!(breaks.len(), 1, "one corner");
+        let (left, right, at) = breaks[0];
+        let (p, d_in, _) = c.derivatives_in_span(left, at);
+        let (q, d_out, _) = c.derivatives_in_span(right, at);
+        assert!((p - Point3::new(10.0, 0.0, 0.0)).norm() < 1e-12 && (q - p).norm() < 1e-12);
+        assert!(d_in.normalize().x > 0.999 && d_out.normalize().y > 0.999, "{d_in} then {d_out}");
+        assert!(test_curve().breaks().is_empty(), "a single span has none");
+    }
 }
 
 
@@ -1305,4 +1521,5 @@ mod placed_control_points {
         let read = Curve::try_from(stale).expect("still a good curve");
         assert_eq!(read.sits_on().count(), 0);
     }
+
 }

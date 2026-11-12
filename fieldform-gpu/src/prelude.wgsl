@@ -5733,6 +5733,168 @@ fn pipe_run_nearest(first: u32, radius_slot: u32, count: u32, p: vec3<f32>) -> v
     return best;
 }
 
+// **A run of plain primitives, walked rather than written out** -- the pipe run's fix for the
+// blocks that are only numbers: cylinders, cones, capsules, spheres, boxes and tori.
+//
+// Each one is a short call, so it is not the call that costs: it is the driver inlining every
+// operand into each of the places `march` reads the field, and the operand masks and fold lines
+// written around each. A part with thirty drilled holes is thirty of those. A primitive reads
+// nothing but its own slots, in the order its single arm pushes them, so a run of one kind
+// differs only in what is in the buffer and the list collapses to one walk: `slot + SLOTS * k`.
+// The slot count is written here and in `Primitive::slots`, the same number by agreement, which
+// `a_looped_run_pushes_the_same_slots_in_both_passes` holds.
+//
+// **The count is a `params` read**, as the pipe run's is: no driver may unroll it, and a cylinder
+// added to a run of them changes the buffer and not one byte of the shader, so it is drawn
+// without a compile.
+//
+// `first` is the curve binding the other runs read and these do not; it is taken so every run
+// is called the same way. **The value is the minimum in both uses**: a union folds it as it is,
+// and a difference's tools fold it negated, since cutting each tool in turn is cutting their
+// union.
+fn slot_vec3(s: u32) -> vec3<f32> {
+    return vec3<f32>(params[s], params[s + 1u], params[s + 2u]);
+}
+
+fn cylinder_run_distance(first: u32, slot: u32, count: u32, p: vec3<f32>) -> f32 {
+    var best = 1e30;
+    for (var k = 0u; k < count; k = k + 1u) {
+        let s = slot + k * 7u;
+        best = min(best, cylinder_distance(p, slot_vec3(s), slot_vec3(s + 3u), params[s + 6u]));
+    }
+    return best;
+}
+
+// The same run with the normal of whichever member defined the value, `xyz` the normal and `w`
+// the value. **Strictly less, so a tie goes to the earlier member**, the rule
+// `GraphField::normal_at` folds by.
+fn cylinder_run_nearest(first: u32, slot: u32, count: u32, p: vec3<f32>) -> vec4<f32> {
+    var best = vec4<f32>(0.0, 0.0, 1.0, 1e30);
+    for (var k = 0u; k < count; k = k + 1u) {
+        let s = slot + k * 7u;
+        let a = slot_vec3(s);
+        let b = slot_vec3(s + 3u);
+        let v = cylinder_distance(p, a, b, params[s + 6u]);
+        if (v < best.w) {
+            best = vec4<f32>(cylinder_normal(p, a, b, params[s + 6u]), v);
+        }
+    }
+    return best;
+}
+
+fn cone_run_distance(first: u32, slot: u32, count: u32, p: vec3<f32>) -> f32 {
+    var best = 1e30;
+    for (var k = 0u; k < count; k = k + 1u) {
+        let s = slot + k * 8u;
+        best = min(best, cone_distance(p, slot_vec3(s), slot_vec3(s + 3u), params[s + 6u], params[s + 7u]));
+    }
+    return best;
+}
+
+fn cone_run_nearest(first: u32, slot: u32, count: u32, p: vec3<f32>) -> vec4<f32> {
+    var best = vec4<f32>(0.0, 0.0, 1.0, 1e30);
+    for (var k = 0u; k < count; k = k + 1u) {
+        let s = slot + k * 8u;
+        let a = slot_vec3(s);
+        let b = slot_vec3(s + 3u);
+        let v = cone_distance(p, a, b, params[s + 6u], params[s + 7u]);
+        if (v < best.w) {
+            best = vec4<f32>(cone_normal(p, a, b, params[s + 6u], params[s + 7u]), v);
+        }
+    }
+    return best;
+}
+
+fn capsule_run_distance(first: u32, slot: u32, count: u32, p: vec3<f32>) -> f32 {
+    var best = 1e30;
+    for (var k = 0u; k < count; k = k + 1u) {
+        let s = slot + k * 8u;
+        best = min(best, capsule_distance(p, slot_vec3(s), slot_vec3(s + 3u), params[s + 6u], params[s + 7u]));
+    }
+    return best;
+}
+
+fn capsule_run_nearest(first: u32, slot: u32, count: u32, p: vec3<f32>) -> vec4<f32> {
+    var best = vec4<f32>(0.0, 0.0, 1.0, 1e30);
+    for (var k = 0u; k < count; k = k + 1u) {
+        let s = slot + k * 8u;
+        let a = slot_vec3(s);
+        let b = slot_vec3(s + 3u);
+        let v = capsule_distance(p, a, b, params[s + 6u], params[s + 7u]);
+        if (v < best.w) {
+            best = vec4<f32>(capsule_normal(p, a, b, params[s + 6u], params[s + 7u]), v);
+        }
+    }
+    return best;
+}
+
+fn sphere_run_distance(first: u32, slot: u32, count: u32, p: vec3<f32>) -> f32 {
+    var best = 1e30;
+    for (var k = 0u; k < count; k = k + 1u) {
+        let s = slot + k * 4u;
+        best = min(best, sphere_distance(p, slot_vec3(s), params[s + 3u]));
+    }
+    return best;
+}
+
+fn sphere_run_nearest(first: u32, slot: u32, count: u32, p: vec3<f32>) -> vec4<f32> {
+    var best = vec4<f32>(0.0, 0.0, 1.0, 1e30);
+    for (var k = 0u; k < count; k = k + 1u) {
+        let s = slot + k * 4u;
+        let c = slot_vec3(s);
+        let v = sphere_distance(p, c, params[s + 3u]);
+        if (v < best.w) {
+            best = vec4<f32>(sphere_normal(p, c), v);
+        }
+    }
+    return best;
+}
+
+fn cuboid_run_distance(first: u32, slot: u32, count: u32, p: vec3<f32>) -> f32 {
+    var best = 1e30;
+    for (var k = 0u; k < count; k = k + 1u) {
+        let s = slot + k * 6u;
+        best = min(best, cuboid_distance(p, slot_vec3(s), slot_vec3(s + 3u)));
+    }
+    return best;
+}
+
+fn cuboid_run_nearest(first: u32, slot: u32, count: u32, p: vec3<f32>) -> vec4<f32> {
+    var best = vec4<f32>(0.0, 0.0, 1.0, 1e30);
+    for (var k = 0u; k < count; k = k + 1u) {
+        let s = slot + k * 6u;
+        let c = slot_vec3(s);
+        let size = slot_vec3(s + 3u);
+        let v = cuboid_distance(p, c, size);
+        if (v < best.w) {
+            best = vec4<f32>(cuboid_normal(p, c, size), v);
+        }
+    }
+    return best;
+}
+
+fn torus_run_distance(first: u32, slot: u32, count: u32, p: vec3<f32>) -> f32 {
+    var best = 1e30;
+    for (var k = 0u; k < count; k = k + 1u) {
+        let s = slot + k * 5u;
+        best = min(best, torus_distance(p, slot_vec3(s), params[s + 3u], params[s + 4u]));
+    }
+    return best;
+}
+
+fn torus_run_nearest(first: u32, slot: u32, count: u32, p: vec3<f32>) -> vec4<f32> {
+    var best = vec4<f32>(0.0, 0.0, 1.0, 1e30);
+    for (var k = 0u; k < count; k = k + 1u) {
+        let s = slot + k * 5u;
+        let c = slot_vec3(s);
+        let v = torus_distance(p, c, params[s + 3u], params[s + 4u]);
+        if (v < best.w) {
+            best = vec4<f32>(torus_normal(p, c, params[s + 3u], params[s + 4u]), v);
+        }
+    }
+    return best;
+}
+
 // **A run of extrudes one union takes, walked rather than written out** -- the pipe run's
 // counterpart on the one block that is not a curve walk.
 //
@@ -6469,4 +6631,41 @@ fn pattern_normal_radial(
     let inner = n * m;
     let spun = vec3<f32>(inner.x * c - inner.y * sn, inner.x * sn + inner.y * c, inner.z);
     return m * spun;
+}
+
+// --- The written field's arithmetic, bent to the CPU's (`written_wgsl` in codegen) ---------
+
+// `pow` as the CPU's `powf` reads it: a negative base with a whole exponent keeps its sign by
+// the exponent's parity, and with any other exponent has no value, which WGSL's own `pow` of a
+// negative never says the same way twice.
+fn pow_signed(a: f32, b: f32) -> f32 {
+    if a >= 0.0 {
+        return pow(a, b);
+    }
+    if b == floor(b) {
+        let magnitude = pow(-a, b);
+        return select(magnitude, -magnitude, mod_floored(b, 2.0) == 1.0);
+    }
+    // Not a number, built from its bits: the constant form `0.0 / 0.0` is refused at compile.
+    return bitcast<f32>(0x7fc00000u);
+}
+
+// Half away from nought, as the CPU rounds; WGSL's `round` is half to even.
+fn round_away(a: f32) -> f32 {
+    return sign(a) * floor(abs(a) + 0.5);
+}
+
+// The floored remainder, keeping the divisor's sign: `a - b * floor(a / b)` on both sides.
+fn mod_floored(a: f32, b: f32) -> f32 {
+    return a - b * floor(a / b);
+}
+
+// The written value cut to its region. A step with no value -- the root of a negative, the log
+// of one -- is no surface here, as the CPU reads it: far, so a ray steps past, rather than a NaN
+// the march cannot step by and that `max` would not know what to do with.
+fn written_cut(v: f32, region: f32) -> f32 {
+    if v != v || abs(v) > 1e30 {
+        return 1e30;
+    }
+    return max(v, region);
 }

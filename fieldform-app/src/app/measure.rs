@@ -256,9 +256,34 @@ impl App {
         ))
     }
 
-    /// The sections that are on, in the order made.
-    pub(crate) fn sections_on(&self) -> impl Iterator<Item = usize> + '_ {
-        self.sections.iter().enumerate().filter(|(_, s)| s.on).map(|(i, _)| i)
+    /// The active part's section cuts, each read to where its plane is now, in the order made.
+    ///
+    /// Indices below are into this list. A section on another part waits in the document for that
+    /// part to be shown, and is neither listed nor cut with meanwhile.
+    pub(crate) fn sections(&self) -> Vec<Section> {
+        self.doc
+            .sections
+            .iter()
+            .filter(|c| c.part == self.active_part)
+            .map(|c| self.resolve_section(c))
+            .collect()
+    }
+
+    /// Where a cut's plane is: its place and its turn read as a plane block's are -- the same two
+    /// functions, through its part's graph -- so a cut can sit on a point or face the way a plane
+    /// faces, and follows when that moves.
+    pub(crate) fn resolve_section(&self, cut: &fieldform_scene::SectionCut) -> Section {
+        let graph = self.doc.parts.get(&cut.part).map(|p| &p.graph).unwrap_or_else(|| self.part_graph());
+        let numbers = |r: &ParamRef| Some(self.resolve(*r));
+        let origin = fieldform_field::resolve_place(&self.doc, graph, &cut.origin, &numbers)
+            .unwrap_or_else(|_| Point3::origin());
+        let rotation = fieldform_field::turn_rotation(&self.doc, graph, &cut.turn, &numbers);
+        Section { id: cut.id, number: cut.number, on: cut.on, origin, rotation, flipped: cut.flipped }
+    }
+
+    /// The indices of the sections that are on, in the order made.
+    pub(crate) fn sections_on(&self) -> Vec<usize> {
+        self.sections().iter().enumerate().filter(|(_, s)| s.on).map(|(i, _)| i).collect()
     }
 
     /// The planes the shader cuts with: one per section that is on, none when none is. What is
@@ -271,21 +296,81 @@ impl App {
     /// and `set_section_on` refuses the one past it by name rather than cutting with a plane the
     /// shader never sees.
     pub(crate) fn section_half_spaces(&self) -> Vec<(Vector3<f64>, f64)> {
-        self.sections_on().filter_map(|i| self.sections[i].half_space()).collect()
+        self.sections().iter().filter_map(Section::half_space).collect()
     }
 
     /// The section whose handles are showing: selected *and* on. A selected section that is off
     /// has nothing drawn to move, so it offers nothing — which is what keeps the manipulator off
     /// a plane that is not there.
     pub(crate) fn selected_section(&self) -> Option<Section> {
-        self.section_selected.and_then(|i| self.sections.get(i)).filter(|s| s.on).copied()
+        let id = self.section_selected?;
+        self.sections().into_iter().find(|s| s.id == id && s.on)
     }
 
     /// The section a command with no row of its own acts on: the selected one, else the last made.
     fn current_section(&self) -> Option<usize> {
+        let sections = self.sections();
         self.section_selected
-            .filter(|&i| i < self.sections.len())
-            .or_else(|| self.sections.len().checked_sub(1))
+            .and_then(|id| sections.iter().position(|s| s.id == id))
+            .or_else(|| sections.len().checked_sub(1))
+    }
+
+    /// The record of the active part's section at `index`.
+    fn section_record(&self, index: usize) -> Option<fieldform_scene::SectionCut> {
+        let id = self.sections().get(index)?.id;
+        self.doc.sections.iter().find(|c| c.id == id).copied()
+    }
+
+    /// Sets every section cut at once, undoably: one entry per edit, or one per gesture on the
+    /// same section within the window, which is what lets typing a number into its rows land on
+    /// the stack once. The arrangement `set_images` keeps for the Save Image blocks.
+    pub(crate) fn set_sections(
+        &mut self,
+        sections: Vec<fieldform_scene::SectionCut>,
+        gesture: Option<fieldform_scene::SectionCutId>,
+    ) {
+        let now = self.doc.sections.clone();
+        if now == sections {
+            return;
+        }
+        let continues = gesture.is_some()
+            && self.stack.peek_undo() == Some("sections.set")
+            && self
+                .section_gesture
+                .as_ref()
+                .is_some_and(|(s, at, _)| Some(*s) == gesture && at.elapsed() < GESTURE_WINDOW);
+        let before = match (&self.section_gesture, continues) {
+            (Some((_, _, before)), true) => before.clone(),
+            _ => now,
+        };
+        self.section_gesture = gesture.map(|s| (s, std::time::Instant::now(), before.clone()));
+        self.gesture = None;
+        let cmd: Box<dyn fieldform_ops::Command> = Box::new(fieldform_ops::SetSections::new(before, sections));
+        let done = if continues {
+            self.stack.replace_top(&mut self.doc, cmd)
+        } else {
+            self.stack.execute(&mut self.doc, cmd)
+        };
+        match done {
+            Ok(()) => self.mark_changed(),
+            Err(e) => self.warn(e.to_string()),
+        }
+        self.traced.invalidate(traced::Quality::Final);
+    }
+
+    /// One section changed by `edit`, as one undoable step (or part of a gesture's).
+    fn edit_section(
+        &mut self,
+        index: usize,
+        gesture: bool,
+        edit: impl FnOnce(&mut fieldform_scene::SectionCut),
+    ) {
+        let Some(record) = self.section_record(index) else { return };
+        let mut changed = record;
+        edit(&mut changed);
+        let sections =
+            self.doc.sections.iter().map(|c| if c.id == record.id { changed } else { *c }).collect();
+        self.set_sections(sections, gesture.then_some(record.id));
     }
 
     /// Where a new section goes: the middle of **the selected body** if there is one, and of the
@@ -308,23 +393,89 @@ impl App {
 
     /// Makes another section where the selection is, switches it on beside the others, and aims
     /// the manipulator at it. `view.section_new`; and what `view.section` does when there is none
-    /// yet, so the first X does what it always did.
-    pub(crate) fn add_section(&mut self) {
-        self.sections_made += 1;
-        let mut section = Section { number: self.sections_made, ..Section::default() };
-        if let Some(origin) = self.section_origin() {
-            section.origin = origin;
+    /// yet, so the first X does what it always did. One undo step, which takes it away again.
+    ///
+    /// `origin`, `turn` and `flip` are the console's: where it passes through, which way it faces
+    /// and which half it keeps, as a plane block takes them.
+    pub(crate) fn add_section_with(
+        &mut self,
+        origin: Option<Point3<f64>>,
+        turn: Option<[f64; 3]>,
+        flipped: bool,
+    ) {
+        let number = self.doc.sections.iter().map(|c| c.number).max().unwrap_or(0) + 1;
+        let at = origin.or_else(|| self.section_origin()).unwrap_or_else(Point3::origin);
+        let mut cut = fieldform_scene::SectionCut {
+            id: fieldform_scene::SectionCutId::new(),
+            number,
+            part: self.active_part,
+            on: true,
+            origin: fieldform_scene::Place::At([
+                ParamRef::Literal(at.x),
+                ParamRef::Literal(at.y),
+                ParamRef::Literal(at.z),
+            ]),
+            turn: match turn {
+                Some([x, y, z]) => fieldform_scene::Turn::By([ParamRef::Literal(x), ParamRef::Literal(y), ParamRef::Literal(z)]),
+                None => fieldform_scene::Turn::default(),
+            },
+            flipped,
+        };
+        // Made off when the view is cutting with as many as it can, and said so: the row is made,
+        // which is what was asked for, and the refusal reads against it.
+        let full = self.sections_on().len() >= fieldform_gpu::MAX_SECTIONS;
+        if full {
+            cut.on = false;
         }
-        self.sections.push(section);
-        let index = self.sections.len() - 1;
+        let mut sections = self.doc.sections.clone();
+        sections.push(cut);
+        self.section_gesture = None;
+        self.set_sections(sections, None);
         // Selected, because making it is the act of reaching for it — the same reason creating a
-        // body selects it. Selected even when the switch is refused, so the row it made is the
-        // row that is highlighted and the refusal reads against it.
-        let on = self.set_section_on(index, true);
-        self.claim_section(index);
-        if on {
-            self.say(format!("Section {} on — drag the handles to move the cut", self.sections_made));
+        // body selects it.
+        self.claim_section_id(cut.id);
+        if full {
+            self.warn(format!(
+                "Section {number} made off: {} sections are on already, which is as many as the \
+                 view cuts with — switch one off first",
+                fieldform_gpu::MAX_SECTIONS
+            ));
+        } else {
+            self.say(format!("Section {number} on — drag the handles to move the cut, or open its row to type where"));
         }
+    }
+
+    /// `view.section_new` with nothing said: where the selection is, facing up.
+    pub(crate) fn add_section(&mut self) {
+        self.add_section_with(None, None, false);
+    }
+
+    /// `addsection origin=x,y,z turn=a,b,c flip=true`: a section from the console, with every
+    /// number its row takes (`console_keys::VERBS`). A place or a facing taken from another block
+    /// has no console spelling, as for every block (the recorded gap there).
+    pub(crate) fn section_new_command(&mut self, args: &Args) {
+        let triple = |key: &str| -> Result<Option<[f64; 3]>, String> {
+            let Some(v) = args.get(key) else { return Ok(None) };
+            let parts: Vec<f64> = v
+                .text()
+                .split(',')
+                .map(|p| p.trim().parse::<f64>())
+                .collect::<Result<_, _>>()
+                .map_err(|_| format!("`{key}=` wants three numbers, such as `{key}=0,0,10`"))?;
+            match parts.as_slice() {
+                [x, y, z] => Ok(Some([*x, *y, *z])),
+                _ => Err(format!("`{key}=` wants three numbers, such as `{key}=0,0,10`")),
+            }
+        };
+        let (origin, turn) = match (triple("origin"), triple("turn")) {
+            (Ok(o), Ok(t)) => (o, t),
+            (Err(why), _) | (_, Err(why)) => {
+                self.warn(why);
+                return;
+            }
+        };
+        let flipped = crate::console_keys::flag(args, "flip");
+        self.add_section_with(origin.map(|[x, y, z]| Point3::new(x, y, z)), turn, flipped);
     }
 
     /// Switches one section on or off, and says whether it did.
@@ -333,8 +484,8 @@ impl App {
     /// up to the shader's array. The one past that is refused by name rather than switched on and
     /// not cut with, which would be a row saying "on" about a plane nothing reads.
     pub(crate) fn set_section_on(&mut self, index: usize, on: bool) -> bool {
-        let Some(section) = self.sections.get(index).copied() else { return false };
-        if on && !section.on && self.sections_on().count() >= fieldform_gpu::MAX_SECTIONS {
+        let Some(section) = self.sections().get(index).copied() else { return false };
+        if on && !section.on && self.sections_on().len() >= fieldform_gpu::MAX_SECTIONS {
             self.warn(format!(
                 "{} sections are on already, which is as many as the view cuts with — switch one \
                  off first",
@@ -342,14 +493,19 @@ impl App {
             ));
             return false;
         }
-        self.sections[index].on = on;
-        self.traced.invalidate(traced::Quality::Final);
+        self.edit_section(index, false, |c| c.on = on);
         true
     }
 
     /// The claim on the manipulator, with nothing else left selected to compete for it.
     fn claim_section(&mut self, index: usize) {
-        self.section_selected = Some(index);
+        if let Some(id) = self.sections().get(index).map(|s| s.id) {
+            self.claim_section_id(id);
+        }
+    }
+
+    fn claim_section_id(&mut self, id: fieldform_scene::SectionCutId) {
+        self.section_selected = Some(id);
         self.selected_body = None;
         self.selected_curve = None;
         self.selected_block = None;
@@ -369,34 +525,25 @@ impl App {
             self.add_section();
             return;
         };
-        let on = !self.sections[index].on;
+        let Some(section) = self.sections().get(index).copied() else { return };
+        let on = !section.on;
         if !self.set_section_on(index, on) {
             return;
         }
-        let number = self.sections[index].number;
         if on {
             self.claim_section(index);
-            self.say(format!("Section {number} on — drag the handles to move the cut"));
+            self.say(format!("Section {} on — drag the handles to move the cut", section.number));
         } else {
-            self.say(format!("Section {number} off"));
+            self.say(format!("Section {} off", section.number));
         }
     }
 
-    /// `view.section_flip`: the selected section faces the other way if it is on, else the last
-    /// one that is. The command refuses when none is on (`section_on`), so the guard here is only
-    /// against a row's button racing it.
-    pub(crate) fn flip_section(&mut self) {
-        let selected = self.section_selected.filter(|&i| self.sections.get(i).is_some_and(|s| s.on));
-        let Some(index) = selected.or_else(|| self.sections_on().last()) else { return };
-        self.flip_section_at(index);
-    }
-
-    /// A row's Flip: *its* section, whichever is selected.
-    fn flip_section_at(&mut self, index: usize) {
-        let Some(section) = self.sections.get_mut(index) else { return };
-        section.flipped = !section.flipped;
-        let number = section.number;
-        self.traced.invalidate(traced::Quality::Final);
+    /// A row's Flip: *its* section, whichever is selected. The only way to flip one since the
+    /// menu's Flip section went (the owner, 2026-11-08): the row says which section it is, where a
+    /// menu entry had to guess.
+    pub(crate) fn flip_section_at(&mut self, index: usize) {
+        let Some(number) = self.sections().get(index).map(|s| s.number) else { return };
+        self.edit_section(index, false, |c| c.flipped = !c.flipped);
         self.say(format!("Section {number} flipped"));
     }
 
@@ -408,61 +555,55 @@ impl App {
     /// or a face picked since, and moves nothing, for the reason `section_origin` gives against
     /// re-centring. The other sections are left as they are.
     pub(crate) fn select_section(&mut self, index: usize) {
-        if index >= self.sections.len() {
-            return;
-        }
-        if !self.sections[index].on && self.set_section_on(index, true) {
-            self.say(format!("Section {} on", self.sections[index].number));
+        let Some(section) = self.sections().get(index).copied() else { return };
+        if !section.on && self.set_section_on(index, true) {
+            self.say(format!("Section {} on", section.number));
         }
         self.claim_section(index);
     }
 
-    /// Takes a section out of the list: the row's menu, or Delete with the row selected. Nothing
-    /// to undo: it was never in the document, and the others keep their numbers, so the rows that
-    /// remain read as they did.
+    /// Takes a section out of the list: the row's menu, or Delete with the row selected. One undo
+    /// step, which puts it back; the others keep their numbers, so the rows that remain read as
+    /// they did.
     pub(crate) fn remove_section(&mut self, index: usize) {
-        if index >= self.sections.len() {
-            return;
+        let Some(record) = self.section_record(index) else { return };
+        let sections = self.doc.sections.iter().filter(|c| c.id != record.id).copied().collect();
+        self.section_gesture = None;
+        self.set_sections(sections, None);
+        if self.section_selected == Some(record.id) {
+            self.section_selected = None;
         }
-        let removed = self.sections.remove(index);
-        self.section_selected = match self.section_selected {
-            Some(i) if i == index => None,
-            Some(i) if i > index => Some(i - 1),
-            other => other,
-        };
-        if removed.on {
-            self.traced.invalidate(traced::Quality::Final);
-        }
-        self.say(format!("Section {} removed", removed.number));
+        self.say(format!("Section {} removed — undo puts it back", record.number));
     }
 
     /// The sections' rows in the block list, one each and none until one is made.
     ///
-    /// Framed like a block's row and drawn after them, because the list is where the owner looks
-    /// for everything the part is seen through — but with no grip, no eye and no V, and a number
-    /// for a name, since a section is not in the document and none of those would mean anything
-    /// (see [`Section`]). A row's switch and Flip act on *its* section directly rather than
-    /// through `view.section`, which acts on the current one: with several rows the two are not
-    /// the same section, and a switch that switched some other row would be the bug the rows exist
-    /// to make impossible. Removing one is in the row's menu and on the Delete key, not a button on
-    /// the row (the owner, 2026-10-24: a ✕ in the notebook "is not good"). The row is highlighted
-    /// exactly when the handles are its.
+    /// Framed like a block's row and drawn after them. A row's switch and Flip act on *its*
+    /// section directly rather than through `view.section`, which acts on the current one: with
+    /// several rows the two are not the same section, and a switch that switched some other row
+    /// would be the bug the rows exist to make impossible. Removing one is in the row's menu and on
+    /// the Delete key, not a button on the row (the owner, 2026-10-24: a ✕ in the notebook "is not
+    /// good"). The row is highlighted exactly when the handles are its.
+    ///
+    /// **And it opens, like a block** (the owner, 2026-11-07: "you should be able to expand the
+    /// block and input its orientation, same machinery as the plane block"): inside are the plane
+    /// block's own rows -- where it passes through, which way it faces, and its normal -- drawn
+    /// by the same two functions, so a section can sit on a point or face the way a plane faces.
     pub(crate) fn section_rows(&mut self, ui: &mut egui::Ui) {
-        let mut index = 0;
-        while index < self.sections.len() {
-            let count = self.sections.len();
-            self.section_row(ui, index);
-            // A row that removed itself shifts the ones below it; they are drawn next frame
-            // rather than under the wrong index now.
-            if self.sections.len() < count {
+        let count = self.sections().len();
+        for index in 0..count {
+            // A row that removed itself shortens the list; the rest are drawn next frame rather
+            // than under the wrong index now.
+            if self.sections().len() != count {
                 break;
             }
-            index += 1;
+            self.section_row(ui, index);
         }
     }
 
     fn section_row(&mut self, ui: &mut egui::Ui, index: usize) {
-        let Some(section) = self.sections.get(index).copied() else { return };
+        let Some(section) = self.sections().get(index).copied() else { return };
+        let Some(record) = self.section_record(index) else { return };
         let frame = egui::Frame::new()
             .stroke(egui::Stroke::new(
                 1.0_f32,
@@ -472,83 +613,118 @@ impl App {
             .inner_margin(egui::Margin::symmetric(4, 3));
         frame.show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.push_id(("section_row", section.number), |ui| {
-                ui.horizontal(|ui| {
-                    let mut on = section.on;
-                    if ui
-                        .checkbox(&mut on, "")
-                        .on_hover_text(
-                            "Cuts away everything past this plane so you can see inside. Changes \
-                             the view only — the part is not modified, and it stays on while you \
-                             work. With several on, what is past any of them is cut away.",
-                        )
-                        .changed()
-                        && self.set_section_on(index, on)
-                        && on
-                    {
-                        self.claim_section(index);
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.push_id(("section_row", section.id.raw()), |ui| {
+                let state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    ui.make_persistent_id(("section", section.id.raw())),
+                    false,
+                );
+                state
+                    .show_header(ui, |ui| {
+                        let mut on = section.on;
                         if ui
-                            .add_enabled(section.on, egui::Button::new("Flip").small())
-                            .on_hover_text("Keeps the other half")
-                            .clicked()
+                            .checkbox(&mut on, "")
+                            .on_hover_text(
+                                "Cuts away everything past this plane so you can see inside. \
+                                 Changes the view only — the part is not modified — and is saved \
+                                 with the document. With several on, what is past any of them is \
+                                 cut away.",
+                            )
+                            .changed()
+                            && self.set_section_on(index, on)
+                            && on
                         {
-                            self.flip_section_at(index);
-                        }
-                        // The rest of the row is the row: drawn as `list_row` draws a block's, so
-                        // the highlight reads the same down the list.
-                        let header = format!(
-                            "Section {}  \u{00b7}  view, {}",
-                            section.number,
-                            if section.on { "on" } else { "off" }
-                        );
-                        let selected = section.on && self.section_selected == Some(index);
-                        let (rect, row) = ui.allocate_exact_size(
-                            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
-                            egui::Sense::click(),
-                        );
-                        if ui.is_rect_visible(rect) {
-                            let visuals = ui.style().interact_selectable(&row, selected);
-                            ui.painter().rect(
-                                rect,
-                                visuals.corner_radius,
-                                visuals.weak_bg_fill,
-                                egui::Stroke::NONE,
-                                egui::StrokeKind::Inside,
-                            );
-                            ui.painter().with_clip_rect(rect).text(
-                                rect.left_center() + egui::vec2(6.0, 0.0),
-                                egui::Align2::LEFT_CENTER,
-                                header,
-                                egui::TextStyle::Button.resolve(ui.style()),
-                                visuals.text_color(),
-                            );
-                        }
-                        // Right-clicking selects first, as a block's row does, so Delete on the
-                        // key and Delete in the menu agree about which section goes.
-                        if row.secondary_clicked() {
                             self.claim_section(index);
                         }
-                        row.context_menu(|ui| {
-                            if ui.button("Delete\tDel").clicked() {
-                                self.remove_section(index);
-                                ui.close();
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .add_enabled(section.on, egui::Button::new("Flip").small())
+                                .on_hover_text("Keeps the other half")
+                                .clicked()
+                            {
+                                self.flip_section_at(index);
+                            }
+                            // The rest of the row is the row: drawn as `list_row` draws a block's,
+                            // so the highlight reads the same down the list.
+                            let header = format!(
+                                "Section {}  \u{00b7}  view, {}",
+                                section.number,
+                                if section.on { "on" } else { "off" }
+                            );
+                            let selected = section.on && self.section_selected == Some(section.id);
+                            let (rect, row) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                                egui::Sense::click(),
+                            );
+                            if ui.is_rect_visible(rect) {
+                                let visuals = ui.style().interact_selectable(&row, selected);
+                                ui.painter().rect(
+                                    rect,
+                                    visuals.corner_radius,
+                                    visuals.weak_bg_fill,
+                                    egui::Stroke::NONE,
+                                    egui::StrokeKind::Inside,
+                                );
+                                ui.painter().with_clip_rect(rect).text(
+                                    rect.left_center() + egui::vec2(6.0, 0.0),
+                                    egui::Align2::LEFT_CENTER,
+                                    header,
+                                    egui::TextStyle::Button.resolve(ui.style()),
+                                    visuals.text_color(),
+                                );
+                            }
+                            // Right-clicking selects first, as a block's row does, so Delete on
+                            // the key and Delete in the menu agree about which section goes.
+                            if row.secondary_clicked() {
+                                self.claim_section(index);
+                            }
+                            row.context_menu(|ui| {
+                                if ui.button("Delete\tDel").clicked() {
+                                    self.remove_section(index);
+                                    ui.close();
+                                }
+                            });
+                            if row
+                                .on_hover_text(if section.on {
+                                    "Click to take the handles back to this section"
+                                } else {
+                                    "Click to switch this section on"
+                                })
+                                .clicked()
+                            {
+                                self.select_section(index);
                             }
                         });
-                        if row
-                            .on_hover_text(if section.on {
-                                "Click to take the handles back to this section"
-                            } else {
-                                "Click to switch this section on"
-                            })
-                            .clicked()
-                        {
-                            self.select_section(index);
-                        }
-                    });
-                });
+                    })
+                    .body(|ui| self.section_body(ui, index, record, section));
             });
         });
+    }
+
+    /// Inside a section's row: the plane block's rows, for the plane the section cuts at.
+    fn section_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        index: usize,
+        record: fieldform_scene::SectionCut,
+        section: Section,
+    ) {
+        // The rows take the block they are drawn for, to keep it out of its own lists. A section
+        // is not a block of the graph, so it is named by an id the graph does not hold: nothing is
+        // left out, and none of the planes and points offered can read the section back.
+        let stand_in = NodeId::from_raw(record.id.raw());
+        let new_origin = self.place_fields(ui, stand_in, "At:", record.origin);
+        let new_turn = self.turn_fields(ui, stand_in, record.turn);
+        // The normal, read out; Flip is on the row itself, once (the owner, 2026-11-07: a second
+        // one down here was one too many).
+        ui.separator();
+        let n = section.normal();
+        ui.label(format!("Normal:  {:.3}, {:.3}, {:.3}", n.x, n.y, n.z));
+        if new_origin != record.origin || new_turn != record.turn {
+            self.edit_section(index, true, |c| {
+                c.origin = new_origin;
+                c.turn = new_turn;
+            });
+        }
     }
 }

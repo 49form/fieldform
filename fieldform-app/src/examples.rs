@@ -11,6 +11,7 @@
 /// `(verb, lines)`: the lines are newline-separated; the last is the example proper.
 pub const EXAMPLES: &[(&str, &str)] = &[
     ("sphere", "sphere radius=10 'ball'"),
+    ("expression", "expression text=\"sqrt(x*x + y*y + z*z) - 10\" size=30,30,30 claim=distance 'ball'"),
     ("cube", "cube size=80,40,10 'plate'"),
     ("cylinder", "cylinder radius=4 'rod'"),
     ("cone", "cone base_radius=20 top_radius=5 'taper'"),
@@ -26,6 +27,7 @@ pub const EXAMPLES: &[(&str, &str)] = &[
     ("offset", "sphere radius=20 'ball'\noffset target=ball distance=2"),
     ("pattern", "sphere radius=5 'bead'\npattern target=bead kind=linear count=4 step=20,0,0"),
     ("boolean", "sphere radius=10 'a'\nsphere radius=10 'b'\nboolean in=a,b -union"),
+    ("continuity", "line p0=0,0,0 p1=40,0,0 'a'\ncurve p=40,0,0;50,10,0;60,10,0;70,0,0 'b'\ncontinuity at=a.end g=1"),
 ];
 
 pub fn example_of(verb: &str) -> Option<&'static str> {

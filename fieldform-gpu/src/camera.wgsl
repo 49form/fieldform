@@ -77,6 +77,13 @@ struct Camera {
     // whole image, offset to where the tile sits -- a sub-frustum of the same camera -- so the
     // seams between tiles are not there to be seen. `image_uv` is the one place that reads it.
     tile: vec4<u32>,
+    // The still's reflected march, when this frame makes one (backlog item 54): x the steps a
+    // reflected ray may take, y how much of what it finds replaces the prefiltered environment
+    // sample, z the traced lobe's roughness as the panel shows it, w which lobe -- 1 the base,
+    // 2 the clearcoat, 0 for no reflected march this frame, which is every draft and every still
+    // of a matte part. `Reflections` in render.rs is where the numbers are decided; none of them
+    // is shader text, so a roughness slider never costs a recompile.
+    reflect: vec4<f32>,
 }
 
 struct Ray {
@@ -226,4 +233,92 @@ fn plane_gap(cam: Camera, p: vec3<f32>, n: vec3<f32>, at: vec2<u32>, found: vec4
 // plane than a pixel's width, and turned from the normal by no more than `SAME_SURFACE`.
 fn one_surface(gap: f32, reach: f32, n: vec3<f32>, found: vec4<f32>) -> bool {
     return found.w >= 0.0 && gap <= reach && dot(normalize(found.xyz), n) >= SAME_SURFACE;
+}
+
+// **The reflected ray, defined once for the march that traces it and the lighting pass that
+// shades what it found** (backlog item 54; the shading notes, section 15). The march writes the
+// hit's normal and distance and nothing else, so the lighting pass rebuilds the ray from the
+// same inputs -- the G-buffer's normal, the primary ray, this camera -- through these functions
+// and no others. Two copies that drifted by a rounding would shade the hit a little beside
+// where it was found, which is the fault this file's header exists to forbid; and a glossy
+// sample is drawn from a hash of the pixel and the still's frame index, both of which travel
+// in the camera, so the two passes cannot be seeded differently.
+
+// How far off the surface a reflected ray starts, in hit thresholds: outside, so that its first
+// readings are positive. The loop reads a negative reading after a refusal as a hit at the
+// refused point, and from an origin inside the surface that point is the origin -- a reflective
+// part reflecting itself everywhere, which reads as a material bug. About four, and not grown:
+// a larger offset detaches reflections from the points where two surfaces touch.
+const REFLECT_OFFSET: f32 = 4.0;
+// Under this the traced lobe is a mirror: one unjittered ray along the reflected direction.
+// `Reflections::MIRROR_BELOW` in render.rs is the same number, and the gate there is what
+// decides whether a glossy frame is traced at all.
+const REFLECT_MIRROR_BELOW: f32 = 0.05;
+
+fn reflect_origin(cam: Camera, p: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    return p + n * (REFLECT_OFFSET * cam.lens.w);
+}
+
+// An integer hash of three words and a salt to a unit float: a multiply per word, then two
+// rounds of shift-xor-multiply. Integer arithmetic throughout, so the two pipelines that call
+// it agree to the bit.
+fn hash_unit(x: u32, y: u32, z: u32, salt: u32) -> f32 {
+    var h = (x * 0x8da6b343u) ^ (y * 0xd8163841u) ^ (z * 0xcb1ab31fu) ^ (salt * 0x9e3779b9u);
+    h = h ^ (h >> 16u);
+    h = h * 0x7feb352du;
+    h = h ^ (h >> 15u);
+    h = h * 0x846ca68bu;
+    h = h ^ (h >> 16u);
+    return f32(h >> 8u) / 16777216.0;
+}
+
+// The direction the traced lobe reflects along at a pixel whose surface normal is `n`, seen
+// from `v`: the mirror direction for a mirror -- `reflect(-v, n)`, the expression
+// `shade_surface` samples the environment along, so the two agree exactly -- and for a glossy
+// lobe one sample of its GGX distribution of visible normals (Heitz, "Sampling the GGX
+// Distribution of Visible Normals", JCGT 2018), seeded by the pixel and the still's frame index
+// so that the still's own accumulation integrates the lobe. A sample that would go into the
+// surface is taken as the mirror direction rather than dropped: the lobe is narrow at these
+// roughnesses, so it is rare, and a dropped sample would leave the pixel a frame short.
+fn reflected_direction(cam: Camera, pixel: vec2<u32>, n: vec3<f32>, v: vec3<f32>) -> vec3<f32> {
+    let mirror = reflect(-v, n);
+    let roughness = cam.reflect.z;
+    if roughness < REFLECT_MIRROR_BELOW {
+        return mirror;
+    }
+    let alpha = roughness * roughness;
+    let frame = u32(max(cam.jitter.w, 0.0));
+    let u1 = hash_unit(pixel.x, pixel.y, frame, 1u);
+    let u2 = hash_unit(pixel.x, pixel.y, frame, 2u);
+    // A tangent frame about the normal.
+    var reference = vec3<f32>(0.0, 0.0, 1.0);
+    if abs(n.z) > 0.9 {
+        reference = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    let t = normalize(cross(reference, n));
+    let b = cross(n, t);
+    let vl = vec3<f32>(dot(v, t), dot(v, b), dot(v, n));
+    // Heitz's sampler: the view stretched by the roughness, a disc sample projected onto the
+    // hemisphere about it, and the result unstretched back into a normal.
+    let vh = normalize(vec3<f32>(alpha * vl.x, alpha * vl.y, vl.z));
+    let lensq = vh.x * vh.x + vh.y * vh.y;
+    var t1 = vec3<f32>(1.0, 0.0, 0.0);
+    if lensq > 0.0 {
+        t1 = vec3<f32>(-vh.y, vh.x, 0.0) / sqrt(lensq);
+    }
+    let t2 = cross(vh, t1);
+    let r = sqrt(u1);
+    let phi = 2.0 * 3.14159265359 * u2;
+    let p1 = r * cos(phi);
+    var p2 = r * sin(phi);
+    let s = 0.5 * (1.0 + vh.z);
+    p2 = (1.0 - s) * sqrt(max(1.0 - p1 * p1, 0.0)) + s * p2;
+    let nh = p1 * t1 + p2 * t2 + sqrt(max(1.0 - p1 * p1 - p2 * p2, 0.0)) * vh;
+    let ne = normalize(vec3<f32>(alpha * nh.x, alpha * nh.y, max(nh.z, 0.0)));
+    let h = t * ne.x + b * ne.y + n * ne.z;
+    let l = reflect(-v, h);
+    if dot(l, n) <= 0.0 {
+        return mirror;
+    }
+    return l;
 }

@@ -16,6 +16,7 @@ mod traced;
 mod outputs;
 mod image_export;
 mod image_block;
+mod comb_block;
 mod memory;
 mod menu_hover;
 mod preview;
@@ -58,6 +59,7 @@ mod pick;
 mod display_quality;
 mod app;
 mod graph_view;
+mod theme;
 
 use split_axis::AxisKind;
 use outcome::LineError;
@@ -117,7 +119,8 @@ use grid::{
 #[cfg(test)]
 use grid::{GRID_FINEST_MM, GRID_LABEL_INSET, GRID_MIN_CELL_PX};
 use curve_edits::{
-    bezier_between, copied_body, curve_shapes_a_body_in, delete_loop_member_commands,
+    bezier_between, copied_body, curve_shapes_a_body_in, delete_loop_member_commands, hold_join_commands,
+    release_join_commands,
     delete_row_commands, drag_targets, group_by_curve, join_loop_commands, move_point_node,
     moved_to_start_at, newly_closed_rows, paste_body, point_literals, points_in_box,
     readers_in_other_parts, realign_commands, rederived_commands, rows_not_in, set_targets,
@@ -134,8 +137,8 @@ use operands::{
 use operands::starting_pair_in;
 use blocks::list::{
     branch_starts, curve_v_elsewhere, drop_gutter, ends_on_point, DraggedBlock,
-    filtered_choices, folded_curve_row_in, grip_mark, joint_choices, joint_points_in,
-    joint_relation_between, make_variable, nest_rows, points_hidden_with_rows,
+    filtered_choices, folded_curve_row_in, grip_mark, join_of, joins_in, joint_choices,
+    joint_points_in, joint_relation_between, make_variable, Join, nest_rows, points_hidden_with_rows,
     names_in_a_row, profile_v_curve_in, put_back_inside, put_number_back, rename_block,
     variable_item, Block, BlockRow, Clipboard, ProfileRows, Reveal, Row, RowKey,
     REVEAL_FRAMES_PER_ROW, REVEAL_SETTLE_FRAMES,
@@ -459,6 +462,10 @@ mod tests;
 mod app_tests;
 #[cfg(test)]
 mod image_tests;
+#[cfg(test)]
+mod written_tests;
+#[cfg(test)]
+mod family_tests;
 
 fn main() -> eframe::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -1977,6 +1984,11 @@ fn suggested<K: Copy + PartialEq>(
 ) -> Vec<(K, String, Option<&'static str>)> {
     choices
         .iter()
+        // **A block that cannot go here is not listed** (the owner, 2026-11-07: a tool "should not
+        // list items like points and curves as input in its field"). It used to be listed greyed
+        // with the reason on hover; the reason is still said when one is typed or dropped, which is
+        // the only way left to try it.
+        .filter(|c| c.refusal.is_none())
         .filter(|c| !showing || typed.is_empty() || c.label.to_lowercase().contains(typed))
         .take(10)
         .map(|c| (c.key, c.label.clone(), c.refusal))
@@ -2451,12 +2463,14 @@ fn file_name(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// A cutaway view: everything past a plane is not drawn, and the cut face is shown solid.
+/// A cutaway view, resolved: where a [`fieldform_scene::SectionCut`]'s plane is this frame.
 ///
-/// **View state, not document state.** It changes what is on screen and nothing about the
-/// part — the graph, the save and any export are untouched, and two windows on one document
-/// could section it differently without either being wrong. That is why it lives here rather
-/// than as a `Node`.
+/// **The record is the document's; this is a reading of it** (the owner, 2026-11-07: a section
+/// is a block, saved and undone, and placed with a plane block's rows). It was view state held
+/// here until then, and the paragraphs below are the arrangement the block kept: the row, the
+/// switch, the claim on the handles. What changed is where the truth is -- `Document::sections`,
+/// with an origin that is a `Place` and a facing that is a `Turn` -- and that this is derived from
+/// it each time it is asked, through [`App::resolve_section`], rather than kept beside it.
 ///
 /// **Each one has a row in the block list all the same, and the row is not a block** (the owner,
 /// 2026-10-24: the section should stay on while every other tool is used and still be
@@ -2475,6 +2489,8 @@ fn file_name(path: &std::path::Path) -> String {
 /// codebase keeps meeting. The normal is derived, never stored.
 #[derive(Clone, Copy, Debug)]
 struct Section {
+    /// The record this was read from.
+    id: fieldform_scene::SectionCutId,
     /// Which one this is, in the order made: kept rather than counted from the row, so removing
     /// the first does not rename the second.
     number: u32,
@@ -2485,18 +2501,6 @@ struct Section {
     /// facing the other way — so spending 180 degrees of the frame on it would fight the
     /// manipulator for one control. Same reasoning as `Node::Plane`.
     flipped: bool,
-}
-
-impl Default for Section {
-    fn default() -> Self {
-        Self {
-            number: 0,
-            on: false,
-            origin: Point3::origin(),
-            rotation: Rotation3::identity(),
-            flipped: false,
-        }
-    }
 }
 
 impl Section {
@@ -2534,6 +2538,39 @@ impl Section {
         }
         let n = self.normal();
         Some((n, n.dot(&self.origin.coords)))
+    }
+}
+
+/// A section cut placed where a drag left its plane: an origin and a facing typed, so what it was
+/// taken from, if anything, is let go of -- as a dragged plane block's typed place would be.
+fn placed_section(before: fieldform_scene::SectionCut, moved: &Section) -> fieldform_scene::SectionCut {
+    let (x, y, z) = moved.rotation.euler_angles();
+    fieldform_scene::SectionCut {
+        origin: fieldform_scene::Place::At([
+            ParamRef::Literal(moved.origin.x),
+            ParamRef::Literal(moved.origin.y),
+            ParamRef::Literal(moved.origin.z),
+        ]),
+        turn: fieldform_scene::Turn::By([
+            ParamRef::Literal(x.to_degrees()),
+            ParamRef::Literal(y.to_degrees()),
+            ParamRef::Literal(z.to_degrees()),
+        ]),
+        ..before
+    }
+}
+
+/// What a new document's part is made of: chrome (the owner, 2026-11-07: "lets make horizon with
+/// chrome the default"), which with the Horizon environment shows a surface's curvature as one
+/// clean highlight line from the first thing drawn.
+///
+/// **Written into the new part, not into what no material means.** `Part::material` being `None`
+/// is the neutral preset, and every document saved without a material reads that way; making
+/// `None` mean chrome would turn every one of them to chrome on opening. So the choice is stored
+/// on the part a new document starts with, and an older file looks as it did.
+fn starting_look(doc: &mut Document, part: PartId) {
+    if let Some(p) = doc.parts.get_mut(&part) {
+        p.material = fieldform_scene::Material::preset("Chrome");
     }
 }
 
@@ -3064,9 +3101,9 @@ enum GizmoTarget {
         before_graph: Graph,
         before: Placement,
     },
-    /// The section plane. Reverses against where it was, like the direct layer's other
-    /// targets, because a section is not in the document and has no parameter to name.
-    Section { index: usize, before: Section },
+    /// A section cut's plane: moved live in the document, then put back and written as one
+    /// undo step when the hand comes off, as a body's placement is.
+    Section { id: fieldform_scene::SectionCutId, before: fieldform_scene::SectionCut, resolved: Section },
     /// Control points of one curve.
     ///
     /// A curve is a parametric-layer object — it is serialized, and `Node::Pipe` reads it —
@@ -3420,6 +3457,12 @@ struct App {
     /// The marking menu while it is open (§7), and the last command kept or run, which Shift+R
     /// runs again (§8).
     marking: Option<app::marking_ui::MarkingMenu>,
+    /// The text box the last reference field drew, for the row around it to hang a right-click
+    /// menu on: the field answers only with what was picked, and the menu is the row's.
+    last_reference_field: Option<egui::Response>,
+    /// A join's continuity shown before it is chosen, while a lead is hovered in the join's list.
+    /// See [`app::marking_ui::JoinPreview`].
+    join_preview: Option<app::marking_ui::JoinPreview>,
     last_command: Option<&'static commands::Command>,
     /// The shelf's commands (§10.2), where each was drawn last frame, and how many times the
     /// palette has been opened, which the first-run hint goes by (§10.3).
@@ -3495,6 +3538,19 @@ struct App {
     kept_list: std::cell::RefCell<
         fieldform_field::KeptReadings<ListKey, fieldform_scene::ListReadings>,
     >,
+    /// What the notebook says is wrong with each block of the part, kept against the same count
+    /// as the list, since both views draw it and asking per row per frame is a walk of the graph.
+    kept_statuses: std::cell::RefCell<
+        fieldform_field::KeptReadings<ListKey, graph_view::BlockStatuses>,
+    >,
+    /// Every row frame the list has drawn since the record was last cleared, in the order drawn,
+    /// for the tests that hold the frames to their nesting: a window is not needed to ask whether
+    /// one encloses another.
+    #[cfg(test)]
+    drawn_frames: Vec<blocks::list::DrawnFrame>,
+    /// The frames being drawn, innermost last, so a frame knows which one it is drawn inside.
+    #[cfg(test)]
+    open_frames: Vec<usize>,
     /// What the window title was last set to, so it is only sent when it actually changes.
     title: String,
     /// The splash, until it is dismissed.
@@ -3620,6 +3676,14 @@ struct App {
     /// The selection the block list has already followed, so that it follows each one once and
     /// a row chosen in the list itself is not scrolled out from under the pointer.
     followed: Option<RowKey>,
+    /// A curve clicked in the viewport to be edited, waiting for the list to open its row.
+    ///
+    /// **Its own row, not only the rows above it**, which is what the reveal opens for any other
+    /// selection (the owner: "when you click on a curve to edit it, its block should expand").
+    /// Set by the click rather than read off the selection, because a curve also becomes selected
+    /// when a line or a paste makes one, and a script of twenty lines should not leave twenty
+    /// rows open behind it.
+    curve_picked: Option<CurveId>,
     /// The same for the graph view, whose node for a curve is not the curve's row.
     graph_followed: Option<NodeId>,
     /// The reference field being typed in, and what is in it so far.
@@ -3707,6 +3771,9 @@ struct App {
     agent: agent::AgentState,
     /// The MCP listener, when `--agent-host` started one (`mcp-server-spec.md` §3.2).
     agent_host: Option<agent::server::Host>,
+    /// Whether the window is minimised, as the last pass saw it. A hidden window gets no `ui`
+    /// pass, only [`eframe::App::logic`], so the agent is answered from there while it is set.
+    window_hidden: bool,
     /// Allow agent (`mcp-server-spec.md` §9.1): whether this session publishes an endpoint a
     /// client may attach to. Off by default and kept per person.
     allow_agent: bool,
@@ -3715,6 +3782,11 @@ struct App {
     line_capture: Option<Vec<(bool, String)>>,
     /// The structured form of the refusal the line in flight met, set where it is refused.
     line_error: Option<LineError>,
+    /// The console line a cage verb just run from a menu, a key or the palette amounts to, with the
+    /// elements it read from the selection spelled out -- what the echo writes for it. A topology
+    /// edit is not something the document's diff can spell, and the verb's bare word would replay
+    /// as a refusal for want of the edges or faces it was given.
+    cage_line: Option<String>,
     /// A script waiting to run, from `--run` on the command line or the `run` verb.
     script: Option<Script>,
     /// Whether a script's lines are being run this frame, so `run` inside one is refused.
@@ -3725,6 +3797,14 @@ struct App {
     pending_snap: Option<PendingSnap>,
     /// Everything about running the Save Image blocks, none of it saved (`image_block`).
     images: image_block::ImageRuns,
+    /// Everything about drawing and editing the curvature combs, none of it saved (`comb_block`).
+    comb_runs: comb_block::CombRuns,
+    /// What verify measured for each Expression block, the text being typed into one, where
+    /// its last parse stopped, and a notice about a paste (`app::written_panel`). None saved.
+    written_verdicts: std::collections::HashMap<NodeId, app::written_panel::WrittenVerdict>,
+    written_drafts: std::collections::HashMap<NodeId, String>,
+    written_errors: std::collections::HashMap<NodeId, (usize, String)>,
+    written_notices: std::collections::HashMap<NodeId, String>,
     /// What a run has tallied so far, kept across the frames a snapshot waits for. See
     /// [`App::drive_script`].
     script_tally: Option<ScriptTally>,
@@ -3917,17 +3997,16 @@ struct App {
     /// Which plane Modify > Mirror reflects across. Remembered between uses, like the offset
     /// distance: a part that wants mirroring in X usually wants it again.
     mirror_axis: Axis,
-    /// The cutaway views, in the order they were made; any number may be on. See [`Section`].
-    sections: Vec<Section>,
-    /// How many sections have been made, which numbers the next one.
-    sections_made: u32,
+    /// A section's edits in progress, so typing into its rows lands on the undo stack once: the
+    /// section, when the gesture began, and the list as it was then. `set_images`' arrangement.
+    section_gesture: Option<(fieldform_scene::SectionCutId, std::time::Instant, Vec<fieldform_scene::SectionCut>)>,
     /// Which section the manipulator is currently aimed at, rather than at geometry.
     ///
     /// Explicit rather than inferred from "a section is on and nothing else is selected":
     /// two things claiming one gizmo is exactly the shape of bug this codebase keeps meeting,
     /// and the fix each time was to decide where the claim is *made*. Turning a section on,
     /// or clicking its row, makes the claim; selecting any geometry drops it.
-    section_selected: Option<usize>,
+    section_selected: Option<fieldform_scene::SectionCutId>,
     /// The graph edit in progress, so a drag lands on the undo stack once.
     ///
     /// Holds what the part looked like when the gesture *started*, which is what the entry has
@@ -3943,6 +4022,10 @@ struct App {
     /// is looked at and nothing about the part. On by default; the switch exists for the
     /// machine where a settled frame takes too long with it.
     idle_occlusion: bool,
+    /// Whether a settled frame traces reflections (backlog item 54): a view setting like the
+    /// one above, on by default, and off on Fast whatever it says. What a frame then traces is
+    /// the material's to decide, so a matte part costs nothing either way.
+    idle_reflections: bool,
     /// Whether the drawing plane shows its grid, which is also what Shift snaps to.
     ///
     /// A view setting, on by default. Off, there is nothing to snap to — deliberately, since a
@@ -4327,6 +4410,7 @@ impl App {
         // Settled as every graph written past the history is (`block-ownership-spec.md` §4.1),
         // as `new_document` does after the same write.
         doc.settle_ownership();
+        starting_look(&mut doc, active_part);
 
         // A test's `App` draws on Fast whatever the owner chose: the tests are about what the
         // interface does, and the owner's own rung would make them as slow as Enchilada is.
@@ -4354,6 +4438,8 @@ impl App {
             capturing: None,
             bindings_note: None,
             marking: None,
+            last_reference_field: None,
+            join_preview: None,
             last_command: None,
             shelf: Vec::new(),
             shelf_drawn: Vec::new(),
@@ -4374,6 +4460,11 @@ impl App {
             document_moves: 0,
             kept_readings: Default::default(),
             kept_list: Default::default(),
+            kept_statuses: Default::default(),
+            #[cfg(test)]
+            drawn_frames: Vec::new(),
+            #[cfg(test)]
+            open_frames: Vec::new(),
             title: String::new(),
             splash: None,
             splash_shown: true,
@@ -4401,15 +4492,22 @@ impl App {
             console_warnings: 0,
             agent: Default::default(),
             agent_host: None,
+            window_hidden: false,
             allow_agent: false,
             agent_endpoint: None,
             line_capture: None,
             line_error: None,
+            cage_line: None,
             script: Script::from_command_line(),
             script_running: false,
             expect_results: Vec::new(),
             pending_snap: None,
             images: image_block::ImageRuns::default(),
+            comb_runs: comb_block::CombRuns::default(),
+            written_verdicts: std::collections::HashMap::new(),
+            written_drafts: std::collections::HashMap::new(),
+            written_errors: std::collections::HashMap::new(),
+            written_notices: std::collections::HashMap::new(),
             script_tally: None,
             traced_error_said: None,
             // **Never from a test's `App`.** The file is one name in the temp folder and this
@@ -4489,6 +4587,7 @@ impl App {
             renaming: None,
             reveal: None,
             followed: None,
+            curve_picked: None,
             graph_followed: None,
             ref_edit: None,
             completing_a_move: None,
@@ -4520,15 +4619,17 @@ impl App {
             twist_axis: Axis::Z,
             mirror_axis: Axis::X,
             import_prompt: None,
-            sections: Vec::new(),
-            sections_made: 0,
+            section_gesture: None,
             section_selected: None,
             gesture: None,
             verification: None,
             material_gesture: None,
             idle_occlusion: true,
+            idle_reflections: true,
             show_grid: true,
-            environment: fieldform_gpu::EnvironmentChoice::Studio,
+            // Horizon, with the starting part in chrome (`starting_look`): the owner's choice of
+            // first impression, 2026-11-07.
+            environment: fieldform_gpu::EnvironmentChoice::Horizon,
             draft: DraftAnalysis::default(),
             collecting: None,
             showing_original: std::collections::HashSet::new(),
@@ -4803,6 +4904,7 @@ impl App {
             }
             // Each reads its block's own numbers -- `sphere radius=10 centre=40,0,0` -- and a
             // menu, passing none, gets the default (`console_keys::primitive_with_keys`).
+            "create.expression" => self.expression_command(args),
             "create.sphere" => self.add_primitive_with(PrimitiveKind::Sphere, args),
             "create.cube" => self.add_primitive_with(PrimitiveKind::Cube, args),
             "create.skewbox" => self.add_primitive_with(PrimitiveKind::SkewedBox, args),
@@ -4903,6 +5005,7 @@ impl App {
             }
             "file.export_stl" => self.export_command(args),
             "image.block" => self.saveimage_command(args),
+            "evaluate.comb" => self.comb_command(args),
             "image.save_again" => self.save_image_again(),
             // `pipe curve=l1 radius=3`; a ramp's name drives the radius.
             "create.pipe" => self.pipe_with_keys(args),
@@ -4953,6 +5056,7 @@ impl App {
             "profile.join" => self.join_selected(),
             "profile.ungroup" => self.ungroup_selected(),
             "profile.align" => self.align_command(args),
+            "curve.continuity" => self.continuity_command(args),
             "profile.relate" => self.relate_command(args),
             "profile.break" => self.break_command(args),
             "profile.realign" => self.realign_command(args),
@@ -4973,7 +5077,22 @@ impl App {
                     .max(1e-4);
                 self.measure_thickness(threshold);
             }
-            "view.toggle_visibility" => self.toggle_selected_visibility(),
+            // `hide target=Sphere_0` hides that block, and `show target=…` draws it: by name, so a
+            // script does not depend on what happens to be selected, and stated rather than turned
+            // over, so running the line twice leaves it as asked. Alone, `hide` is the H key's
+            // toggle of the selection, as it always was.
+            "view.toggle_visibility" => match args.get("target").map(|v| v.text()) {
+                None => self.toggle_selected_visibility(),
+                Some(name) => self.set_visibility_named("hide", &name, false),
+            },
+            "view.show" => match args.get("target").map(|v| v.text()) {
+                Some(name) => self.set_visibility_named("show", &name, true),
+                None => match self.selected_body {
+                    Some(id) if !self.is_visible(id) => self.toggle_visibility(id),
+                    Some(id) => self.say(format!("{} is already drawn", self.body_label(id))),
+                    None => self.warn("`show` names what to draw: `show target=Sphere_0`"),
+                },
+            },
             "view.cycle_mode" => {
                 self.view_mode = self.view_mode.next();
                 // Which imported solids are drawn as triangles depends on the mode, and
@@ -5031,6 +5150,7 @@ impl App {
                     "Only the selected curve's control points are shown"
                 });
             }
+            "edit.allow_agent" => self.toggle_allow_agent(),
             "view.view_cube" => {
                 self.show_view_cube = !self.show_view_cube;
                 self.say(if self.show_view_cube { "ViewCube shown" } else { "ViewCube hidden" });
@@ -5055,6 +5175,22 @@ impl App {
                         "Shadows and occlusion once the view is still"
                     } else {
                         "No shadows or occlusion, even when still"
+                    });
+                }
+            }
+            "view.idle_reflections" => {
+                if !self.display_quality.reflections() {
+                    self.warn(
+                        "Display quality is Fast, which never traces reflections — choose Balanced or \
+                         Full first",
+                    );
+                } else {
+                    self.idle_reflections = !self.idle_reflections;
+                    self.traced.invalidate(traced::Quality::Final);
+                    self.say(if self.idle_reflections {
+                        "Reflections traced once the view is still"
+                    } else {
+                        "No traced reflections, even when still"
                     });
                 }
             }
@@ -5084,8 +5220,7 @@ impl App {
             "console.help" => self.run_command("help"),
             "console.clear" => self.console_log.clear(),
             "view.section" => self.toggle_section(),
-            "view.section_new" => self.add_section(),
-            "view.section_flip" => self.flip_section(),
+            "view.section_new" => self.section_new_command(args),
             "file.new" => self.new_document(),
             // `open file="C:/in/part.fform"` opens it without the dialog; `open` alone asks.
             "file.open" => {
@@ -5131,13 +5266,24 @@ impl App {
                 } else {
                     args
                 };
+                // Said in the user's terms, rather than left to a refusal for a missing key.
+                if matches!(op, "cage.crease" | "cage.uncrease") && args.get("edges").is_none() {
+                    let what = if op == "cage.crease" { "crease" } else { "uncrease" };
+                    self.warn(format!("select the edges to {what} first: click an edge, or double-click one for its whole loop"));
+                    return;
+                }
                 match self.registry.build(op, args, &self.doc) {
                     Ok(cmd) => {
                         if let Err(e) = self.stack.execute(&mut self.doc, cmd) {
                             self.warn(e.to_string());
                         } else {
+                            if op.starts_with("cage.") {
+                                self.cage_line = app::cage_tools::cage_console_line(op, args, self.doc.cages.len() > 1);
+                            }
                             // A topology edit renumbers what a selection names, as a refine does.
-                            if op.starts_with("cage.") && op != "cage.set_positions" {
+                            // A crease keeps every number, and the edges stay picked so the
+                            // next step -- uncrease, crease the next loop -- can read them.
+                            if op.starts_with("cage.") && !matches!(op, "cage.set_positions" | "cage.crease" | "cage.uncrease") {
                                 self.forget_cage_selection();
                             }
                             self.after_document_change();
@@ -5793,7 +5939,7 @@ impl App {
                 &self.doc,
                 self.active_part,
                 &self.hidden_curves,
-                &self.profiles.loops,
+                &self.profiles.all_rows(),
             ),
             meshed,
         }
@@ -5808,6 +5954,21 @@ impl App {
     /// a frame — for the rows, and for the summary above them and its hover — and once more for
     /// every import's row, and every row asked the graph for its bodies
     /// (`fieldform-io/examples/list_cost.rs`).
+    /// What the notebook says is wrong with each block of the active part, as both views draw it
+    /// ([`graph_view::BlockStatuses`]), kept until the document moves.
+    fn block_statuses(&self) -> std::rc::Rc<graph_view::BlockStatuses> {
+        let key = ListKey { moves: self.document_moves, part: self.active_part };
+        self.kept_statuses.borrow_mut().get(key, |key| {
+            let graph = &self
+                .doc
+                .parts
+                .get(&key.part)
+                .expect("active_part must name a part in the document")
+                .graph;
+            graph_view::BlockStatuses::of(&self.doc, graph)
+        })
+    }
+
     fn list_readings(&self) -> std::rc::Rc<fieldform_scene::ListReadings> {
         let key = ListKey { moves: self.document_moves, part: self.active_part };
         self.kept_list.borrow_mut().get(key, |key| key.read(&self.doc))
@@ -5936,6 +6097,8 @@ impl App {
     fn pick_only(&mut self, curve: CurveId, index: usize) {
         if self.selected_curve != Some(curve) {
             self.select_curve(curve);
+            // A press on another curve's point is a click on that curve to edit it.
+            self.curve_picked = Some(curve);
         }
         self.selected_points = vec![index];
         self.other_points.clear();
@@ -7569,6 +7732,7 @@ impl App {
             Some(Node::Revolve { .. }) => "Revolve".to_string(),
             Some(Node::Sweep { .. }) => "Sweep".to_string(),
             Some(Node::Loft { .. }) => "Loft".to_string(),
+            Some(Node::Expression { .. }) => "Expression".to_string(),
             Some(Node::Sphere { .. }) => "Sphere".to_string(),
             // Named for the shape it is rather than for the menu entry that made it: three
             // equal sides is a cube, and anything else is a box. Stretching one in the panel
@@ -8097,6 +8261,21 @@ impl App {
         self.toggle_visibility(id);
     }
 
+    /// `hide target=…` and `show target=…`: the named block's eye set as asked, or a word that it
+    /// already was. A name that names nothing is refused, so a script stops where it was wrong.
+    fn set_visibility_named(&mut self, verb: &str, name: &str, on: bool) {
+        let Some(id) = self.node_named(name) else {
+            self.warn(format!("nothing is called {name:?} to {verb}"));
+            return;
+        };
+        if self.is_visible(id) == on {
+            let label = self.body_label(id);
+            self.say(if on { format!("{label} is already drawn") } else { format!("{label} is already hidden") });
+            return;
+        }
+        self.toggle_visibility(id);
+    }
+
     /// Turns a block's eye over: the eye on its row, the row menu's item, and H.
     ///
     /// Said in the words of what its flag does: a body is shown or hidden, a block something
@@ -8122,9 +8301,11 @@ impl App {
     /// so if a curve is selected it is what the user is pointing at.
     fn delete_selection(&mut self) {
         // A section's row, when it is the thing selected: Delete takes the section and nothing
-        // of the part, since the section was never in it (the owner, 2026-10-24: no ✕ on the
-        // row; the menu or the key). Selecting it cleared everything below, as they clear it.
-        if let Some(index) = self.section_selected {
+        // else (the owner, 2026-10-24: no ✕ on the row; the menu or the key). Selecting it
+        // cleared everything below, as they clear it.
+        if let Some(id) = self.section_selected
+            && let Some(index) = self.sections().iter().position(|s| s.id == id)
+        {
             self.remove_section(index);
             return;
         }
@@ -8818,6 +8999,7 @@ impl App {
             lookup: &lookup,
             material,
             occlusion: self.idle_occlusion && self.display_quality.occlusion(),
+            reflections: self.idle_reflections && self.display_quality.reflections(),
             exact_finish: self.display_quality.exact_finish(),
             environment: self.environment,
             draft: self.draft_overlay(),
@@ -9388,6 +9570,14 @@ impl App {
         }
 
         for (key, egui_modifiers, shortcut) in pressed {
+            // **Space with an extrude or inset pending keeps it and lifts the next** (the owner,
+            // 2026-11-12), ahead of the palette's binding and of the panel's own field, whose
+            // number it takes first. Everywhere else Space is still the palette.
+            if key == egui::Key::Space && !shortcut.modifiers.any() && self.space_chains_cage_session(ui.ctx()) {
+                ui.ctx().input_mut(|i| i.consume_key(egui_modifiers, key));
+                self.cage_session_again(ui.ctx());
+                continue;
+            }
             if (typing || typed_into_panel) && !shortcut.modifiers.any() {
                 continue;
             }
@@ -9509,6 +9699,20 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Answers the agent while the window is minimised.
+    ///
+    /// **A minimised window gets no `ui` pass**, and `ui` is where [`App::drive_agent`] runs, so a
+    /// host whose window was minimised answered nothing: a call sat until the client gave up, with
+    /// the process alive and idle. eframe still runs this hook when the window is hidden and a
+    /// repaint is asked for, and the agent's listener asks for one with every call. While the
+    /// window is shown it does nothing, so the order the frame keeps for everything else stands.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.window_hidden = ctx.input(|i| i.viewport().minimized == Some(true));
+        if self.window_hidden {
+            self.drive_agent();
+        }
+    }
+
     /// Takes Tab out of the input before egui can route it to focus.
     ///
     /// This has to happen here and cannot happen anywhere else. egui decides which widget the
@@ -9734,25 +9938,20 @@ impl eframe::App for App {
                 .hover_pos()
                 .filter(|p| rect.contains(*p))
                 .map(|p| (aspect, rect, p));
-            // **A right-click opens the marking menu** (`interaction-spec.md` §7) -- except on a
-            // corner of a held loop, which keeps the list of its continuities it always offered:
-            // that is a question about the corner, not a command, and the corner is what was aimed
-            // at. Paste here, which this menu also held, is the empty table's North-West slot.
+            // **A right-click opens the marking menu** (`interaction-spec.md` §7) -- and on a join,
+            // where two curve ends meet, the join's own ring of G0, G1 and G2, whatever is
+            // selected: the join is what was aimed at (the owner: "when you right-click on top of
+            // a curve intersection you should get a marking menu that allows you to set
+            // tangency"). It replaced a list that only a held loop's corners offered, so an open
+            // chain's corners have it too. Paste here is the empty table's North-West slot.
             if response.secondary_clicked() {
                 self.viewport_menu_at = response.interact_pointer_pos();
-                let corner = self.viewport_menu_at.and_then(|p| self.joint_at(aspect, rect, p));
-                if corner.is_none()
-                    && let Some(at) = self.viewport_menu_at
-                {
-                    self.open_marking_menu(at);
-                }
-            }
-            if self.viewport_menu_at.and_then(|p| self.joint_at(aspect, rect, p)).is_some() {
-                response.context_menu(|ui| {
-                    if let Some(point) = self.viewport_menu_at.and_then(|p| self.joint_at(aspect, rect, p)) {
-                        self.joint_menu(ui, point);
+                if let Some(at) = self.viewport_menu_at {
+                    match self.join_at(aspect, rect, at) {
+                        Some(join) => self.open_join_menu(at, join.ends),
+                        None => self.open_marking_menu(at),
                     }
-                });
+                }
             }
 
             // The ViewCube overlay sits inside this rect (upper-right corner) and has its
@@ -9963,6 +10162,7 @@ impl eframe::App for App {
                     // Selecting it is what puts its control points on offer and hands it the
                     // manipulator — `select_curve` is the one place that decides who holds those.
                     self.select_curve(id);
+                    self.curve_picked = Some(id);
                     self.say(format!("Selected {name}"));
                 }
             }
@@ -10615,6 +10815,9 @@ impl eframe::App for App {
                 &highlighted,
                 &stale,
             );
+            // The combs over their curves, so a tooth is read against the line it measures.
+            let combs = self.comb_readings();
+            comb_block::draw_combs(ui.painter(), &self.camera, aspect, rect, &combs);
             self.draw_surface_points(ui.painter(), aspect, rect);
             // **The centerline a selected loft built for itself, dashed** -- the same mark a
             // stale axis gets, and for a related reason: it is a line the document does not

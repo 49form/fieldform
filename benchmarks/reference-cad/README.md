@@ -130,11 +130,20 @@ Still open:
 
 - A STEP file of triangles alone, with no exact surfaces, does not import.
 - The volume limit above is unfair to thin parts.
-- The console's `expect volume` cannot check any of these three parts, at any tolerance. It sizes
-  its first grid from the part's smallest feature, and a 0.127 mm fillet on a 25 mm part, or a
-  drilled vent in a 330 mm box, asks for more grid corners than one measurement holds. On 905 it
-  read 272.271 mm³ and still refused, having no finer grid to estimate its error from. So the
-  scripts only build and save, and the comparison is the check.
+
+The console's `expect volume` used to refuse all three parts at any tolerance: a fillet sized its
+first grid finer than two levels of it could fit in one measurement, so there was nothing to
+estimate an error from. The first grid now coarsens until both levels fit, giving way for a
+fillet's radius but never for a thin wall, which could vanish from a coarse mesh. Each part now
+gets a verdict:
+
+| Part | Volume measured | Error estimate | Grid |
+|---|---|---|---|
+| FTC-07 | 1,726,723 mm³ | ± 85 mm³ | 1 mm |
+| D2MI 906 | 22,869.4 mm³ | ± 2.7 mm³ | 0.25 mm |
+| D2MI 905 | 272.271 mm³ | ± 0.008 mm³ | 0.031 mm |
+
+The scripts still only build and save, and the comparison above is the check.
 
 ## Adding a part
 

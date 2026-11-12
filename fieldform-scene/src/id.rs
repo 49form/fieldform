@@ -142,6 +142,8 @@ stable_id!(
 );
 stable_id!(ExportId, "Identifies an export block: a file written from a tessellation.");
 stable_id!(SaveImageId, "Identifies a Save Image block: the viewport written as an image file.");
+stable_id!(SectionCutId, "Identifies a section cut: a plane the viewport cuts the part away at.");
+stable_id!(CombId, "Identifies a curvature comb: a curve's curvature, drawn along it.");
 stable_id!(NodeId, "Identifies a node inside one part's composition graph.");
 
 /// Draws a fresh 64-bit value.

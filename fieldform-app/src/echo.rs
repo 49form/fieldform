@@ -217,6 +217,17 @@ pub fn keys_of(node: &Node, n: &Names) -> Result<Written, String> {
             keys.push(("radius", value(radius, n)?));
             keys.push(("centre", place(centre, n)?));
         }
+        // The text as it stands -- `word` quotes the pair, since it has spaces in it -- then
+        // what bounds and divides it, and the frame it is read in.
+        Node::Expression { text, frame: f, size, divisor, claim } => {
+            let (origin, axis) = frame(f, n)?;
+            keys.push(("text", text.source().to_string()));
+            keys.push(("size", triple(size, n)?));
+            keys.push(("divisor", value(divisor, n)?));
+            keys.push(("claim", claim.word().to_string()));
+            keys.push(("origin", origin));
+            keys.push(("axis", axis));
+        }
         Node::Cuboid { centre, size, turn: t, edge } => {
             keys.push(("size", triple(size, n)?));
             keys.push(("centre", place(centre, n)?));
@@ -1197,6 +1208,13 @@ mod tests {
             Node::Point { .. } => Node::Point { at: z3 },
             Node::Plane { .. } => Node::Plane { origin: Place::origin(), flipped: false, turn: fieldform_scene::no_turn() },
             Node::Sphere { .. } => Node::Sphere { centre: Place::origin(), radius: one },
+            Node::Expression { .. } => Node::Expression {
+                text: fieldform_scene::Written::unparsed("x"),
+                frame: Frame::default(),
+                size: [one; 3],
+                divisor: one,
+                claim: fieldform_scene::WrittenClaim::LowerBound,
+            },
             Node::Cuboid { .. } => Node::Cuboid { edge: Default::default(), centre: Place::origin(), size: [one; 3], turn: fieldform_scene::no_turn() },
             Node::SkewedBox { .. } => Node::SkewedBox { centre: Place::origin(), edges: [z3; 3] },
             Node::Cylinder { .. } => Node::Cylinder { edge: Default::default(), ends, radius: one },

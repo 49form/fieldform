@@ -272,6 +272,20 @@ impl App {
         {
             add("does_not_compile", None, self, why);
         }
+        for bulge in self.flush_blend_faces(graph) {
+            let (a, b) = (self.body_label(bulge.faces.0), self.body_label(bulge.faces.1));
+            let p = bulge.at;
+            problems.push(json!({
+                "code": "blend_bulges_flush_faces",
+                "message": format!(
+                    "{a} and {b} meet face to face near ({:.2}, {:.2}, {:.2}), and the {} mm blend stands {:.3} mm proud of that face: a blend rounds an edge, and over a flush face it adds material. Join those faces hard, or trim the bulge with a half-space",
+                    p.x, p.y, p.z, bulge.radius, bulge.proud,
+                ),
+                "block": self.block_summary(bulge.blend),
+                "at_mm": [p.x, p.y, p.z],
+                "proud_mm": bulge.proud,
+            }));
+        }
         Reply { json: json!({ "ok": problems.is_empty(), "problems": problems }), is_error: false }
     }
 
@@ -326,6 +340,130 @@ impl App {
             o["empty_slot"] = json!(slot);
         }
         Reply { json: o, is_error: false }
+    }
+}
+
+/// A blend that moves a face where two of its operands lie flush.
+pub(crate) struct FlushBulge {
+    pub(crate) blend: NodeId,
+    pub(crate) faces: (NodeId, NodeId),
+    /// A point on the flush face, before the blend.
+    pub(crate) at: Point3<f64>,
+    /// How far the blended surface stands off that face, measured along its normal.
+    pub(crate) proud: f64,
+    pub(crate) radius: f64,
+}
+
+/// Grid points along a blend's longest side when looking for flush faces.
+const FLUSH_CELLS: f64 = 48.0;
+
+impl App {
+    /// Every blend whose operands meet face to face, with the worst place each moves the face.
+    ///
+    /// **Why `check` has to say this.** A blend's radius is a reach from each face to the other,
+    /// so where two faces lie in one plane each is within reach of the other everywhere along it,
+    /// and the rounding adds material over the whole face: 0.293 of the radius proud at G1. Nothing
+    /// is wrong with the field and nothing refuses, the picture shows a face a hair off, and only a
+    /// `sample` at the right point finds it. Measured, not reckoned: the distance is walked along
+    /// the face's normal to where the blended field crosses nought, so it holds at every
+    /// continuity and for a chamfer as well.
+    ///
+    /// Read as a smooth minimum of signed fields: a union of `a, b`; an intersection of `−a, −b`;
+    /// a difference of `−a, b…`. Two of those are flush where both are nought with their gradients
+    /// pointing the same way. A point operand is skipped, since its field is never negative.
+    pub(crate) fn flush_blend_faces(&self, graph: &fieldform_scene::Graph) -> Vec<FlushBulge> {
+        use fieldform_scene::BooleanOp;
+        let lookup = |p| self.doc.parameter_value(p);
+        let mut found = Vec::new();
+        let mut ids: Vec<NodeId> = graph.nodes().map(|(id, _)| id).collect();
+        ids.sort_by_key(|id| id.raw());
+        for blend in ids {
+            let Some(Node::Blend { op, inputs, fillet }) = graph.node(blend) else { continue };
+            let Some(k) = fillet.radius.resolve(&lookup).filter(|k| *k > 0.0 && k.is_finite()) else { continue };
+            let operands: Vec<NodeId> = inputs
+                .iter()
+                .filter_map(|o| o.source())
+                .filter(|id| !matches!(graph.node(*id), Some(Node::Point { .. })))
+                .collect();
+            if operands.len() < 2 {
+                continue;
+            }
+            let sign = |i: usize| match op {
+                BooleanOp::Union => 1.0,
+                BooleanOp::Intersection => -1.0,
+                BooleanOp::Difference if i == 0 => -1.0,
+                BooleanOp::Difference => 1.0,
+            };
+            let blend_sign = if matches!(op, BooleanOp::Union) { 1.0 } else { -1.0 };
+            let compile = |id: NodeId| GraphField::compile_graph(&self.doc, &crate::expect::graph_of(graph, id), crate::MEASURE_TOLERANCE_MM).ok();
+            let Some(blended) = compile(blend) else { continue };
+            let fields: Option<Vec<GraphField>> = operands.iter().map(|id| compile(*id)).collect();
+            let Some(fields) = fields else { continue };
+            let Some((lo, hi)) = fieldform_field::part_extent(&self.doc, &crate::expect::graph_of(graph, blend)).as_box() else { continue };
+            let (lo, hi) = (lo - nalgebra::Vector3::repeat(k), hi + nalgebra::Vector3::repeat(k));
+            let longest = (hi - lo).amax();
+            let h = longest / FLUSH_CELLS;
+            let counts = (hi - lo).map(|e| (e / h).ceil() as usize + 1);
+            let unit_normal = |f: &GraphField, p: Point3<f64>| -> Option<nalgebra::Vector3<f64>> {
+                let d = (h * 1e-3).max(1e-5);
+                let at = |dx: f64, dy: f64, dz: f64| f.distance(Point3::new(p.x + dx, p.y + dy, p.z + dz));
+                let g = nalgebra::Vector3::new(at(d, 0.0, 0.0) - at(-d, 0.0, 0.0), at(0.0, d, 0.0) - at(0.0, -d, 0.0), at(0.0, 0.0, d) - at(0.0, 0.0, -d));
+                g.try_normalize(1e-12)
+            };
+            let mut worst: Option<FlushBulge> = None;
+            let mut near: Vec<(usize, f64)> = Vec::with_capacity(fields.len());
+            for i in 0..counts.x {
+                for j in 0..counts.y {
+                    for l in 0..counts.z {
+                        let p = lo + nalgebra::Vector3::new(i as f64, j as f64, l as f64) * h;
+                        near.clear();
+                        for (n, f) in fields.iter().enumerate() {
+                            let e = sign(n) * f.distance(p);
+                            if e.abs() < h {
+                                near.push((n, e));
+                            }
+                        }
+                        if near.len() < 2 {
+                            continue;
+                        }
+                        for x in 0..near.len() {
+                            for y in x + 1..near.len() {
+                                let ((m, em), (n, _)) = (near[x], near[y]);
+                                let (Some(nm), Some(nn)) = (unit_normal(&fields[m], p), unit_normal(&fields[n], p)) else { continue };
+                                let (nm, nn) = (nm * sign(m), nn * sign(n));
+                                if nm.dot(&nn) < 0.995 {
+                                    continue;
+                                }
+                                // Onto the face, then out along it to where the blend's surface is.
+                                let on = p - nm * em;
+                                let e_blend = |t: f64| blend_sign * blended.distance(on + nm * t);
+                                if e_blend(0.0) >= 0.0 {
+                                    continue;
+                                }
+                                let (mut inside, mut outside) = (0.0, 2.0 * k);
+                                if e_blend(outside) < 0.0 {
+                                    inside = outside;
+                                } else {
+                                    for _ in 0..40 {
+                                        let mid = 0.5 * (inside + outside);
+                                        if e_blend(mid) < 0.0 { inside = mid } else { outside = mid }
+                                    }
+                                }
+                                if worst.as_ref().is_none_or(|w| inside > w.proud) {
+                                    worst = Some(FlushBulge { blend, faces: (operands[m], operands[n]), at: on, proud: inside, radius: k });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // A thousandth of a millimetre, or a hundredth of the radius: below either, the face
+            // is where it was asked to be as far as anything downstream can tell.
+            if let Some(w) = worst.filter(|w| w.proud > (1e-3f64).max(0.01 * k)) {
+                found.push(w);
+            }
+        }
+        found
     }
 }
 

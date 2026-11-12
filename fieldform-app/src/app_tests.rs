@@ -114,14 +114,17 @@ fn a_menu_setting_and_its_console_line_reach_the_same_state() {
     app.run_command("shortcuts");
     assert!(app.show_shortcuts);
 
-    // A command that is not on offer says why and does nothing: Flip section with no section.
-    assert!(app.sections.is_empty(), "no section until one is asked for");
-    app.invoke_command(by("view.section_flip"));
-    assert!(app.sections.is_empty(), "refused while there is no section");
+    // A command that is not on offer says why and does nothing: Paste here with nothing copied.
+    let curves = app.doc.curves.len();
+    app.invoke_command(by("edit.paste_here"));
+    assert_eq!(app.doc.curves.len(), curves, "refused while nothing is copied");
+    assert!(app.sections().is_empty(), "no section until one is asked for");
     app.invoke_command(by("view.section"));
-    assert_eq!(app.sections.len(), 1, "the first toggle makes one");
-    app.invoke_command(by("view.section_flip"));
-    assert!(app.sections[0].flipped);
+    assert_eq!(app.sections().len(), 1, "the first toggle makes one");
+    // Flip section is gone from the menus and the console (the owner, 2026-11-08): the row's
+    // own Flip is the one way to turn a section round.
+    assert!(commands::by_id("view.section_flip").is_none());
+    assert!(commands::console_words().iter().all(|(word, _)| word != "flipsection" && word != "flip"));
 }
 
 /// **A section is a view that stays on, and where it was, through the direct layer's edits**
@@ -143,8 +146,8 @@ fn the_section_stays_on_and_unmoved_while_a_cage_face_is_picked_and_moved() {
 
     app.invoke_command(by("view.section"));
     frame(&mut app, Vec::new());
-    assert!(app.sections[0].on && app.section_selected == Some(0), "turning it on reaches for it");
-    let placed = app.sections[0];
+    assert!(app.sections()[0].on && app.section_selected == Some(app.sections()[0].id), "turning it on reaches for it");
+    let placed = app.sections()[0];
 
     // A point on a face on screen, as the camera draws it: one the pick agrees is that face and
     // that no handle of the section's manipulator is over -- the handles sit at the scene's
@@ -181,7 +184,7 @@ fn the_section_stays_on_and_unmoved_while_a_cage_face_is_picked_and_moved() {
     };
     left_click(&mut app, at);
     assert!(app.selection.contains(Selection::Face(face)), "the click picked the face");
-    assert!(app.sections[0].on, "picking leaves the section on");
+    assert!(app.sections()[0].on, "picking leaves the section on");
     assert!(app.section_selected.is_none(), "and takes the handles from it");
 
     // Dragging the face: a press on what is picked, pulled across the view, let go.
@@ -200,47 +203,47 @@ fn the_section_stays_on_and_unmoved_while_a_cage_face_is_picked_and_moved() {
         before.iter().zip(&after).any(|(b, a)| (a - b).norm() > 1e-6),
         "the drag moved the face: {before:?} -> {after:?}"
     );
-    assert!(app.sections[0].on, "the cut is still on after the edit");
-    assert_eq!(app.sections[0].origin, placed.origin, "and the plane did not move with the face");
-    assert_eq!(app.sections[0].rotation, placed.rotation);
-    assert_eq!(app.sections[0].flipped, placed.flipped);
+    assert!(app.sections()[0].on, "the cut is still on after the edit");
+    assert_eq!(app.sections()[0].origin, placed.origin, "and the plane did not move with the face");
+    assert_eq!(app.sections()[0].rotation, placed.rotation);
+    assert_eq!(app.sections()[0].flipped, placed.flipped);
 
     // The row gives the handles back and moves nothing; the face is no longer picked.
     app.select_section(0);
-    assert!(app.sections[0].on && app.section_selected == Some(0));
+    assert!(app.sections()[0].on && app.section_selected == Some(app.sections()[0].id));
     assert!(app.selection.is_empty());
-    assert_eq!(app.sections[0].origin, placed.origin);
+    assert_eq!(app.sections()[0].origin, placed.origin);
     // And the switch is the only thing that turns it off: the row stays, with nothing to move.
     app.invoke_command(by("view.section"));
-    assert!(!app.sections[0].on && app.selected_section().is_none());
+    assert!(!app.sections()[0].on && app.selected_section().is_none());
     assert!(app.section_half_spaces().is_empty(), "nothing is cut while none is on");
     app.invoke_command(by("view.section"));
-    assert!(app.sections[0].on, "the toggle switches the current one back on, it makes no second");
-    assert_eq!(app.sections.len(), 1);
+    assert!(app.sections()[0].on, "the toggle switches the current one back on, it makes no second");
+    assert_eq!(app.sections().len(), 1);
 
     // A second section: on beside the first, numbered after it, and the manipulator's; both cut.
     app.invoke_command(by("view.section_new"));
-    assert_eq!(app.sections.len(), 2);
-    assert!(app.sections[0].on && app.sections[1].on, "several may be on at once");
+    assert_eq!(app.sections().len(), 2);
+    assert!(app.sections()[0].on && app.sections()[1].on, "several may be on at once");
     assert_eq!(app.section_half_spaces().len(), 2);
-    assert_eq!((app.sections[0].number, app.sections[1].number), (1, 2));
-    assert_eq!(app.section_selected, Some(1));
+    assert_eq!((app.sections()[0].number, app.sections()[1].number), (1, 2));
+    assert_eq!(app.section_selected, Some(app.sections()[1].id));
     // The first's row takes the handles and switches nothing off; its own switch switches it off.
     app.select_section(0);
-    assert!(app.sections[0].on && app.sections[1].on && app.section_selected == Some(0));
+    assert!(app.sections()[0].on && app.sections()[1].on && app.section_selected == Some(app.sections()[0].id));
     assert!(app.set_section_on(0, false));
-    assert!(!app.sections[0].on && app.sections[1].on);
+    assert!(!app.sections()[0].on && app.sections()[1].on);
     assert_eq!(app.section_half_spaces().len(), 1);
     // Delete, with a section's row selected, removes that section and nothing of the part; the
     // one behind it keeps its number, and the claim goes with the row.
     let bodies = app.part_graph().roots().len();
     app.invoke_command(by("edit.delete_body"));
-    assert_eq!(app.sections.len(), 1);
-    assert_eq!(app.sections[0].number, 2);
+    assert_eq!(app.sections().len(), 1);
+    assert_eq!(app.sections()[0].number, 2);
     assert!(app.section_selected.is_none());
     assert_eq!(app.part_graph().roots().len(), bodies, "the part is untouched");
     app.remove_section(0);
-    assert!(app.sections.is_empty() && app.section_half_spaces().is_empty());
+    assert!(app.sections().is_empty() && app.section_half_spaces().is_empty());
 }
 
 // ----------------------------------------------------------------------- the smoke scripts
@@ -1104,6 +1107,25 @@ fn the_palette_runs_what_it_finds_and_esc_runs_nothing() {
     assert_eq!(app.part_graph().nodes().count(), nodes, "and nothing ran");
 }
 
+/// **A click outside the palette puts it away and runs nothing**, as a click outside any popup
+/// does; a click on it keeps it open. It used to stay until Esc.
+#[test]
+fn a_click_outside_the_palette_closes_it() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    frame(&mut app, vec![key_event(egui::Key::Space), egui::Event::Text(" ".into())]);
+    type_text(&mut app, "sph");
+    assert!(app.palette.is_some());
+    let nodes = app.part_graph().nodes().count();
+    // Its own field, near the top of the screen's middle, keeps it.
+    let field = egui::pos2(700.0, 900.0 * 0.18 + 12.0);
+    left_click(&mut app, field);
+    assert!(app.palette.is_some(), "a click on the palette keeps it");
+    left_click(&mut app, egui::pos2(1300.0, 860.0));
+    assert!(app.palette.is_none(), "a click outside closes it");
+    assert_eq!(app.part_graph().nodes().count(), nodes, "and runs nothing");
+}
+
 // ------------------------------------------------------------------------------- the keys
 
 fn chord_event(key: egui::Key, ctrl: bool, shift: bool, alt: bool) -> egui::Event {
@@ -1248,7 +1270,7 @@ fn a_right_click_opens_the_marking_menu_and_a_slot_runs() {
     left_click(&mut app, at + egui::vec2(dx, dy));
     let palette = app.palette.as_ref().expect("More… opens the palette");
     let only = palette.only.as_ref().expect("narrowed to what is on offer");
-    assert!(only.contains(&"create.sphere") && !only.contains(&"view.section_flip"), "Flip section is not on offer");
+    assert!(only.contains(&"create.sphere") && !only.contains(&"edit.paste_here"), "Paste here is not on offer");
 
     frame(&mut app, vec![key_event(egui::Key::Escape)]);
     right_click(&mut app, at);
@@ -1849,6 +1871,38 @@ fn a_cut_through_line_across_the_view_cuts_the_cube_in_one_loop() {
     assert!(app.cage_tool.as_ref().is_some_and(|t| t.knife.through.is_none()), "the line is spent; the knife stays armed");
 }
 
+
+/// **Crease and Uncrease from the menu act on the selected edges and run as the lines that do
+/// it**, so the console shows what happened and a script can say it again; the edges stay picked
+/// for the next step, and with nothing picked the menu says so and does nothing.
+#[test]
+fn crease_and_uncrease_from_the_menu_run_as_lines_on_the_selected_edges() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cage");
+    frame(&mut app, Vec::new());
+    app.invoke_command(by("cage.crease"));
+    frame(&mut app, Vec::new());
+    assert!(!app.cage().has_creases(), "nothing picked, nothing creased");
+
+    let (a, b) = app.cage().edges().next().expect("a cube has edges");
+    app.selection.toggle(Selection::Edge(a, b));
+    app.invoke_command(by("cage.crease"));
+    frame(&mut app, Vec::new());
+    assert!(app.cage().is_creased(a, b));
+    let line = format!("crease edges={}-{}", a.index(), b.index());
+    assert_eq!(app.console_history.last(), Some(&line), "run as its line");
+    assert!(app.selection.parts().contains(&Selection::Edge(a, b)), "the edge stays picked");
+
+    app.invoke_command(by("cage.uncrease"));
+    frame(&mut app, Vec::new());
+    assert!(!app.cage().is_creased(a, b));
+    assert_eq!(app.console_history.last(), Some(&format!("uncrease edges={}-{}", a.index(), b.index())));
+    app.run_command("undo");
+    frame(&mut app, Vec::new());
+    assert!(app.cage().is_creased(a, b), "undo puts the crease back");
+}
+
 /// **The knife's panel: Pick type, Offset mode and Offset read and write the active point, Angle
 /// increment and Cut Through faces validate their words** (`cage-tools-instructions.md` §1). A
 /// typed offset moves the active point along its own edge from the end the tick marks, in mm or
@@ -2118,6 +2172,56 @@ fn a_zip_weld_closes_a_tube_in_one_step() {
     assert_eq!(app.cage().euler_characteristic(), 0, "a torus");
     app.run_command("undo");
     assert!(app.cage().is_open(), "one undo step puts the tube back");
+}
+
+/// **Space with an extrude pending keeps it and extrudes again from the new cap** (the owner,
+/// 2026-11-12), whether the cap was placed by a number set or by one typed straight into the panel;
+/// each lift is its own line and its own undo step, and with nothing pending Space is the palette.
+#[test]
+fn space_with_an_extrude_pending_keeps_it_and_extrudes_again() {
+    use fieldform_cage::FaceId;
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("cage");
+    frame(&mut app, Vec::new());
+    let cage = app.active_cage;
+    let before = app.doc.cage_body(cage).unwrap().mesh().clone();
+    let space = || vec![key_event(egui::Key::Space), egui::Event::Text(" ".into())];
+
+    app.selection.toggle(Selection::Face(FaceId::from_index(1)));
+    app.invoke_command(by("cage.extrude"));
+    frame(&mut app, Vec::new());
+    app.cage_panel_set("distance", "10").expect("a number");
+    frame(&mut app, Vec::new());
+    let echoed = app.echo_log.len();
+    frame(&mut app, space());
+    frame(&mut app, Vec::new());
+    assert!(app.palette.is_none(), "Space did not open the palette");
+    assert!(app.cage_session.is_some(), "the next lift is pending");
+    assert_eq!(&app.echo_log[echoed..], &["cageextrude faces=1 distance=10".to_string()], "the first was kept");
+
+    // Typed straight into the panel, then Space: the number is taken before the cap is kept.
+    let echoed = app.echo_log.len();
+    type_text(&mut app, "5");
+    frame(&mut app, space());
+    frame(&mut app, Vec::new());
+    assert!(app.palette.is_none());
+    assert!(app.cage_session.is_some(), "and the one after that");
+    assert_eq!(&app.echo_log[echoed..], &["cageextrude faces=1 distance=5".to_string()], "the second, at the number typed");
+
+    // The third never moved: Esc puts it back, and two extrusions of one face are eight walls.
+    frame(&mut app, vec![key(egui::Key::Escape)]);
+    assert!(app.cage_session.is_none());
+    assert_eq!(app.cage().face_count(), before.face_count() + 8);
+    assert!(!app.doc.cage_is_red(cage), "a solid");
+    app.run_command("undo");
+    app.run_command("undo");
+    frame(&mut app, Vec::new());
+    assert_eq!(app.doc.cage_body(cage).unwrap().geometry_fingerprint(), before.geometry_fingerprint(), "one undo step each");
+
+    app.selection.clear();
+    frame(&mut app, space());
+    assert!(app.palette.is_some(), "with nothing pending Space is the palette");
 }
 
 /// **An extrude's panel: a typed distance places the cap, a typed direction re-places it, and the
@@ -2981,4 +3085,1072 @@ fn every_example_runs_on_a_new_document() {
             assert!(out.ok, "the example for `{verb}` was refused at `{line}`: {:?}", out.error);
         }
     }
+}
+
+// ------------------------------------------------------------- a curve's row, and its joins
+
+/// Where `at` falls in the viewport, which must have been drawn and must show it.
+fn on_screen(app: &App, at: Point3<f64>) -> egui::Pos2 {
+    let rect = app.viewport_rect.expect("the viewport has been drawn");
+    let aspect = rect.width() / rect.height();
+    let pos = app.camera.project_to_screen(aspect, rect, at.cast::<f32>()).expect("in front of the camera");
+    assert!(rect.contains(pos), "{at} is off the viewport at {pos:?}");
+    pos
+}
+
+/// How tall `block`'s row is drawn, on a frame of its own.
+fn row_height(app: &mut App, block: Block) -> f32 {
+    app.drawn_frames.clear();
+    frame(app, Vec::new());
+    app.drawn_frames.iter().find(|f| f.block == block).map(|f| f.rect.height()).expect("the row was drawn")
+}
+
+/// Two lines apart, framed, and the list settled.
+fn two_lines(app: &mut App) -> (CurveId, CurveId) {
+    frame(app, Vec::new());
+    app.run_command("line p0=0,0,0 p1=40,0,0 'a'");
+    app.run_command("line p0=0,30,0 p1=40,30,0 'b'");
+    app.select_curve(app.curve_named("a").expect("a"));
+    app.run_command("frameall");
+    app.selected_curve = None;
+    for _ in 0..40 {
+        frame(app, Vec::new());
+    }
+    (app.curve_named("a").expect("a"), app.curve_named("b").expect("b"))
+}
+
+/// **A curve clicked in the viewport to be edited opens its own row** (the owner, 2026-11-05),
+/// not only the rows above it, which is all the list used to open for a selection. The other
+/// line's row is the control: drawn in the same list, never clicked, still closed.
+#[test]
+fn a_curve_clicked_in_the_viewport_opens_its_own_row() {
+    let Some(mut app) = headless_app() else { return };
+    let (a, b) = two_lines(&mut app);
+    let closed = row_height(&mut app, Block::Curve(a));
+    assert_eq!(closed, row_height(&mut app, Block::Curve(b)), "both rows start closed");
+    let at = on_screen(&app, Point3::new(20.0, 0.0, 0.0));
+    left_click(&mut app, at);
+    assert_eq!(app.selected_curve, Some(a), "the click picked the line");
+    for _ in 0..40 {
+        frame(&mut app, Vec::new());
+    }
+    assert!(row_height(&mut app, Block::Curve(a)) > closed + 10.0, "the clicked curve's row is open");
+    assert_eq!(row_height(&mut app, Block::Curve(b)), closed, "and the other's is not");
+}
+
+/// **A curve selected without a click on it leaves its row as it was**: a line typed, a paste,
+/// a script of twenty lines would otherwise leave every row it made open behind it.
+#[test]
+fn a_curve_selected_without_a_click_keeps_its_row_closed() {
+    let Some(mut app) = headless_app() else { return };
+    let (a, _) = two_lines(&mut app);
+    let closed = row_height(&mut app, Block::Curve(a));
+    app.select_curve(a);
+    for _ in 0..40 {
+        frame(&mut app, Vec::new());
+    }
+    assert_eq!(row_height(&mut app, Block::Curve(a)), closed);
+}
+
+/// **A join is two ends meeting with nothing else there, held by a point or not.** An open chain
+/// of three has two; a third end at a corner takes that corner's away; a closed loop of four has
+/// four before it is held and the same four after.
+#[test]
+fn a_join_is_two_ends_meeting_and_nothing_else_there() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for line in [
+        "line p0=0,0,0 p1=40,0,0 'a'",
+        "line p0=40,0,0 p1=40,20,0 'b'",
+        "line p0=40,20,0 p1=0,20,0 'c'",
+    ] {
+        app.run_command(line);
+    }
+    assert_eq!(joins_in(&app.doc).len(), 2, "an open chain of three");
+    app.run_command("line p0=40,0,0 p1=80,-10,0 'stray'");
+    assert_eq!(joins_in(&app.doc).len(), 1, "three ends at a corner are not a join");
+    app.run_command("delete 'stray'");
+    app.run_command("line p0=0,20,0 p1=0,0,0 'd'");
+    frame(&mut app, Vec::new());
+    let held = app.doc.parts[&app.active_part].graph.nodes().filter(|(_, n)| matches!(n, Node::Point { .. })).count();
+    assert_eq!(held, 4, "the closed loop was held with a point at each corner");
+    assert_eq!(joins_in(&app.doc).len(), 4, "and each corner is still a join");
+}
+
+/// An open chain: a line, then a cubic leaving its end at an angle.
+fn line_then_cubic(app: &mut App) -> (CurveId, CurveId) {
+    frame(app, Vec::new());
+    app.run_command("line p0=0,0,0 p1=40,0,0 'a'");
+    app.run_command("curve p=40,0,0;50,10,0;60,10,0;70,0,0 'b'");
+    (app.curve_named("a").expect("a"), app.curve_named("b").expect("b"))
+}
+
+fn joint_continuity(app: &App) -> Vec<fieldform_scene::JointContinuity> {
+    app.doc
+        .relations
+        .values()
+        .filter_map(|r| match r.relation {
+            fieldform_scene::Relation::Joint { continuity, .. } => Some(continuity),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **G1, G2 and G0 at an open chain's join, each one undo step** -- where joint points are never
+/// made, which is why the join is read from the ends and not from a point. G1 lays the cubic's
+/// second point on the line's direction; G2 its third as well, a line having no curvature to
+/// match; G0 takes the relation out and moves nothing back.
+#[test]
+fn an_open_chains_join_takes_g1_g2_and_g0_each_as_one_step() {
+    let Some(mut app) = headless_app() else { return };
+    let (a, b) = line_then_cubic(&mut app);
+    let point = |app: &App, i: usize| app.doc.curve(b).expect("b").control_points()[i];
+
+    app.run_command("continuity at=a.end g=1");
+    assert_eq!(joint_continuity(&app), vec![fieldform_scene::JointContinuity::G1]);
+    let master = app.doc.relations.values().find_map(|r| match r.relation {
+        fieldform_scene::Relation::Joint { master, .. } => Some(master.curve),
+        _ => None,
+    });
+    assert_eq!(master, Some(a), "the earlier curve leads");
+    assert!(point(&app, 1).y.abs() < 1e-9 && point(&app, 1).x > 40.0, "tangent: {}", point(&app, 1));
+    assert!(point(&app, 2).y.abs() > 1.0, "G1 leaves the third point alone");
+
+    app.run_command("continuity at=b.start g=2");
+    assert_eq!(joint_continuity(&app), vec![fieldform_scene::JointContinuity::G2], "replaced, not added");
+    assert!(point(&app, 2).y.abs() < 1e-9, "no curvature off a line: {}", point(&app, 2));
+
+    let moved = point(&app, 2);
+    app.run_command("continuity at=a.end g=0");
+    assert!(joint_continuity(&app).is_empty(), "G0 is no relation");
+    assert_eq!(point(&app, 2), moved, "and breaking one moves nothing");
+
+    app.run_command("undo");
+    assert_eq!(joint_continuity(&app), vec![fieldform_scene::JointContinuity::G2], "one undo, one step");
+    app.run_command("undo");
+    assert_eq!(joint_continuity(&app), vec![fieldform_scene::JointContinuity::G1]);
+}
+
+/// **A continuity is refused, by name, where there is no join**: an end that meets nothing, and
+/// a corner where three ends meet. Nothing is made either time.
+#[test]
+fn continuity_is_refused_where_two_ends_do_not_meet() {
+    let Some(mut app) = headless_app() else { return };
+    line_then_cubic(&mut app);
+    let warned = app.console_warnings;
+    app.run_command("continuity at=a.start g=1");
+    assert_eq!(app.console_warnings, warned + 1, "a's start meets nothing");
+    app.run_command("line p0=40,0,0 p1=40,-30,0 'stray'");
+    let warned = app.console_warnings;
+    app.run_command("continuity at=a.end g=1");
+    assert_eq!(app.console_warnings, warned + 1, "three ends meet there");
+    app.run_command("continuity at=a.end g=3");
+    assert_eq!(app.console_warnings, warned + 2, "G3 is not on offer");
+    assert!(joint_continuity(&app).is_empty());
+}
+
+
+
+/// An open chain of two cubics, meeting at an angle at 40,0,0: either can lead the other.
+fn two_cubics(app: &mut App) -> (CurveId, CurveId) {
+    frame(app, Vec::new());
+    app.run_command("curve p=0,0,0;10,-10,0;30,-20,0;40,0,0 'a'");
+    app.run_command("curve p=40,0,0;50,10,0;60,10,0;70,0,0 'b'");
+    (app.curve_named("a").expect("a"), app.curve_named("b").expect("b"))
+}
+
+/// The open chain framed, its join right-clicked and North picked: the list of which curve leads.
+fn open_lead_list(app: &mut App) -> (CurveId, CurveId, egui::Pos2) {
+    let (a, b) = two_cubics(app);
+    app.select_curve(a);
+    app.run_command("frameall");
+    app.selected_curve = None;
+    for _ in 0..10 {
+        frame(app, Vec::new());
+    }
+    let at = on_screen(app, Point3::new(40.0, 0.0, 0.0));
+    frame(app, vec![egui::Event::PointerMoved(at)]);
+    right_click(app, at);
+    let menu = app.marking.as_ref().expect("the right-click opened a menu");
+    assert_eq!(menu.subject, marking::Subject::Joint, "the join's ring, with nothing selected");
+    assert!(menu.join.is_some_and(|j| j.iter().any(|e| e.curve == a)), "on the join of a and b");
+    let (dx, dy) = marking::slot_offset(0, 84.0);
+    left_click(app, at + egui::vec2(dx, dy));
+    (a, b, at)
+}
+
+/// Walks the pointer down the lead list and says where each row's preview showed, by the curve
+/// that leads in it, in the order met.
+fn lead_rows(app: &mut App) -> Vec<(CurveId, egui::Pos2)> {
+    // A frame first, so the rect read is where the list is drawn now and not where it last was.
+    frame(app, Vec::new());
+    let area = app.egui_ctx.memory(|m| m.area_rect(egui::Id::new("join lead list"))).expect("the list is drawn");
+    let mut rows: Vec<(CurveId, egui::Pos2)> = Vec::new();
+    let mut y = area.top();
+    while y < area.bottom() {
+        // Down the middle: the rows' left edge is inside the frame's margin.
+        let p = egui::pos2(area.center().x, y);
+        frame(app, vec![egui::Event::PointerMoved(p)]);
+        if let Some(fieldform_scene::Relation::Joint { master, .. }) = app.join_preview.as_ref().map(|p| p.relation.clone())
+            && rows.last().is_none_or(|(m, _)| *m != master.curve)
+        {
+            rows.push((master.curve, p));
+        }
+        y += 2.0;
+    }
+    rows
+}
+
+/// **G1 on a join asks which curve leads, and shows each before it is kept** (the owner,
+/// 2026-11-07: "as u hover over one it automatically changes so u can see the effect of your
+/// choice in real time"). Hovering a row moves the follower's points with no relation stored and
+/// nothing on the undo stack; leaving the rows puts them back; a click keeps the one under it as
+/// one step, echoed with its lead so it replays.
+#[test]
+fn g1_on_a_join_lists_each_lead_shows_it_on_hover_and_keeps_the_one_clicked() {
+    let Some(mut app) = headless_app() else { return };
+    let (a, b, _) = open_lead_list(&mut app);
+    assert_eq!(app.marking.as_ref().and_then(|m| m.lead_for), Some(fieldform_scene::JointContinuity::G1));
+    assert!(joint_continuity(&app).is_empty(), "nothing is kept by opening the list");
+    let points = |app: &App, id: CurveId| app.doc.curve(id).expect("curve").control_points().to_vec();
+    let (a_before, b_before, history) = (points(&app, a), points(&app, b), app.stack.history());
+
+    let rows = lead_rows(&mut app);
+    assert_eq!(rows.iter().map(|(m, _)| *m).collect::<Vec<_>>(), vec![a, b], "a row per curve, the earlier first");
+    let (_, a_leads) = rows[0];
+    frame(&mut app, vec![egui::Event::PointerMoved(a_leads)]);
+    assert_ne!(points(&app, b), b_before, "a leading: b turns to leave along a, shown");
+    assert_eq!(points(&app, a), a_before, "and a stays");
+    assert!(joint_continuity(&app).is_empty() && app.stack.history() == history, "shown, not kept");
+    let (_, b_leads) = rows[1];
+    frame(&mut app, vec![egui::Event::PointerMoved(b_leads)]);
+    assert_eq!(points(&app, b), b_before, "b leading: b is as it was");
+    assert_ne!(points(&app, a), a_before, "and a turns to meet it");
+
+    let area = app.egui_ctx.memory(|m| m.area_rect(egui::Id::new("join lead list"))).expect("still open");
+    frame(&mut app, vec![egui::Event::PointerMoved(area.right_bottom() + egui::vec2(40.0, 40.0))]);
+    assert!(app.join_preview.is_none(), "off the rows, nothing is shown");
+    assert_eq!((points(&app, a), points(&app, b)), (a_before.clone(), b_before.clone()), "and everything is back");
+
+    left_click(&mut app, a_leads);
+    assert!(app.marking.is_none() && app.join_preview.is_none(), "kept, and the list is gone");
+    let kept: Vec<_> = app.doc.relations.values().map(|r| r.relation.clone()).collect();
+    assert!(
+        matches!(kept.as_slice(), [fieldform_scene::Relation::Joint { master, continuity: fieldform_scene::JointContinuity::G1, .. }] if master.curve == a),
+        "{kept:?}"
+    );
+    assert_ne!(points(&app, b), b_before, "kept as it was shown");
+    let echoed = app.echo_log.iter().rev().find(|l| l.starts_with("continuity")).cloned().expect("echoed");
+    assert_eq!(echoed, "continuity at=\"a.end\" g=1 lead=\"a\"");
+    app.run_command("undo");
+    assert!(joint_continuity(&app).is_empty(), "one undo, one step");
+    assert_eq!((points(&app, a), points(&app, b)), (a_before, b_before));
+
+    let Some(mut replay) = headless_app() else { return };
+    two_cubics(&mut replay);
+    replay.run_command(&echoed);
+    assert_eq!(joint_continuity(&replay), vec![fieldform_scene::JointContinuity::G1], "the echo replays");
+}
+
+/// **Esc leaves the join as it was**, with a row hovered and its preview up; and so does an undo
+/// pressed with the list open, which acts on the document rather than on the preview.
+#[test]
+fn leaving_the_lead_list_puts_back_what_its_preview_moved() {
+    let Some(mut app) = headless_app() else { return };
+    let (a, b, _) = open_lead_list(&mut app);
+    let points = |app: &App, id: CurveId| app.doc.curve(id).expect("curve").control_points().to_vec();
+    let before = (points(&app, a), points(&app, b));
+    let rows = lead_rows(&mut app);
+    frame(&mut app, vec![egui::Event::PointerMoved(rows[1].1)]);
+    assert!(app.join_preview.is_some());
+    frame(&mut app, vec![key_event(egui::Key::Escape)]);
+    assert!(app.marking.is_none() && app.join_preview.is_none());
+    assert_eq!((points(&app, a), points(&app, b)), before, "Esc put it back");
+    assert!(joint_continuity(&app).is_empty());
+
+    let (a, b, _) = (a, b, open_lead_list_again(&mut app));
+    let rows = lead_rows(&mut app);
+    frame(&mut app, vec![egui::Event::PointerMoved(rows[0].1)]);
+    assert!(app.join_preview.is_some());
+    app.invoke_command(by("edit.undo"));
+    frame(&mut app, Vec::new());
+    assert!(app.join_preview.is_none(), "the undo ended the preview");
+    assert!(app.doc.curve(b).is_none() || points(&app, b) == before.1, "and undid the curve, not the preview");
+    let _ = a;
+}
+
+/// The ring opened again on the same chain, North picked.
+fn open_lead_list_again(app: &mut App) -> egui::Pos2 {
+    let at = on_screen(app, Point3::new(40.0, 0.0, 0.0));
+    frame(app, vec![egui::Event::PointerMoved(at)]);
+    right_click(app, at);
+    let (dx, dy) = marking::slot_offset(0, 84.0);
+    left_click(app, at + egui::vec2(dx, dy));
+    assert!(app.marking.as_ref().is_some_and(|m| m.lead_for.is_some()));
+    at
+}
+
+/// **A lead the kernel refuses is listed greyed, never shown**: a straight line cannot turn to
+/// follow a curve at G1, so on a line meeting a cubic only the line can lead, and hovering the
+/// other row moves nothing.
+#[test]
+fn a_refused_lead_is_listed_but_never_previewed() {
+    let Some(mut app) = headless_app() else { return };
+    let (a, b) = line_then_cubic(&mut app);
+    let join = joins_in(&app.doc)[0].ends;
+    let b_leads = fieldform_scene::Relation::Joint {
+        master: if join[0].curve == b { join[0] } else { join[1] },
+        slave: if join[0].curve == a { join[0] } else { join[1] },
+        continuity: fieldform_scene::JointContinuity::G1,
+    };
+    assert!(fieldform_scene::relation::refuse_reason_replacing(&app.doc, &b_leads, None).is_err(), "the line cannot follow");
+    app.select_curve(a);
+    app.run_command("frameall");
+    app.selected_curve = None;
+    for _ in 0..10 {
+        frame(&mut app, Vec::new());
+    }
+    open_lead_list_again(&mut app);
+    let rows = lead_rows(&mut app);
+    assert_eq!(rows.iter().map(|(m, _)| *m).collect::<Vec<_>>(), vec![a], "only the line can lead");
+    // And the reason is drawn under the greyed row, not only on its hover.
+    let why = app.joint_refusal(&b_leads, None).expect("refused");
+    let drawn = texts_drawn(&mut app, Vec::new());
+    assert!(drawn.iter().any(|(t, _)| t.starts_with(&why[..why.len().min(24)])), "{why:?} is on screen: {:?}", drawn.iter().map(|(t, _)| t).collect::<Vec<_>>());
+}
+
+/// **A joint refused for want of a control point says what degree frees one** (reported
+/// 2026-11-11: three cubics round a loop, the last joint "refuses to go anything other than G0").
+/// With G1 from one to two and G2 from two to three, the closing join is refused both ways: one
+/// following three would make a ring, and three following one wants the third point its G2 owns.
+/// The second says to raise three to degree 4, and at degree 4 the G1 is made.
+#[test]
+fn a_joint_refused_for_a_shared_point_names_the_degree_that_frees_one() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for line in [
+        "curve p=0,0,0;20,-10,0;40,-10,0;60,0,0 'one'",
+        "curve p=60,0,0;70,20,0;60,40,0;40,60,0 'two'",
+        "curve p=40,60,0;20,60,0;5,40,0;0,0,0 'three'",
+        "continuity at=one.end g=1 lead=one",
+        "continuity at=two.end g=2 lead=two",
+    ] {
+        app.run_command(line);
+    }
+    let relations = app.doc.relations.len();
+    app.run_command("continuity at=three.end g=1");
+    assert_eq!(app.doc.relations.len(), relations, "refused both ways");
+    let said = last_said(&app);
+    assert!(said.contains("raise three to degree 4"), "{said}");
+    assert!(said.contains("cannot follow"), "both reasons are said: {said}");
+    app.run_command("degree degree=4 target=three");
+    app.run_command("continuity at=three.end g=1 lead=one");
+    assert_eq!(app.doc.relations.len(), relations + 1, "{}", last_said(&app));
+    // G2 at both ends of one curve wants degree 5, and says so.
+    app.run_command("continuity at=three.end g=2 lead=one");
+    assert!(last_said(&app).contains("raise three to degree 5"), "{}", last_said(&app));
+}
+
+/// Two cubics framed, the first clicked, then dragged by its middle across the view and let go.
+/// Where the second's start and the first's end ended up.
+fn drag_the_first_cubic(app: &mut App, a: CurveId, b: CurveId) -> (Point3<f64>, Point3<f64>) {
+    app.select_curve(a);
+    app.run_command("frameall");
+    for _ in 0..10 {
+        frame(app, Vec::new());
+    }
+    // a at t = 1/2: (0 + 3*10 + 3*30 + 40)/8, (0 - 30 - 60 + 0)/8.
+    let at = on_screen(app, Point3::new(20.0, -11.25, 0.0));
+    left_click(app, at);
+    assert_eq!(app.selected_curve, Some(a));
+    frame(app, vec![press(at, egui::PointerButton::Primary, true)]);
+    let mut pos = at;
+    for _ in 0..6 {
+        pos += egui::vec2(0.0, -15.0);
+        frame(app, vec![egui::Event::PointerMoved(pos)]);
+    }
+    frame(app, vec![press(pos, egui::PointerButton::Primary, false)]);
+    frame(app, Vec::new());
+    let end_of_a = *app.doc.curve(a).expect("a").control_points().last().expect("points");
+    let start_of_b = app.doc.curve(b).expect("b").control_points()[0];
+    (end_of_a, start_of_b)
+}
+
+/// **Ends linked by a continuity stay together when either curve is dragged, until the join is
+/// broken** (the owner, 2026-11-07: "the linked points should stay magnetically connected until u
+/// RMB click and break it"). Dragging the first of two cubics set G1 carries the second's start
+/// with it and keeps the tangent; the same drag with nothing set, and after Break, parts them.
+#[test]
+fn ends_linked_by_a_continuity_move_together_until_the_join_is_broken() {
+    let tangent_kept = |app: &App, a: CurveId, b: CurveId| {
+        let pa = app.doc.curve(a).expect("a").control_points().to_vec();
+        let pb = app.doc.curve(b).expect("b").control_points().to_vec();
+        let (into, out) = (pa[3] - pa[2], pb[1] - pb[0]);
+        into.normalize().dot(&out.normalize()) > 1.0 - 1e-9
+    };
+
+    // Linked: G1 holds the ends, and the drag takes both.
+    let Some(mut app) = headless_app() else { return };
+    let (a, b) = two_cubics(&mut app);
+    app.run_command("continuity at=a.end g=1");
+    let (end_of_a, start_of_b) = drag_the_first_cubic(&mut app, a, b);
+    assert!((end_of_a - Point3::new(40.0, 0.0, 0.0)).norm() > 1.0, "the drag moved a: {end_of_a}");
+    assert!((end_of_a - start_of_b).norm() < 1e-9, "b's start came with it: {end_of_a} {start_of_b}");
+    assert!(tangent_kept(&app, a, b), "and still leaves along a");
+
+    // The control: the same drag on ends that only touch parts them.
+    let Some(mut loose) = headless_app() else { return };
+    let (a, b) = two_cubics(&mut loose);
+    let (end_of_a, start_of_b) = drag_the_first_cubic(&mut loose, a, b);
+    assert!((end_of_a - start_of_b).norm() > 1.0, "nothing linked them: {end_of_a} {start_of_b}");
+
+    // Broken: set, then let go, then dragged.
+    let Some(mut broken) = headless_app() else { return };
+    let (a, b) = two_cubics(&mut broken);
+    broken.run_command("continuity at=a.end g=2");
+    broken.run_command("continuity at=b.start -break");
+    assert!(joint_continuity(&broken).is_empty(), "Break took the continuity out");
+    let points = broken.part_graph().nodes().filter(|(_, n)| matches!(n, Node::Point { .. })).count();
+    assert_eq!(points, 0, "and the point that held them");
+    let (end_of_a, start_of_b) = drag_the_first_cubic(&mut broken, a, b);
+    assert!((end_of_a - start_of_b).norm() > 1.0, "broken, they part: {end_of_a} {start_of_b}");
+}
+
+/// **G0 holds too, since that is what G0 is**, as one undo step, and the point it holds the join
+/// with takes no row of its own in the list: it is the join's, worked from the join's ring.
+#[test]
+fn g0_holds_a_join_with_a_point_that_takes_no_row() {
+    let Some(mut app) = headless_app() else { return };
+    let (a, b) = two_cubics(&mut app);
+    let history = app.stack.history();
+    app.run_command("continuity at=a.end g=0");
+    let end = |app: &App, c: CurveId, i: usize| app.doc.curve(c).expect("curve").placed_on(i);
+    let n = app.doc.curve(a).expect("a").control_points().len();
+    assert!(end(&app, a, n - 1).is_some() && end(&app, a, n - 1) == end(&app, b, 0), "both ends on one point");
+    assert!(joint_continuity(&app).is_empty(), "positional only");
+    let point = end(&app, a, n - 1).expect("held");
+    let joints = crate::blocks::list::held_joint_points(&app.doc, app.active_part, &app.profiles);
+    assert!(joints.contains(&point), "the join's point is not listed as a block");
+    app.run_command("undo");
+    assert_eq!(app.stack.history().0, history.0, "one step");
+    assert!(end(&app, a, n - 1).is_none() && end(&app, b, 0).is_none());
+}
+
+
+/// Every piece of text one frame drew, with where it was drawn: a frame like [`frame`], with the
+/// shapes kept rather than dropped, so a test can find a word on screen and click it.
+fn texts_drawn(app: &mut App, events: Vec<egui::Event>) -> Vec<(String, egui::Rect)> {
+    let ctx = app.egui_ctx.clone();
+    let mut input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))),
+        events,
+        ..Default::default()
+    };
+    app.raw_input_hook(&ctx, &mut input);
+    let mut eframe_frame = eframe::Frame::_new_kittest();
+    let out = ctx.run_ui(input, |ui| app.ui(ui, &mut eframe_frame));
+    fn walk(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::Shape::Text(t) => out.push((t.galley.text().to_string(), t.visual_bounding_rect())),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    for clipped in &out.shapes {
+        walk(&clipped.shape, &mut found);
+    }
+    found
+}
+
+/// **An offset lists no point, and its filled field clears from a right-click** (the owner,
+/// 2026-11-07: "things like the offset tool should not list items like points ... as input", and
+/// "u should be able to RMB click on it and CLEAR should be an option"). The point is in the part
+/// and a sphere is listed beside it, so the list is not simply empty.
+#[test]
+fn an_offsets_field_lists_no_point_and_clears_from_a_right_click() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for line in ["sphere 'ball'", "sphere 'other' centre=40,0,0", "point at=80,0,0", "offset target=ball distance=2 'off'"] {
+        app.run_command(line);
+    }
+    let off = app.node_named("off").expect("the offset");
+    let listed: Vec<String> = crate::suggested(&app.operand_offers(off, &app.operand_choices(off)), "", false)
+        .into_iter()
+        .map(|(_, label, _)| label)
+        .collect();
+    assert!(listed.iter().any(|l| l == "other"), "a solid is listed: {listed:?}");
+    assert!(!listed.iter().any(|l| l.starts_with("Point")), "and no point: {listed:?}");
+
+    // The ball selected opens the offset's row above it, where its field is drawn.
+    app.select_body(app.node_named("ball"));
+    for _ in 0..40 {
+        frame(&mut app, Vec::new());
+    }
+    let texts = texts_drawn(&mut app, Vec::new());
+    let of = texts.iter().find(|(t, _)| t == "Of:").map(|(_, r)| *r).expect("the offset's Of: row is drawn");
+    let field = egui::pos2(of.right() + 40.0, of.center().y);
+    frame(&mut app, vec![egui::Event::PointerMoved(field)]);
+    right_click(&mut app, field);
+    let before: usize = texts.iter().filter(|(t, _)| t == "Clear").count();
+    let after = texts_drawn(&mut app, Vec::new());
+    let menu_clear = after
+        .iter()
+        .filter(|(t, _)| t == "Clear")
+        .map(|(_, r)| *r)
+        .max_by(|a, b| a.top().total_cmp(&b.top()))
+        .expect("Clear on the menu");
+    assert_eq!(after.iter().filter(|(t, _)| t == "Clear").count(), before + 1, "the right-click added a Clear");
+    left_click(&mut app, menu_clear.center());
+    let Some(Node::Offset { input, .. }) = app.part_graph().node(off) else { panic!("the offset is gone") };
+    assert!(input.is_empty(), "the slot is empty");
+    assert!(app.part_graph().node(app.node_named("ball").expect("ball")).is_some(), "and the ball is kept");
+}
+
+/// **The console dragged as small as it goes keeps its log off the entry field** (reported
+/// 2026-11-07: "the console text overlays the input field and its not legible"). The log's newest
+/// line is still drawn, and nothing of it reaches the field.
+#[test]
+fn the_console_dragged_to_its_smallest_keeps_its_log_off_the_entry_field() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for i in 0..30 {
+        app.say(format!("line {i} of the log"));
+    }
+    let find = |texts: &[(String, egui::Rect)], t: &str| texts.iter().find(|(s, _)| s == t).map(|(_, r)| *r);
+    let before = texts_drawn(&mut app, Vec::new());
+    let heading = find(&before, "Console").expect("the console heading");
+    // The divider is the panel's top edge, a little above the heading: try down from there until
+    // a drag to the bottom of the window moves the heading.
+    let mut dragged = false;
+    for lift in (4..30).step_by(2) {
+        let grip = egui::pos2(heading.left() + 40.0, heading.top() - lift as f32);
+        frame(&mut app, vec![egui::Event::PointerMoved(grip)]);
+        frame(&mut app, vec![press(grip, egui::PointerButton::Primary, true)]);
+        for y in [grip.y + 100.0, grip.y + 300.0, 899.0] {
+            frame(&mut app, vec![egui::Event::PointerMoved(egui::pos2(grip.x, y))]);
+        }
+        frame(&mut app, vec![press(egui::pos2(grip.x, 899.0), egui::PointerButton::Primary, false)]);
+        frame(&mut app, Vec::new());
+        let now = find(&texts_drawn(&mut app, Vec::new()), "Console").expect("still drawn");
+        if now.top() > heading.top() + 20.0 {
+            dragged = true;
+            break;
+        }
+    }
+    assert!(dragged, "found the console's divider and dragged it down");
+    let texts = texts_drawn(&mut app, Vec::new());
+    let field = find(&texts, "command").expect("the entry field's hint");
+    let log: Vec<&(String, egui::Rect)> = texts.iter().filter(|(t, _)| t.starts_with("line ")).collect();
+    assert!(log.iter().any(|(t, _)| t == "line 29 of the log"), "the newest line is still shown: {log:?}");
+    for (t, r) in &log {
+        assert!(r.bottom() <= field.top() + 0.5, "{t:?} at {r:?} runs onto the field at {field:?}");
+    }
+}
+
+// ------------------------------------------------------------------------ the section block
+
+/// **A section is a block of the document** (the owner, 2026-11-07: "it should be a block"):
+/// made from the console where it is told, every change one undo step, and saved with the file,
+/// so it is there, where it was, when the file is opened again.
+#[test]
+fn a_section_is_saved_with_the_document_and_each_change_is_one_undo_step() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("sphere radius=20 'ball'");
+    app.run_command("addsection origin=0,0,10 turn=90,0,0");
+    let made = app.sections();
+    assert_eq!(made.len(), 1);
+    assert!((made[0].origin - Point3::new(0.0, 0.0, 10.0)).norm() < 1e-9, "where it was told");
+    let n = made[0].normal();
+    assert!((n - Vector3::new(0.0, -1.0, 0.0)).norm() < 1e-9, "turned 90 about X, +Z faces -Y: {n}");
+    assert_eq!(app.section_half_spaces().len(), 1, "and it cuts");
+
+    app.flip_section_at(0);
+    assert!(app.sections()[0].flipped);
+    app.run_command("undo");
+    assert!(!app.sections()[0].flipped, "a flip is one step");
+    app.run_command("section");
+    assert!(!app.sections()[0].on);
+    app.run_command("undo");
+    assert!(app.sections()[0].on, "so is the switch");
+
+    let dir = std::env::temp_dir().join(format!("fieldform-section-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join("cut.fform");
+    app.run_command(&format!("saveas file=\"{}\"", file.to_string_lossy().replace('\\', "/")));
+    app.run_command("new");
+    assert!(app.sections().is_empty(), "a new document has none");
+    app.run_command(&format!("open file=\"{}\"", file.to_string_lossy().replace('\\', "/")));
+    let back = app.sections();
+    assert_eq!(back.len(), 1, "it came back with the file");
+    assert!((back[0].origin - made[0].origin).norm() < 1e-9 && (back[0].normal() - n).norm() < 1e-9);
+    assert!(back[0].on);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    app.run_command("addsection");
+    assert_eq!(app.sections().len(), 2);
+    app.run_command("undo");
+    assert_eq!(app.sections().len(), 1, "making one is one step");
+}
+
+/// **A section is placed the way a plane block is** (the owner, 2026-11-07: "same machinery as the
+/// plane block"): its origin is a `Place`, so it can sit on a point and goes where the point goes,
+/// read through the same function a plane's origin is read through.
+#[test]
+fn a_section_can_sit_on_a_point_and_follows_it() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("point at=5,6,7 'pin'");
+    app.run_command("addsection");
+    let pin = app.node_named("pin").expect("the point");
+    let id = app.sections()[0].id;
+    let sections: Vec<fieldform_scene::SectionCut> = app
+        .doc
+        .sections
+        .iter()
+        .map(|c| fieldform_scene::SectionCut { origin: fieldform_scene::Place::From { node: pin }, ..*c })
+        .collect();
+    app.set_sections(sections, Some(id));
+    assert!((app.sections()[0].origin - Point3::new(5.0, 6.0, 7.0)).norm() < 1e-9, "on the point");
+    app.run_command("set pin.at=1,2,3");
+    assert!((app.sections()[0].origin - Point3::new(1.0, 2.0, 3.0)).norm() < 1e-9, "and where it went");
+}
+
+/// **A dragged section is written where the drag left it**: turned and moved by the handles, the
+/// record it is put back into reads as the same plane, which is what makes the drag's undo entry
+/// land the section where it was dropped rather than somewhere near.
+#[test]
+fn a_dragged_section_is_written_where_the_drag_left_it() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    app.run_command("addsection origin=1,2,3 turn=10,20,30");
+    let resolved = app.sections()[0];
+    let record = app.doc.sections[0];
+    let pivot = Point3::new(4.0, -1.0, 2.0);
+    let turned = resolved.with(gizmo::Motion::Rotate { axis: Vector3::new(1.0, 1.0, 0.0), degrees: 37.0 }, pivot);
+    let moved = turned.with(gizmo::Motion::Translate(Vector3::new(3.0, 0.0, -2.0)), pivot);
+    let back = app.resolve_section(&crate::placed_section(record, &moved));
+    assert!((back.origin - moved.origin).norm() < 1e-9, "{} vs {}", back.origin, moved.origin);
+    assert!((back.normal() - moved.normal()).norm() < 1e-9, "{} vs {}", back.normal(), moved.normal());
+    assert!(back.rotation.angle_to(&moved.rotation) < 1e-9, "the whole frame, not only the normal");
+}
+
+/// **Every number a section takes is a key of `addsection`**, or recorded as one it does not read,
+/// with why: the drift test for a block that is a record of the document rather than a node.
+#[test]
+fn every_field_of_a_section_is_a_key_addsection_reads_or_a_recorded_gap() {
+    use std::collections::BTreeSet;
+    let cut = fieldform_scene::SectionCut {
+        id: fieldform_scene::SectionCutId::new(),
+        number: 1,
+        part: fieldform_scene::PartId::new(),
+        on: true,
+        origin: fieldform_scene::Place::At([ParamRef::Literal(0.0); 3]),
+        turn: fieldform_scene::Turn::default(),
+        flipped: true,
+    };
+    let json = serde_json::to_value(cut).unwrap();
+    let fields: BTreeSet<String> = json.as_object().unwrap().keys().cloned().collect();
+    let verb = console_keys::verb("view.section_new").expect("addsection declares its keys");
+    let console_keys::Keys::Declared { reads, not_read } = &verb.keys else { panic!("declared") };
+    let covered: BTreeSet<&str> = reads
+        .iter()
+        .flat_map(|k| k.covers.iter().copied())
+        .chain(not_read.iter().map(|(f, _)| *f))
+        .collect();
+    for field in &fields {
+        assert!(covered.contains(field.as_str()), "a section's field {field:?} is reached by no `addsection` key and not recorded as unread");
+    }
+}
+
+/// **A left click away from the palette closes it, having run nothing** (the owner, 2026-11-07:
+/// Space's command input "should disappear" when you click away). The control: a click on the
+/// palette's own field leaves it open.
+#[test]
+fn a_click_away_from_the_palette_closes_it_and_runs_nothing() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    frame(&mut app, vec![key_event(egui::Key::Space), egui::Event::Text(" ".into())]);
+    type_text(&mut app, "sph");
+    frame(&mut app, Vec::new());
+    assert!(app.palette.is_some(), "Space opened it");
+    let area = app.egui_ctx.memory(|m| m.area_rect(egui::Id::new("command palette area"))).expect("drawn");
+    left_click(&mut app, area.left_top() + egui::vec2(40.0, 16.0));
+    assert!(app.palette.is_some(), "a click on its own field keeps it");
+    let nodes = app.part_graph().nodes().count();
+    left_click(&mut app, egui::pos2(area.center().x, area.bottom() + 120.0));
+    assert!(app.palette.is_none(), "a click away closes it");
+    assert_eq!(app.part_graph().nodes().count(), nodes, "and nothing ran");
+}
+
+/// **A new document starts in chrome under the Horizon environment** (the owner, 2026-11-07), on
+/// launch and from File › New alike; and **a file saved without a material opens as it was**, in the
+/// neutral preset, because the choice is written into the new part rather than into what no
+/// material means.
+#[test]
+fn a_new_document_starts_in_chrome_under_horizon_and_an_older_file_keeps_its_look() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    let look = |app: &App| app.doc.parts.get(&app.active_part).and_then(|p| p.material.as_ref()).and_then(|m| m.preset_name());
+    assert_eq!(app.environment, fieldform_gpu::EnvironmentChoice::Horizon, "on launch");
+    assert_eq!(look(&app), Some("Chrome"));
+    app.run_command("material preset=glass");
+    assert_eq!(look(&app), Some("Glass"), "changed, so the next line has something to start over from");
+    // Saved as far as the test is concerned, so `new` has nothing to ask about.
+    app.mark_saved();
+    app.run_command("new");
+    assert_eq!(look(&app), Some("Chrome"), "File › New starts in chrome again");
+
+    let dir = std::env::temp_dir().join(format!("fieldform-look-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join("older.fform");
+    let older = fieldform_scene::Document::with_cage(fieldform_cage::Cage::cube_of(10.0));
+    assert!(older.parts.values().all(|p| p.material.is_none()), "written with no material");
+    fieldform_io::save_new(&older, &file).expect("writes");
+    app.run_command(&format!("open file=\"{}\"", file.to_string_lossy().replace('\\', "/")));
+    assert!(
+        app.doc.parts.get(&app.active_part).is_some_and(|p| p.material.is_none()),
+        "an older file keeps the neutral look it was saved with"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **The menus that read the part sit in Evaluate** (the owner, 2026-11-08): Section, New section,
+/// Measure, Thickness and the curvature comb, and none of them in View any more, which is about
+/// how things look. Flip section is gone from every menu.
+#[test]
+fn the_evaluate_menu_holds_the_sections_the_measures_and_the_comb() {
+    let bar = commands::menu_bar();
+    let ids = |title: &str| -> Vec<&'static str> {
+        let (_, items) = bar.iter().find(|(t, _)| *t == title).expect("the menu is there");
+        commands::menu_commands(items).iter().map(|c| c.id).collect()
+    };
+    let evaluate = ids("Evaluate");
+    for id in ["view.section", "view.section_new", "view.measure", "view.thickness", "evaluate.comb"] {
+        assert!(evaluate.contains(&id), "{id} is in Evaluate: {evaluate:?}");
+        assert!(!ids("View").contains(&id), "{id} has left View");
+    }
+    assert!(
+        bar.iter().all(|(_, items)| !commands::menu_commands(items).iter().any(|c| c.id == "view.section_flip")),
+        "no Flip section in any menu"
+    );
+}
+
+/// A curve, in a part with an open cubic `bend` and nothing else.
+fn app_with_a_bend() -> Option<App> {
+    let mut app = headless_app()?;
+    frame(&mut app, Vec::new());
+    app.run_command("curve p=0,0,0;10,15,0;30,15,0;40,0,0 'bend'");
+    frame(&mut app, Vec::new());
+    Some(app)
+}
+
+/// The console's last few lines, newest first, for a failure to say what the app said.
+fn last_said(app: &App) -> String {
+    app.console_log.iter().rev().take(6).map(|l| l.text.clone()).collect::<Vec<_>>().join(" | ")
+}
+
+fn the_comb(app: &App) -> fieldform_scene::CurvatureComb {
+    assert_eq!(app.doc.combs.len(), 1, "one comb: {}", last_said(app));
+    app.doc.combs[0].clone()
+}
+
+/// **A comb is fitted once, when it is made, and not again on its own**: a control point moved
+/// leaves its scale where it was -- a comb that re-fitted itself would draw a flattened bulge as it
+/// drew the bulge -- and `-fit` re-fits it, as one undo step.
+#[test]
+fn a_comb_is_fitted_once_and_not_refitted_when_the_curve_moves() {
+    let Some(mut app) = app_with_a_bend() else { return };
+    app.run_command("comb curve=bend");
+    let made = the_comb(&app);
+    let curve = app.doc.curve(made.curve).cloned().expect("the bend");
+    assert!((made.scale - fieldform_scene::fitted_scale(&curve, made.teeth)).abs() < 1e-12, "fitted when made");
+    assert_eq!(app.selected_block, Some(outputs::BlockRef::Comb(made.id)), "and selected, so the next scrub is on it");
+
+    app.run_command("set bend.p1=10,40,0");
+    frame(&mut app, Vec::new());
+    assert!((app.doc.curve(made.curve).unwrap().control_points()[1] - Point3::new(10.0, 40.0, 0.0)).norm() < 1e-9, "moved: {}", last_said(&app));
+    assert_eq!(the_comb(&app).scale, made.scale, "a moved point leaves the scale alone");
+
+    // `comb fit` is about the comb in hand, so it is selected again after the edit took the
+    // selection to the curve.
+    app.select_block(outputs::BlockRef::Comb(made.id));
+    app.run_command("comb -fit");
+    let fitted = the_comb(&app).scale;
+    assert_ne!(fitted, made.scale, "fit re-fits to the curve as it is now");
+    app.run_command("undo");
+    assert_eq!(the_comb(&app).scale, made.scale, "a fit is one step");
+}
+
+/// The keys a comb takes, and the ones it refuses by name: a curve that is not there, a tooth
+/// count out of range, a negative scale. A refusal adds nothing.
+#[test]
+fn a_comb_takes_its_keys_from_the_console_and_refuses_what_is_out_of_range() {
+    let Some(mut app) = app_with_a_bend() else { return };
+    app.run_command("comb curve=bend teeth=96 scale=12 -flip 'check'");
+    let comb = the_comb(&app);
+    assert_eq!((comb.teeth, comb.scale, comb.flip, comb.title()), (96, 12.0, true, "check"));
+    app.run_command("comb block=check flip=false -hidden");
+    let comb = the_comb(&app);
+    assert!(!comb.flip && comb.hidden, "block= changes the comb that exists");
+    for refused in ["comb curve=nosuch", "comb curve=bend teeth=1", "comb curve=bend scale=-1", "comb block=nosuch -fit"] {
+        app.run_command(refused);
+        assert_eq!(app.doc.combs.len(), 1, "{refused} adds nothing");
+    }
+    app.select_body(None);
+    app.selected_curve = None;
+    app.selected_block = None;
+    app.run_command("comb");
+    assert_eq!(app.doc.combs.len(), 1, "a comb with no curve in hand is refused, naming the key");
+}
+
+/// **A comb's row sits directly below its curve's**, and **the comb is not a reader**: adding one
+/// to a profile an extrude reads leaves every other row where it was, nested as it was.
+#[test]
+fn adding_a_comb_to_an_extruded_profile_moves_no_row() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for line in [
+        "line p0=0,0,0 p1=40,0,0 'a'",
+        "line p0=40,0,0 p1=40,20,0 'b'",
+        "line p0=40,20,0 p1=0,20,0 'c'",
+        "line p0=0,20,0 p1=0,0,0 'd'",
+        "extrude profile=a height=10 'slab'",
+        "curve p=0,50,0;10,65,0;30,65,0;40,50,0 'bend'",
+        "sphere radius=5 centre=100,0,0 'ball'",
+    ] {
+        app.run_command(line);
+    }
+    frame(&mut app, Vec::new());
+    fn shape(rows: &[crate::blocks::list::BlockRow], depth: usize, out: &mut Vec<String>) {
+        for row in rows {
+            out.push(format!("{depth} {:?}", row.block));
+            shape(&row.inside, depth + 1, out);
+        }
+    }
+    let rows = |app: &App| {
+        let list = app.list_readings();
+        let mut out = Vec::new();
+        shape(&app.nested_blocks(&list.nesting), 0, &mut out);
+        out
+    };
+    let before = rows(&app);
+    app.run_command("comb curve=a");
+    app.run_command("comb curve=bend");
+    frame(&mut app, Vec::new());
+    let after = rows(&app);
+    let without: Vec<String> = after.iter().filter(|r| !r.contains("Comb(")).cloned().collect();
+    assert_eq!(without, before, "every other row where it was, nested as it was");
+    // Each comb is the row after the one that holds its curve: the slab's profile is inside the
+    // slab, so its comb is below the slab; the bend's is below the bend.
+    let slab = format!("0 {:?}", crate::blocks::list::Block::Node(app.node_named("slab").unwrap()));
+    let slab_at = after.iter().position(|r| *r == slab).expect("the slab's row");
+    let next_top = after.iter().skip(slab_at + 1).position(|r| r.starts_with("0 ")).map(|i| i + slab_at + 1);
+    assert!(next_top.is_some_and(|i| after[i].contains("Comb(")), "the profile's comb is the next top-level row after the slab: {after:?}");
+    let at = |needle: &str| after.iter().position(|r| r.contains(needle)).unwrap_or_else(|| panic!("{needle} in {after:?}"));
+    let bend = app.curve_named("bend").unwrap();
+    let combs: Vec<usize> = after.iter().enumerate().filter(|(_, r)| r.contains("Comb(")).map(|(i, _)| i).collect();
+    assert_eq!(combs.len(), 2);
+    assert!(combs.contains(&(at(&format!("Curve({bend:?})")) + 1)), "the bend's comb is directly below it: {after:?}");
+}
+
+/// **Deleting the curve deletes its comb in the same step**, and undo brings both back.
+#[test]
+fn deleting_the_curve_deletes_its_comb_in_one_undo() {
+    let Some(mut app) = app_with_a_bend() else { return };
+    app.run_command("comb curve=bend");
+    let bend = app.curve_named("bend").unwrap();
+    app.delete_curve(bend);
+    assert!(app.doc.combs.is_empty() && app.doc.curve(bend).is_none(), "both gone");
+    app.run_command("undo");
+    assert!(app.doc.curve(bend).is_some() && app.doc.combs.len() == 1, "both back in one undo");
+}
+
+/// **A hidden curve hides its comb**, and the comb's own eye hides it on a shown curve.
+#[test]
+fn a_hidden_curve_hides_its_comb() {
+    let Some(mut app) = app_with_a_bend() else { return };
+    app.run_command("comb curve=bend teeth=10");
+    let drawn = app.comb_readings();
+    assert_eq!(drawn.len(), 1);
+    assert_eq!(drawn[0].1.teeth.len(), 10, "ten teeth on a single-span cubic");
+    let bend = app.curve_named("bend").unwrap();
+    app.hidden_curves.insert(bend);
+    assert!(app.comb_readings().is_empty(), "the curve hidden, so is its comb");
+    app.hidden_curves.remove(&bend);
+    app.run_command("comb block='Curvature Comb' hidden=true");
+    assert!(app.comb_readings().is_empty(), "its own eye: {}", last_said(&app));
+    app.run_command("undo");
+    assert_eq!(app.comb_readings().len(), 1);
+}
+
+/// **Every field of a comb is a key of `comb`**, or recorded as one it does not read, with why.
+#[test]
+fn every_field_of_a_comb_is_a_key_comb_reads_or_a_recorded_gap() {
+    use std::collections::BTreeSet;
+    let curve = fieldform_scene::Curve::polyline(
+        CurveId::new(),
+        "line",
+        vec![Point3::new(0.0, 0.0, 0.0), Point3::new(10.0, 0.0, 0.0)],
+        false,
+    )
+    .unwrap();
+    let mut comb = fieldform_scene::CurvatureComb::new(fieldform_scene::PartId::new(), &curve);
+    comb.name = Some("n".into());
+    comb.whole_loop = true;
+    comb.flip = true;
+    comb.hidden = true;
+    let json = serde_json::to_value(&comb).unwrap();
+    let fields: BTreeSet<String> = json.as_object().unwrap().keys().cloned().collect();
+    let verb = console_keys::verb("evaluate.comb").expect("comb declares its keys");
+    let console_keys::Keys::Declared { reads, not_read } = &verb.keys else { panic!("declared") };
+    let covered: BTreeSet<&str> = reads
+        .iter()
+        .flat_map(|k| k.covers.iter().copied())
+        .chain(not_read.iter().map(|(f, _)| *f))
+        .chain(["name"])
+        .collect();
+    for field in &fields {
+        assert!(covered.contains(field.as_str()), "a comb's field {field:?} is reached by no `comb` key and not recorded as unread");
+    }
+}
+
+/// **Open curves become one open profile only where a continuity is set at their join** (the
+/// owner, 2026-11-11): touching is two curves, G0, G1 or G2 at the join makes them one row, a
+/// third curve joins when its own join is set, and breaking a join takes the chain apart there.
+#[test]
+fn touching_open_curves_group_only_once_a_continuity_is_set_at_their_join() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for line in [
+        "line p0=0,0,0 p1=20,0,0 'a'",
+        "curve p=20,0,0;30,10,0;40,10,0;50,0,0 'b'",
+        "line p0=50,0,0 p1=70,-10,0 'c'",
+    ] {
+        app.run_command(line);
+    }
+    let id = |app: &App, n: &str| app.curve_named(n).unwrap();
+    let (a, b, c) = (id(&app, "a"), id(&app, "b"), id(&app, "c"));
+    app.refresh_profiles();
+    assert!(app.profiles.chains.is_empty() && app.profiles.loops.is_empty(), "touching alone groups nothing");
+
+    app.run_command("continuity at=a.end g=0");
+    app.refresh_profiles();
+    assert_eq!(app.profiles.chains, vec![(a, vec![a, b])], "{}", last_said(&app));
+    assert!(app.profiles.is_open(a));
+    assert_eq!(app.profile_label(a), "Open profile 1");
+    assert_eq!(app.profiles.key_of(b), Some(a));
+
+    app.run_command("continuity at=b.end g=0");
+    app.refresh_profiles();
+    assert_eq!(app.profiles.chains, vec![(a, vec![a, b, c])], "the third joins when its join is set");
+
+    app.run_command("continuity at=a.end -break");
+    app.refresh_profiles();
+    assert_eq!(app.profiles.chains, vec![(b, vec![b, c])], "broken at a: what is left is keyed by its own first");
+    assert_eq!(app.profiles.key_of(a), None);
+}
+
+/// **An open profile is a row**, folding its curves inside it as a closed one does, and a
+/// closed loop stays a Profile and is never an open one.
+#[test]
+fn an_open_profile_is_one_row_and_a_closed_loop_is_never_open() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for line in [
+        "line p0=0,0,0 p1=20,0,0 'a'",
+        "line p0=20,0,0 p1=20,20,0 'b'",
+        "continuity at=a.end g=0",
+        "line p0=100,0,0 p1=140,0,0 's1'",
+        "line p0=140,0,0 p1=140,20,0 's2'",
+        "line p0=140,20,0 p1=100,20,0 's3'",
+        "line p0=100,20,0 p1=100,0,0 's4'",
+    ] {
+        app.run_command(line);
+    }
+    frame(&mut app, Vec::new());
+    app.refresh_profiles();
+    let a = app.curve_named("a").unwrap();
+    let s1 = app.curve_named("s1").unwrap();
+    assert_eq!(app.profiles.loops.len(), 1);
+    assert!(!app.profiles.is_open(s1) && app.profile_label(s1) == "Profile 1", "the square is closed");
+    assert_eq!(app.profile_label(a), "Open profile 1", "counted on its own");
+    let list = app.list_readings();
+    let rows = app.nested_blocks(&list.nesting);
+    let top: Vec<String> = rows.iter().map(|r| format!("{:?}", r.block)).collect();
+    assert!(top.contains(&format!("{:?}", crate::blocks::list::Block::Profile(a))), "{top:?}");
+    let b = app.curve_named("b").unwrap();
+    assert!(!top.contains(&format!("{:?}", crate::blocks::list::Block::Curve(b))), "b is drawn inside the open profile: {top:?}");
+}
+
+/// **A comb on a whole open profile reads every curve as one**, and says at each joint the turn
+/// and the curvature step: an exact quarter arc into the line tangent to it reads no turn and a
+/// step of 1/r. Asked for by name, or by selecting the profile's row and making a comb.
+#[test]
+fn a_comb_on_an_open_profile_reads_every_curve_and_its_joints() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for line in [
+        "curve2 p=25,0,0;25,25,0;0,25,0 w=1,0.70710678118654752,1 'arc'",
+        "line p0=0,25,0 p1=-30,25,0 'run'",
+        "continuity at=arc.end g=0",
+        "comb profile='Open profile 1' 'whole'",
+    ] {
+        app.run_command(line);
+    }
+    let comb = the_comb(&app);
+    assert!(comb.whole_loop, "{}", last_said(&app));
+    let drawn = app.comb_readings();
+    assert_eq!(drawn.len(), 1);
+    let reading = &drawn[0].1;
+    assert_eq!(reading.teeth.len(), 2 * comb.teeth as usize, "both curves read");
+    assert_eq!(reading.joints.len(), 1);
+    let joint = reading.joints[0];
+    assert!(joint.angle_degrees < 1e-4, "tangent: {}", joint.angle_degrees);
+    assert!((joint.curvature_step + 1.0 / 25.0).abs() < 1e-6, "steps from 1/r to nought: {}", joint.curvature_step);
+
+    // Selecting the row and asking is the same request.
+    app.run_command("delete");
+    let key = app.profiles.key_of(app.curve_named("arc").unwrap()).unwrap();
+    app.select_block(outputs::BlockRef::Profile(key));
+    app.run_command("comb");
+    assert!(app.doc.combs.iter().any(|c| c.whole_loop && c.curve == key), "{}", last_said(&app));
+
+    // Broken apart, it reads its curve alone and says so; whole again, all of it.
+    app.run_command("continuity at=arc.end -break");
+    assert_eq!(app.comb_readings().last().unwrap().1.joints.len(), 0);
+    app.run_command("continuity at=arc.end g=0");
+    assert_eq!(app.comb_readings().last().unwrap().1.joints.len(), 1);
+}
+
+/// **A wall made from an open profile runs as far as its row and no further** (the owner,
+/// 2026-11-11): two lines held at their join and a third that only touches the second make a row
+/// of two, and the wall's chain is those two. Setting the second join brings the third into both.
+#[test]
+fn a_wall_from_an_open_profile_stops_where_its_row_does() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for line in [
+        "line p0=0,0,0 p1=20,0,0 'a'",
+        "line p0=20,0,0 p1=20,20,0 'b'",
+        "line p0=20,20,0 p1=40,20,0 'c'",
+        "continuity at=a.end g=0",
+        "extrude curve=a wall=2 height=10 'fence'",
+    ] {
+        app.run_command(line);
+    }
+    let id = |app: &App, n: &str| app.curve_named(n).unwrap();
+    let (a, b, c) = (id(&app, "a"), id(&app, "b"), id(&app, "c"));
+    app.refresh_profiles();
+    let row = app.profiles.members(app.profiles.key_of(a).unwrap()).unwrap().to_vec();
+    assert_eq!(row, vec![a, b]);
+    let wall = fieldform_field::outline_chain(&app.doc, a, None).unwrap();
+    assert_eq!(wall.curves, row, "the wall is the row, not the touching third: {}", last_said(&app));
+
+    app.run_command("continuity at=b.end g=0");
+    app.refresh_profiles();
+    let row = app.profiles.members(app.profiles.key_of(a).unwrap()).unwrap().to_vec();
+    assert_eq!(row, vec![a, b, c]);
+    assert_eq!(fieldform_field::outline_chain(&app.doc, a, None).unwrap().curves, row);
 }

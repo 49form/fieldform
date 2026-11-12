@@ -31,8 +31,8 @@
 //! `cargo run --release -p fieldform-io --example still_cost -- <file.fieldform>…`
 
 use fieldform_gpu::{
-    generate, BakeSettings, Camera, CurveUse, EnvironmentMaps, Look, Occlusion, Renderer,
-    ShadingResources, Studio,
+    generate, BakeSettings, Camera, CurveUse, EnvironmentMaps, Look, Occlusion, Reflections,
+    Renderer, ShadingResources, Studio,
 };
 use fieldform_scene::{Document, Graph, Material};
 use nalgebra::Point3;
@@ -170,6 +170,21 @@ fn measure(label: &str, doc: &Document, graph: &Graph) -> Vec<String> {
         lower(&mut with_half, timed(&renderer, &mut shading, &camera, budget, &look));
     }
 
+    // **And the reflected march** (item 54): the same still with the part in chrome, which
+    // traces a mirror ray from every pixel that hit. What a reflective part adds to a still
+    // frame's march, beside what the shadow adds; the material changes nothing else the march
+    // does, so the difference is the reflected march alone.
+    let chrome = Material::preset("Chrome").expect("the chrome preset");
+    let chrome_look = Look::studio(chrome.clone(), camera.forward, camera.right, camera.up);
+    let mut with_reflections = f64::INFINITY;
+    for _ in 0..2 {
+        camera.occlusion = Some(full);
+        camera.reflections = Reflections::for_material(&chrome, 8);
+        with_reflections =
+            with_reflections.min(march_ms(&renderer, &mut shading, &camera, budget, &chrome_look));
+        camera.reflections = None;
+    }
+
     // **How many pixels one in four marches**, which is a quarter plus every pixel it could not
     // fill from its own surface: those with a reading of their own after a frame, of those that
     // hit. A pixel the lighting pass fills holds no reading.
@@ -205,10 +220,11 @@ fn measure(label: &str, doc: &Document, graph: &Graph) -> Vec<String> {
     }
 
     println!(
-        "| {label} | {:.1} % | {primary:.1} ms | {:.1} ms | {:.1} ms | **{:.1} ms**, of which the shadow is {:.0} % | {before:.1} ms | **{:.1} ms** | {:.1} → **{:.1} ms** | {:.3} | {} | {} |",
+        "| {label} | {:.1} % | {primary:.1} ms | {:.1} ms | {:.1} ms | {:.1} ms | **{:.1} ms**, of which the shadow is {:.0} % | {before:.1} ms | **{:.1} ms** | {:.1} → **{:.1} ms** | {:.3} | {} | {} |",
         100.0 * hits as f64 / f64::from(WIDTH * HEIGHT),
         with_occlusion - primary,
         with_both.march - with_occlusion,
+        with_reflections - with_both.march,
         with_both.march,
         100.0 * (with_both.march - with_occlusion) / with_both.march.max(1e-9),
         with_half.march,
@@ -327,8 +343,8 @@ impl Apart {
 
 fn main() {
     println!("{WIDTH} × {HEIGHT}, the model framed, the 64³ grid with its masks, one still frame.\n");
-    println!("| scene | pixels that hit | primary march | five occlusion samples | the shadow march | the whole march | the whole march with no grid, no masks and plain steps | the whole march, occlusion and shadow at one pixel in four | the frame, march and lighting: every pixel → one in four | share of the pixels that hit marched at one in four | eight frames at one in four against every pixel: more than 1 level / more than 4 / worst / mean | the yardstick, every pixel's fourth frame against its eighth: the same four |");
-    println!("|---|---|---|---|---|---|---|---|---|---|---|---|");
+    println!("| scene | pixels that hit | primary march | five occlusion samples | the shadow march | the reflected march, in chrome | the whole march | the whole march with no grid, no masks and plain steps | the whole march, occlusion and shadow at one pixel in four | the frame, march and lighting: every pixel → one in four | share of the pixels that hit marched at one in four | eight frames at one in four against every pixel: more than 1 level / more than 4 / worst / mean | the yardstick, every pixel's fourth frame against its eighth: the same four |");
+    println!("|---|---|---|---|---|---|---|---|---|---|---|---|---|");
     let mut converging = Vec::new();
     for path in std::env::args().skip(1) {
         match fieldform_io::open(std::path::Path::new(&path)) {

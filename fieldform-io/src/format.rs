@@ -391,7 +391,26 @@ pub(crate) const FORMAT_MAJOR: u32 = 3;
 /// Additive as the other two output entries are, and left out when there are none; a 3.30 build
 /// carries the entry through untouched and draws nothing differently, since the blocks are not
 /// geometry.
-pub(crate) const FORMAT_MINOR: u32 = 31;
+///
+/// 3.32 adds the `expression` node (item 40): a field written as arithmetic over the point,
+/// held as its text with a region, a divisor and a claim. Its text is parsed back under the
+/// document's parameter names on read, after the parts are read, and a name it cannot find
+/// refuses the file by node. A 3.31 build keeps the node rather than drawing nothing.
+///
+/// 3.33 adds `view/sections.json` (`Document::sections`, 2026-11-07): the section cuts, which were
+/// application state until the owner asked for them to be blocks that are saved and undone. Each is
+/// a plane placed as a plane block is, an origin and a turn. Additive and left out when there are
+/// none; a 3.32 build carries the entry through and shows the part uncut.
+///
+/// 3.34 adds `history/combs.json` (`Document::combs`, 2026-11-08): curvature combs, readings of a
+/// curve drawn along it. A comb changes no shape, so a 3.33 build draws every curve exactly as
+/// saved and carries the entry through. Left out when there are none.
+///
+/// 3.35 adds a cage's creased edges: `creases`, a list of `{ "edge": [a, b] }`, beside its
+/// positions and faces, and left out when there are none, so an uncreased cage is written exactly
+/// as before. A 3.34 build refuses a creased cage rather than drawing it smooth: the cage's shape
+/// denies fields it does not know, which is the refusal, since a higher minor loads by design.
+pub(crate) const FORMAT_MINOR: u32 = 35;
 
 #[derive(thiserror::Error, Debug)]
 pub enum FormatError {
@@ -430,6 +449,10 @@ pub enum FormatError {
     /// a number substituted.
     #[error("parameter {name:?}: {reason}")]
     Parameter { name: String, reason: String },
+    /// An Expression block's text that does not parse under the document's parameters -- a
+    /// name it reads is not there. Refused by node rather than drawn as nothing (D3).
+    #[error("the written field {node}: {reason}")]
+    Expression { node: String, reason: String },
 }
 
 /// What the container is, independent of what it holds.

@@ -155,6 +155,10 @@ pub struct Camera {
     /// stale, and defaulting off would leave the cull untested by `gpu_matches_cpu` -- which is
     /// the only thing that checks it against the CPU's own field.
     pub cull: bool,
+    /// A reflected march from every hit pixel, or `None` for none this frame -- the still tier's
+    /// third march, after occlusion and the shadow (backlog item 54). A per-frame decision made
+    /// from the material by [`Reflections::for_material`], since the material is a uniform.
+    pub reflections: Option<Reflections>,
     /// The image this frame is one tile of, or `None` for a frame that is the whole picture.
     ///
     /// An image too large for one set of targets -- a print at ten thousand pixels across
@@ -358,8 +362,77 @@ impl Camera {
             start_at_scene: false,
             // The common case: a program generated from the document it is about to draw.
             cull: true,
+            reflections: None,
             tile: None,
         }
+    }
+}
+
+/// Which of a material's specular lobes a reflected ray stands in for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReflectedLobe {
+    /// The base: its normal is the geometric one only when nothing perturbs it, so this is a
+    /// plain base with no flake and no brush.
+    Base,
+    /// The clearcoat, whose normal is always the geometric one.
+    Coat,
+}
+
+/// The still tier's traced reflection: one more march from each hit pixel along the reflected
+/// direction, through the same `scene()`, whose hit's radiance replaces the prefiltered
+/// environment sample in one specular lobe (the shading notes, section 15).
+///
+/// A per-frame decision, not a per-pixel one: the material is a uniform, so whether anything
+/// is traced at all is known before the frame is submitted, and a matte part dispatches
+/// nothing. The numbers here travel in the camera uniform, never in the shader's source.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Reflections {
+    /// Steps a reflected ray may take: its own budget. A reflected ray starts beside a surface
+    /// and takes more small steps than a primary one from the eye.
+    pub budget: u32,
+    /// How much of the traced radiance replaces the prefiltered sample on a hit:
+    /// `1 − smoothstep(0.20, 0.30, roughness)`, so a slider dragged across the cutoff does
+    /// not pop. Nought is never asked for; the frame is not traced instead.
+    pub weight: f64,
+    pub lobe: ReflectedLobe,
+    /// The traced lobe's roughness as the panel shows it. Under [`Self::MIRROR_BELOW`] one
+    /// unjittered ray along the mirror direction; above it a visible-normal sample of the lobe,
+    /// integrated by the still's own accumulation.
+    pub roughness: f64,
+}
+
+impl Reflections {
+    pub const BUDGET: u32 = 256;
+    pub const MIRROR_BELOW: f64 = 0.05;
+    /// Above this nothing is traced: the prefiltered sample is most of what there is to see.
+    pub const NONE_ABOVE: f64 = 0.30;
+    /// A glossy sample needs the still's accumulation to integrate it; with fewer frames than
+    /// this it is not traced.
+    pub const GLOSSY_NEEDS_FRAMES: u32 = 4;
+
+    /// The decision for a material, or `None` where nothing is traced: a coat traces its coat
+    /// lobe; a plain base (no flake, no brush) its base lobe; anything else nothing, since the
+    /// march cannot reproduce a perturbed or bent reflection vector without a second copy of
+    /// the shading arithmetic. `still_frames` is how many the still averages.
+    pub fn for_material(material: &fieldform_scene::Material, still_frames: u32) -> Option<Self> {
+        let m = material.clone().normalised();
+        let (lobe, roughness) = if m.clearcoat > 0.0 {
+            (ReflectedLobe::Coat, m.clearcoat_roughness)
+        } else if m.flake == 0.0 && m.anisotropy == 0.0 {
+            (ReflectedLobe::Base, m.roughness)
+        } else {
+            return None;
+        };
+        let roughness = roughness.clamp(0.0, 1.0);
+        if roughness > Self::NONE_ABOVE {
+            return None;
+        }
+        if roughness >= Self::MIRROR_BELOW && still_frames < Self::GLOSSY_NEEDS_FRAMES {
+            return None;
+        }
+        let t = ((roughness - 0.20) / 0.10).clamp(0.0, 1.0);
+        let weight = 1.0 - t * t * (3.0 - 2.0 * t);
+        Some(Self { budget: Self::BUDGET, weight, lobe, roughness })
     }
 }
 
@@ -380,6 +453,7 @@ pub(crate) struct CameraUniform {
     band: [u32; 4],
     scene: [f32; 4],
     tile: [u32; 4],
+    reflect: [f32; 4],
 }
 
 /// The camera as the shaders read it. Shared by the readback path and the presented one, so
@@ -406,6 +480,7 @@ pub(crate) fn camera_uniform(
     rows: (u32, u32),
     culled: bool,
     measured: u32,
+    frame_index: u32,
 ) -> CameraUniform {
     CameraUniform {
         eye: [
@@ -449,7 +524,9 @@ pub(crate) fn camera_uniform(
             // whatever reads it next.
             None => [0.0, 0.0, 0.0, camera.value_scale as f32],
         },
-        jitter: [camera.jitter[0] as f32, camera.jitter[1] as f32, f32::from(camera.exact_finish), 0.0],
+        // `w` is the still's frame index, which seeds a glossy reflection's sample -- in the
+        // camera, since both passes must draw the same direction.
+        jitter: [camera.jitter[0] as f32, camera.jitter[1] as f32, f32::from(camera.exact_finish), frame_index as f32],
         band: [rows.0, rows.1, u32::from(culled && camera.cull), measured],
         scene: [
             camera.scene_centre.x as f32,
@@ -462,6 +539,19 @@ pub(crate) fn camera_uniform(
         tile: match camera.tile {
             Some(t) => [t.x, t.y, t.width.max(1), t.height.max(1)],
             None => [0, 0, 0, 0],
+        },
+        // A lobe of nought is how the shader reads "no reflected march this frame".
+        reflect: match camera.reflections {
+            Some(r) => [
+                r.budget as f32,
+                r.weight as f32,
+                r.roughness as f32,
+                match r.lobe {
+                    ReflectedLobe::Base => 1.0,
+                    ReflectedLobe::Coat => 2.0,
+                },
+            ],
+            None => [0.0; 4],
         },
     }
 }
@@ -685,6 +775,7 @@ fn fields_layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
         storage(9, true),
         storage(10, true),
         storage(11, true),
+        storage(12, false),
     ]
 }
 
@@ -780,16 +871,16 @@ struct GpuSurfaceLayout {
 
 /// How many storage buffers the field shader binds, and so what a device has to allow.
 ///
-/// **Eleven, against a default of eight.** Parameters, curve points, curve spans, cage slabs,
-/// the three G-buffer outputs, profile bakes, and a conformal surface's three arrays. The
-/// budget was exactly full before surfaces arrived, which is worth saying plainly: the next
-/// thing that wants a buffer of its own will have to share one.
+/// **Twelve, against a default of eight.** Parameters, curve points, curve spans, cage slabs,
+/// the three G-buffer outputs, profile bakes, a conformal surface's three arrays, and the
+/// still's reflected hits (item 54). The budget was exactly full before surfaces arrived, which
+/// is worth saying plainly: the next thing that wants a buffer of its own will have to share one.
 ///
 /// wgpu's default limits are the WebGPU baseline, which every desktop adapter exceeds by orders
 /// of magnitude — this machine's reports far more than eleven. Asking for more than the
 /// baseline does narrow what could ever run this: a browser would refuse. That is a trade
 /// already made elsewhere in this crate, which requires compute shaders at all.
-pub(crate) const STORAGE_BUFFERS_NEEDED: u32 = 11;
+pub(crate) const STORAGE_BUFFERS_NEEDED: u32 = 12;
 
 /// What the device is asked for: what the field layout binds, and under `march-stats` the five
 /// buffers the counting march and the grid evaluator use, which live in a group of their own so the
@@ -977,6 +1068,9 @@ pub struct Renderer {
     /// The still tier's occlusion and shadow, made on the first still frame -- see
     /// [`Pipelines::occlude`].
     occlude_pipeline: std::sync::Arc<std::sync::OnceLock<Option<wgpu::ComputePipeline>>>,
+    /// The still tier's reflected march (item 54), made on the first still frame that asks for
+    /// one, for the reason `occlude` is lazy: it inlines the whole field again.
+    reflect_pipeline: std::sync::Arc<std::sync::OnceLock<Option<wgpu::ComputePipeline>>>,
     /// Held so that pipeline can be made when it is first wanted.
     module: wgpu::ShaderModule,
     march_layout: wgpu::PipelineLayout,
@@ -1163,6 +1257,9 @@ struct Pipelines {
     /// `OnceLock` rather than a `Cell`, because a renderer is handed out behind `&self` and must
     /// stay `Sync`.
     occlude: std::sync::Arc<std::sync::OnceLock<Option<wgpu::ComputePipeline>>>,
+    /// The still's reflected march (item 54), lazy for the reason `occlude` is: it inlines the
+    /// whole field again, and most frames never ask for it.
+    reflect: std::sync::Arc<std::sync::OnceLock<Option<wgpu::ComputePipeline>>>,
     /// Kept so the still's pipeline can be made later: a module and a layout are cheap to hold
     /// and impossible to recover once dropped.
     module: wgpu::ShaderModule,
@@ -1183,6 +1280,7 @@ impl Pipelines {
             skip: self.skip.clone(),
             cull: self.cull.clone(),
             occlude: self.occlude.clone(),
+            reflect: self.reflect.clone(),
             module: self.module.clone(),
             march_layout: self.march_layout.clone(),
             #[cfg(feature = "march-stats")]
@@ -1310,10 +1408,11 @@ impl Renderer {
         let output = stand_in(16, wgpu::BufferUsages::STORAGE);
         let owners = stand_in(4, wgpu::BufferUsages::STORAGE);
         let extras = stand_in(4, wgpu::BufferUsages::STORAGE);
+        let reflections = stand_in(16, wgpu::BufferUsages::STORAGE);
         let group0 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("fields"),
             layout: &self.skip_pipeline.get_bind_group_layout(0),
-            entries: &self.fields_bindings(&camera, &output, &owners, &extras),
+            entries: &self.fields_bindings(&camera, &output, &owners, &extras, &reflections),
         });
         let group1 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("atlas, filling the skip grid"),
@@ -1573,6 +1672,51 @@ impl Renderer {
                 pass.dispatch_workgroups(across, down, deep);
             }
         }
+        // The reflected march, after the primary one it reads and in the same pass: every hit
+        // pixel of the band, as the primary march was dispatched. Nothing at all when the frame
+        // does not ask, which is every draft and every still of a matte part.
+        if let Some(reflect) = self.reflect_pipeline(camera) {
+            pass.set_pipeline(reflect);
+            pass.set_bind_group(0, groups[0], &[]);
+            pass.set_bind_group(1, groups[1], &[]);
+            pass.dispatch_workgroups(width.div_ceil(8), rows.div_ceil(8), 1);
+        }
+    }
+
+    /// The reflected march's pipeline, made on the first frame that asks for one -- `None` where
+    /// the frame does not, or where the driver refused it, in which case the frame is drawn
+    /// without reflections and says so once.
+    pub(crate) fn reflect_pipeline(&self, camera: &Camera) -> Option<&wgpu::ComputePipeline> {
+        camera.reflections?;
+        self.reflect_pipeline
+            .get_or_init(|| {
+                let internal = self.device.push_error_scope(wgpu::ErrorFilter::Internal);
+                let memory = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+                let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let reflect = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("reflect"),
+                    layout: Some(&self.march_layout),
+                    module: &self.module,
+                    entry_point: Some("reflect_march"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                });
+                let refused = pollster::block_on(validation.pop())
+                    .or_else(|| pollster::block_on(memory.pop()))
+                    .or_else(|| pollster::block_on(internal.pop()));
+                match refused {
+                    Some(error) => {
+                        eprintln!(
+                            "the driver would not compile this part's reflected march ({}) — the \
+                             viewport will shade it without reflections. Driver: {error}",
+                            self.size,
+                        );
+                        None
+                    }
+                    None => Some(reflect),
+                }
+            })
+            .as_ref()
     }
 
     fn pipelines(&self) -> Pipelines {
@@ -1586,6 +1730,7 @@ impl Renderer {
             // Shared, so a rebuild that keeps the pipelines keeps a still that was already made
             // rather than paying for it again on the next still frame.
             occlude: self.occlude_pipeline.clone(),
+            reflect: self.reflect_pipeline.clone(),
             module: self.module.clone(),
             march_layout: self.march_layout.clone(),
             #[cfg(feature = "march-stats")]
@@ -2113,6 +2258,7 @@ impl Renderer {
                 skip,
                 cull,
                 occlude: std::sync::Arc::new(std::sync::OnceLock::new()),
+                reflect: std::sync::Arc::new(std::sync::OnceLock::new()),
                 module,
                 march_layout: pipeline_layout,
                 #[cfg(feature = "march-stats")]
@@ -2157,6 +2303,7 @@ impl Renderer {
             pipeline: pipelines.march,
             skip_pipeline: pipelines.skip,
             occlude_pipeline: pipelines.occlude,
+            reflect_pipeline: pipelines.reflect,
             module: pipelines.module,
             march_layout: pipelines.march_layout,
             skip_grid,
@@ -2332,6 +2479,8 @@ impl Renderer {
             (0, height),
             cull_groups > 0,
             measured,
+            // One frame, never accumulated: a glossy sample here is the first of a still's.
+            0,
         );
         let camera_buf = self
             .device
@@ -2378,11 +2527,20 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+        // The reflected hits, which this path binds and never reads either -- sized for the frame
+        // only when the camera asks for the march that writes them, since `record_march` would
+        // then dispatch it over every pixel.
+        let reflections = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("reflections"),
+            size: if camera.reflections.is_some() { owner_bytes * 4 } else { 16 },
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
 
         let group0 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("fields"),
             layout: &self.pipeline.get_bind_group_layout(0),
-            entries: &self.fields_bindings(&camera_buf, &output, &owners, &extras),
+            entries: &self.fields_bindings(&camera_buf, &output, &owners, &extras, &reflections),
         });
         let group1 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("atlas"),
@@ -2495,6 +2653,7 @@ impl Renderer {
         let output = buffer("stats-output", pixels * 16, storage);
         let owners = buffer("stats-owners", pixels * 4, storage);
         let extras = buffer("stats-extras", pixels * 4, storage);
+        let reflections = buffer("stats-reflections", 16, storage);
         let steps = buffer("stats-steps", pixels * 4, storage | wgpu::BufferUsages::COPY_SRC);
         let exits = buffer("stats-exits", pixels * 4, storage | wgpu::BufferUsages::COPY_SRC);
         let calls = buffer("stats-calls", pixels * 4, storage | wgpu::BufferUsages::COPY_SRC);
@@ -2509,7 +2668,7 @@ impl Renderer {
         let group0 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("fields"),
             layout: &self.stats_pipeline.get_bind_group_layout(0),
-            entries: &self.fields_bindings(&camera_buf, &output, &owners, &extras),
+            entries: &self.fields_bindings(&camera_buf, &output, &owners, &extras, &reflections),
         });
         let group1 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("atlas"),
@@ -2558,6 +2717,7 @@ impl Renderer {
                     (first, rows),
                     cull_groups > 0,
                     // The primary march's count, which no still's measured pixels touch.
+                    0,
                     0,
                 )),
             );
@@ -2655,6 +2815,7 @@ impl Renderer {
         let output = buffer("grid-output", 16, storage);
         let owners = buffer("grid-owners", 4, storage);
         let extras = buffer("grid-extras", 4, storage);
+        let reflections = buffer("grid-reflections", 16, storage);
         let none = [buffer("grid-a", 4, storage), buffer("grid-b", 4, storage), buffer("grid-c", 4, storage)];
         let values = buffer("grid-values", count * 4, storage | wgpu::BufferUsages::COPY_SRC);
         let spec = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2673,7 +2834,7 @@ impl Renderer {
         let group0 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("fields"),
             layout: &self.grid_pipeline.get_bind_group_layout(0),
-            entries: &self.fields_bindings(&camera_buf, &output, &owners, &extras),
+            entries: &self.fields_bindings(&camera_buf, &output, &owners, &extras, &reflections),
         });
         let group1 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("atlas"),
@@ -2788,7 +2949,7 @@ pub(crate) fn entry(binding: u32, resource: wgpu::BindingResource) -> wgpu::Bind
 
 /// How many bindings the `fields` group has -- the length of `fields_bindings` and of
 /// `fields_layout_entries`, which the test in `limit_tests` holds equal.
-pub(crate) const FIELD_BINDINGS: usize = 12;
+pub(crate) const FIELD_BINDINGS: usize = 13;
 
 impl Renderer {
     /// Every binding of the `fields` group, in one place, for the two passes that build it:
@@ -2805,6 +2966,7 @@ impl Renderer {
         output: &'a wgpu::Buffer,
         owners: &'a wgpu::Buffer,
         extras: &'a wgpu::Buffer,
+        reflections: &'a wgpu::Buffer,
     ) -> [wgpu::BindGroupEntry<'a>; FIELD_BINDINGS] {
         [
             entry(0, self.params.as_entire_binding()),
@@ -2819,6 +2981,7 @@ impl Renderer {
             entry(9, self.surface_floats.as_entire_binding()),
             entry(10, self.surface_uints.as_entire_binding()),
             entry(11, self.surface_layouts.as_entire_binding()),
+            entry(12, reflections.as_entire_binding()),
         ]
     }
 }

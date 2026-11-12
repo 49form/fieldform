@@ -10,17 +10,15 @@
 //! file opened later must not start writing pictures on its own.
 
 use crate::image_export::{
-    self, background_word, next_path, quoted, ImageRequest, ImageWritten, NameFill,
+    self, next_path, quoted, ImageRequest, ImageWritten, NameFill,
 };
 use crate::outputs::row_title;
 use crate::*;
 use fieldform_ops::Command;
 use fieldform_scene::{Capture, ImageBackground, ImageFormat, ImageQuality, SaveImage, SaveImageId};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-/// How many lines a block's own log keeps.
-const LOG_LINES: usize = 20;
 /// Automatic capture stops when the drive has less than this left.
 const DISK_FLOOR_BYTES: u64 = 1 << 30;
 
@@ -29,9 +27,6 @@ const DISK_FLOOR_BYTES: u64 = 1 << 30;
 pub(crate) struct ImageRuns {
     /// What the last save of each block came to.
     pub(crate) results: HashMap<SaveImageId, Result<ImageWritten, String>>,
-    /// The last few things each block did, newest last. Automatic captures write here and
-    /// nowhere else, since twenty an hour in the console would bury everything typed.
-    pub(crate) log: HashMap<SaveImageId, VecDeque<String>>,
     /// The next `{n}` each block names, from one each session.
     pub(crate) counters: HashMap<SaveImageId, u32>,
     /// Blocks whose automatic capture is running. **A block opened from a file is not here**:
@@ -74,6 +69,34 @@ impl App {
     pub(crate) fn saveimage_command(&mut self, args: &Args) {
         let viewport = self.viewport_pixels();
         let mut block = SaveImage::new(self.active_part, viewport.0, viewport.1);
+        // **Where the picture goes, asked first** (the owner, 2026-11-07: File › Save Image "should
+        // pop" a dialog that sets "the directory and name", and the block stays for saving again).
+        // It used to add the block and say so in the console, which from the menu looked like
+        // nothing at all. `file=` is the same answer typed, and a script, which cannot answer a
+        // dialog, keeps the old quiet block when it names nothing.
+        let file = match args.get("file").map(|v| v.text()) {
+            Some(text) if text.trim().is_empty() => {
+                self.warn("`file=` wants a path, such as `file=\"C:/renders/shot.png\"`");
+                return;
+            }
+            Some(text) => Some(std::path::PathBuf::from(text.trim())),
+            None if args.iter().next().is_none() && self.script.is_none() && !self.script_running && !cfg!(test) => {
+                let start = self.image_folder(&block).ok();
+                let mut dialog = rfd::FileDialog::new()
+                    .set_title("Save Image")
+                    .add_filter("PNG image", &["png"])
+                    .add_filter("JPEG image", &["jpg", "jpeg"])
+                    .set_file_name(format!("{}.png", self.document_name()));
+                if let Some(dir) = start {
+                    dialog = dialog.set_directory(dir);
+                }
+                match dialog.save_file() {
+                    Some(path) => Some(path),
+                    None => return, // cancelled: nothing made
+                }
+            }
+            None => None,
+        };
         // The picture keys read the way `snap` reads them, so the two cannot drift.
         let mut request = ImageRequest::displayed(std::path::PathBuf::new());
         request.quality = ImageQuality::Still;
@@ -146,7 +169,14 @@ impl App {
                 }
             }
         }
-        if let Some(why) = ImageRequest::of_block(&block, std::path::PathBuf::from("x.png"), false)
+        if let Some(path) = &file
+            && let Err(why) = aim_block_at(&mut block, path)
+        {
+            self.warn(why);
+            return;
+        }
+        let probe = std::path::PathBuf::from(format!("x.{}", block.format.extension()));
+        if let Some(why) = ImageRequest::of_block(&block, probe, false)
             .refusal((block.width, block.height))
         {
             self.warn(why);
@@ -163,6 +193,15 @@ impl App {
             self.images.armed.insert(id);
         }
         self.select_block(outputs::BlockRef::Image(id));
+        if file.is_some() {
+            // Asked where, so saved there now; the block is what saves it again.
+            self.say(format!(
+                "Added {title}, saving the picture now: its block saves it again, or `snap block={}`",
+                quoted(&title)
+            ));
+            self.run_image_block(id, false);
+            return;
+        }
         self.say(format!(
             "Added {title}: Save now writes the picture, and a line can run it with `snap block={}`",
             quoted(&title)
@@ -262,14 +301,17 @@ impl App {
         }
     }
 
-    /// A picture written: said, and recorded on its block.
+    /// A picture written: said in the console, automatic captures included, and its result kept
+    /// on its block.
+    ///
+    /// **The console is the one log** (the owner, 2026-11-07: "remove the 'log' from the save
+    /// image block - that output should be shown in the console"). A block used to keep twenty
+    /// lines of its own and say nothing of an automatic capture, on the reading that twenty an
+    /// hour in the console would bury what was typed; the owner ruled the other way, so what a
+    /// block did is found where everything else is said.
     pub(crate) fn image_written(&mut self, request: &ImageRequest, written: ImageWritten) {
-        let line = written.said();
-        if !request.silent {
-            self.say(line.clone());
-        }
+        self.say(written.said());
         if let Some(id) = request.block {
-            self.log_image(id, line);
             self.images.results.insert(id, Ok(written));
             if request.silent {
                 *self.images.captured.entry(id).or_default() += 1;
@@ -277,22 +319,17 @@ impl App {
         }
     }
 
-    /// A picture not written: said unless the capture was automatic, and recorded on its block.
+    /// A picture not written: said in the console, and kept on its block as its last result. An
+    /// automatic capture's failure is said as a line rather than a warning, since a warning stops
+    /// a script that was not told to keep going and the capture is not a line of it.
     pub(crate) fn image_failed(&mut self, block: Option<SaveImageId>, silent: bool, why: String) {
-        if !silent {
+        if silent {
+            self.say(format!("Save Image: {why}"));
+        } else {
             self.warn(why.clone());
         }
         if let Some(id) = block {
-            self.log_image(id, format!("!! {why}"));
             self.images.results.insert(id, Err(why));
-        }
-    }
-
-    fn log_image(&mut self, id: SaveImageId, line: String) {
-        let log = self.images.log.entry(id).or_default();
-        log.push_back(line);
-        while log.len() > LOG_LINES {
-            log.pop_front();
         }
     }
 
@@ -345,7 +382,6 @@ impl App {
             let count = self.images.captured.get(&id).copied().unwrap_or(0);
             if count >= block.max_count {
                 self.images.armed.remove(&id);
-                self.log_image(id, format!("Stopped: {} files, the most this block captures (Max)", block.max_count));
                 self.say(format!("{} stopped after {} captures", block.title(), block.max_count));
                 continue;
             }
@@ -354,7 +390,6 @@ impl App {
                 && free < DISK_FLOOR_BYTES
             {
                 self.images.armed.remove(&id);
-                self.log_image(id, format!("Stopped: {} free on the drive", memory::describe(free)));
                 self.say(format!("{} stopped: only {} free on the drive", block.title(), memory::describe(free)));
                 continue;
             }
@@ -639,13 +674,6 @@ impl App {
                     }
                     None => {}
                 }
-                if let Some(log) = self.images.log.get(&id).filter(|l| l.len() > 1) {
-                    ui.collapsing("Log", |ui| {
-                        for line in log.iter().rev() {
-                            ui.label(egui::RichText::new(line).small().weak());
-                        }
-                    });
-                }
             });
 
         if b != before && self.doc.images.iter().any(|x| x.id == id) {
@@ -733,6 +761,33 @@ fn free_disk_bytes(_path: &std::path::Path) -> Option<u64> {
 }
 
 /// What a block's settings say as a `saveimage` line: every key whose value is not the default.
+/// Points a block at one file: its folder, its name and its format from the path chosen, and
+/// written over when saved again, since choosing a name in a save dialog is choosing that file
+/// (the dialog asks before replacing one that is there).
+///
+/// The name has its braces taken out, because the block's name is a pattern and a brace there
+/// would be read as a field to fill.
+pub(crate) fn aim_block_at(block: &mut SaveImage, path: &std::path::Path) -> Result<(), String> {
+    let format = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(fieldform_scene::ImageFormat::from_extension)
+        .ok_or_else(|| format!("{} is not a .png or a .jpg", path.display()))?;
+    let name: String = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().replace(['{', '}'], ""))
+        .unwrap_or_default();
+    if name.trim().is_empty() {
+        return Err(format!("{} names no file", path.display()));
+    }
+    block.folder = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+    block.pattern = name;
+    block.format = format;
+    block.overwrite = true;
+    Ok(())
+}
+
+#[cfg(test)]
 pub(crate) fn saveimage_line(block: &SaveImage, viewport: (u32, u32)) -> String {
     let mut line = String::from("saveimage");
     if (block.width, block.height) != viewport {
@@ -748,7 +803,7 @@ pub(crate) fn saveimage_line(block: &SaveImage, viewport: (u32, u32)) -> String 
         line.push_str(&format!(" ss={}", block.supersample));
     }
     if block.background != ImageBackground::Environment {
-        line.push_str(&format!(" bg={}", background_word(block.background)));
+        line.push_str(&format!(" bg={}", image_export::background_word(block.background)));
     }
     if block.format != ImageFormat::Png {
         line.push_str(" format=jpg");

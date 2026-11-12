@@ -385,8 +385,20 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// upward when overwriting is off, `from`'s own name when it is on.
 pub(crate) fn next_path(block: &SaveImage, folder: &Path, fill: &NameFill<'_>, from: u32) -> (PathBuf, u32) {
     let mut n = from.max(1);
+    // A name with no counter in it is the same name at every `n`, so the search below would never
+    // find a free one: it ran on to `u32::MAX` checking one path. Such a name takes a counter of
+    // its own after the first, the way a file manager numbers a copy.
+    let counted = fill_pattern(&block.pattern, fill, 1) != fill_pattern(&block.pattern, fill, 2);
+    // And it starts from its own plain name every time, whatever the session's counter says: the
+    // counter is a number *in* a name, and this name has none.
+    if !counted {
+        n = 1;
+    }
     loop {
         let mut name = safe_file_name(&fill_pattern(&block.pattern, fill, n));
+        if !counted && n > 1 {
+            name = format!("{name} ({n})");
+        }
         let has_extension = Path::new(&name)
             .extension()
             .and_then(|e| e.to_str())
@@ -566,6 +578,7 @@ impl App {
             sections: self.section_half_spaces(),
             material,
             occlusion: self.idle_occlusion && self.display_quality.occlusion(),
+            reflections: self.idle_reflections && self.display_quality.reflections(),
             exact_finish: self.display_quality.exact_finish(),
             environment: self.environment,
             still_frames: self.display_quality.still_frames(),

@@ -565,6 +565,14 @@ pub struct Document {
     /// The viewport written as image files, in the order the blocks were made -- backlog
     /// item 117. A list for the reason the other two are.
     pub images: Vec<crate::SaveImage>,
+    /// The section cuts, in the order made: planes the viewport cuts each part away at. View
+    /// settings rather than geometry, kept with the document so they are saved and undone like
+    /// any block (the owner, 2026-11-07). See [`crate::SectionCut`].
+    pub sections: Vec<crate::SectionCut>,
+    /// Curvature combs, in the order made: readings of a curve drawn along it. Records beside
+    /// the outputs rather than nodes, as the sections are: a comb composes nothing and is not a
+    /// reader of its curve, so adding one moves no row (see [`crate::CurvatureComb`]).
+    pub combs: Vec<crate::CurvatureComb>,
     /// Where each node is drawn in the list: inside the one block that owns it, free, or a
     /// variable — see [`Ownership`] and `block-ownership-spec.md`.
     ///
@@ -798,6 +806,8 @@ impl Document {
             tessellations: Vec::new(),
             exports: Vec::new(),
             images: Vec::new(),
+            sections: Vec::new(),
+            combs: Vec::new(),
             ownership_nodes: HashMap::new(),
             ownership_curves: HashMap::new(),
             pending_ownership_changes: Vec::new(),

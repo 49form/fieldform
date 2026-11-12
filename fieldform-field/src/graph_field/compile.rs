@@ -23,6 +23,11 @@ use nalgebra::{Isometry3, Point3, Rotation3, Vector3};
 pub enum CompileError {
     #[error("a critical surface's clearance names a parameter that has no value")]
     UnresolvedClearance,
+    /// An Expression block that cannot be a field: its text is not parsed, a parameter it
+    /// reads has no value, or its divisor or region is not a number over nought. Said rather
+    /// than drawn as nothing, since an empty field in a boolean looks like it worked.
+    #[error("the written field cannot be evaluated: {0}")]
+    Written(String),
     #[error("graph node {0:?} references a cage that is not in the document")]
     MissingCage(fieldform_scene::CageId),
     /// The cage is in the document and is not a solid: a tool has it open, or it loaded that way.
@@ -1507,6 +1512,37 @@ impl GraphField {
                             translation,
                             scale: 1.0,
                         }
+                    }
+                }
+                // A written field: its text over its divisor, cut to its region, in its own
+                // frame -- which a Transform supplies exactly as a lattice's does.
+                Node::Expression { text, frame, size, divisor, claim } => {
+                    let expression = text
+                        .expression()
+                        .cloned()
+                        .ok_or_else(|| CompileError::Written(format!("the text `{}` has not been parsed", text.source())))?;
+                    let mut values = std::collections::HashMap::new();
+                    for id in expression.references() {
+                        let value = document
+                            .parameter_value(id)
+                            .ok_or_else(|| CompileError::Written("a parameter the text reads has no value".into()))?;
+                        values.insert(id, value);
+                    }
+                    let mut sides = [0.0; 3];
+                    for (slot, side) in sides.iter_mut().zip(size) {
+                        *slot = resolve(side).ok_or(CompileError::UnresolvedRadius)?;
+                    }
+                    let k = resolve(divisor).ok_or(CompileError::UnresolvedRadius)?;
+                    let field = crate::WrittenField::new(expression, values, k, Vector3::new(sides[0], sides[1], sides[2]), *claim)
+                        .map_err(CompileError::Written)?;
+                    let leaf: std::sync::Arc<dyn ScalarField + Send + Sync> = std::sync::Arc::new(field);
+                    if frame.is_default() {
+                        Op::Leaf(leaf)
+                    } else {
+                        let at = ops.len();
+                        ops.push(Op::Leaf(leaf));
+                        let (translation, rotation) = resolve_frame(document, graph, frame, &resolve)?;
+                        Op::Transform { input: at, rotation, translation, scale: 1.0 }
                     }
                 }
                 Node::Plane { origin, flipped, .. } => Op::Leaf(std::sync::Arc::new(crate::Plane {

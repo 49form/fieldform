@@ -78,6 +78,10 @@ struct Shading {
 // texture samples through to the screen as they are, so the encoding has to happen here and
 // the texture must not be one the sampler would decode — see `FrameTargets` in `shading.rs`.
 @group(0) @binding(6) var present: texture_storage_2d<rgba8unorm, write>;
+// The still's reflected hits (item 54), as `march.wgsl` wrote them: the hit's normal and its
+// distance along the reflected ray, negative where there is nothing to shade. Read only when the
+// camera says a reflected march ran this frame; otherwise sixteen bytes nothing touches.
+@group(0) @binding(7) var<storage, read> reflections: array<vec4<f32>>;
 
 // The environment, prepared on the CPU — see `environment.rs`.
 @group(1) @binding(0) var specular_map: texture_cube<f32>;
@@ -212,6 +216,11 @@ struct Surface {
     open: f32,
     lit: f32,
     footprint: f32,
+    // What a reflected ray from this surface found, shaded, and how much of it replaces the
+    // prefiltered environment sample in the traced lobe (item 54): nought where nothing was
+    // traced or nothing was hit, which leaves `shade_surface`'s own sample standing exactly.
+    traced: vec3<f32>,
+    traced_w: f32,
 }
 
 fn shade_surface(s: Surface) -> vec3<f32> {
@@ -280,7 +289,15 @@ fn shade_surface(s: Surface) -> vec3<f32> {
     let e = f0 * dfg.x + vec3<f32>(dfg.y);
     let energy_compensation = 1.0 + f0 * (1.0 / max(dfg.x + dfg.y, 1e-4) - 1.0);
     let irradiance = textureSampleLevel(irradiance_map, env_sampler, n, 0.0).rgb;
-    let prefiltered = sample_specular(reflected, ibl_roughness);
+    var prefiltered = sample_specular(reflected, ibl_roughness);
+    // **Substituted, never added** (the shading notes, section 15.5): the traced radiance stands
+    // in for the environment this lobe would otherwise reflect, by the weight the camera chose.
+    // Added on top, it would count the environment twice and make every reflective part too
+    // bright by an amount that looks plausible. A branch rather than a mix by nought, so a frame
+    // with nothing traced is the same bytes it was before this existed.
+    if s.traced_w > 0.0 && camera.reflect.w == 1.0 {
+        prefiltered = mix(prefiltered, s.traced, s.traced_w);
+    }
     let specular_ibl = prefiltered * e * energy_compensation;
     let diffuse_ibl = irradiance * diffuse_color * (vec3<f32>(1.0) - e);
     var color = (diffuse_ibl + specular_ibl) * (env_intensity * s.open);
@@ -341,7 +358,12 @@ fn shade_surface(s: Surface) -> vec3<f32> {
         let coat_n_dot_v = max(dot(n_coat, v), 1e-4);
         let fc = f_schlick_scalar(0.04, coat_n_dot_v) * clearcoat;
         let coat_reflected = reflect(-v, n_coat);
-        let coat_ibl = sample_specular(coat_reflected, ibl_clearcoat_roughness);
+        var coat_ibl = sample_specular(coat_reflected, ibl_clearcoat_roughness);
+        // Under a coat it is the coat's lobe that is traced (item 54); the base's attenuation by
+        // the coat's Fresnel is untouched.
+        if s.traced_w > 0.0 && camera.reflect.w == 2.0 {
+            coat_ibl = mix(coat_ibl, s.traced, s.traced_w);
+        }
         color = color * (1.0 - fc) + coat_ibl * (fc * env_intensity * s.open);
     }
 
@@ -529,6 +551,34 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
             let p = ray.origin + ray.dir * g.w;
             let n = normalize(g.xyz);
             let packed = measured_light(pixel, index, p, n, g.w);
+            // The reflected hit first, shaded by the same function with no traced input of its
+            // own -- one bounce, fully open and fully lit -- and then this pixel with its radiance
+            // (item 54). Two calls in sequence because WGSL has no recursion; one function rather
+            // than a second BRDF, so a reflected chrome part agrees with the chrome part itself.
+            // The ray is rebuilt from the same inputs the march built it from, through the one
+            // `reflected_direction`; a miss or an exhausted ray leaves nothing traced.
+            var traced = vec3<f32>(0.0);
+            var traced_w = 0.0;
+            if camera.reflect.w > 0.5 {
+                let found = reflections[index];
+                if found.w >= 0.0 {
+                    let dir = reflected_direction(camera, pixel, n, -ray.dir);
+                    let q = reflect_origin(camera, p, n) + dir * found.w;
+                    // The footprint widens with the whole path, which keeps the flake map's mip
+                    // honest on the reflected surface.
+                    traced = shade_surface(Surface(
+                        q,
+                        normalize(found.xyz),
+                        -dir,
+                        1.0,
+                        1.0,
+                        pixel_footprint(camera, g.w + found.w),
+                        vec3<f32>(0.0),
+                        0.0,
+                    ));
+                    traced_w = camera.reflect.y;
+                }
+            }
             color = shade_surface(Surface(
                 p,
                 n,
@@ -536,6 +586,8 @@ fn shade(@builtin(global_invocation_id) gid: vec3<u32>) {
                 packed.x,
                 packed.y,
                 pixel_footprint(camera, g.w),
+                traced,
+                traced_w,
             ));
         }
     }

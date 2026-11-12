@@ -743,7 +743,8 @@ pub fn outline_chain(
 ///
 /// # Where it stops
 ///
-/// At an end nothing else meets — and at a fork. Where three or more ends share a point there
+/// At an end nothing else meets, at a join that is not held ([`fieldform_scene::Document::ends_held`])
+/// — and at a fork. Where three or more ends share a point there
 /// is more than one way on, and a loop's walk settles that by trying each and keeping the one
 /// that closes. An open chain has no such test, so it stops there rather than pick: a wall that
 /// ends at a junction is something a person can see and extend, and one that wandered off down
@@ -773,11 +774,24 @@ pub(crate) fn outline_chain_turning(
     used[seat] = true;
     let mut points = pieces[seat].1.clone();
     let mut curves = vec![seed];
+    use fieldform_scene::{CurveEnd, End};
+    let end_of = |curve, by_start: bool| CurveEnd { curve, end: if by_start { End::Start } else { End::End } };
+    // The chain's two free ends, as curve ends, so each step can ask whether its join is held.
+    let (mut tail, mut head) = (end_of(seed, false), end_of(seed, true));
 
-    // Onward from the far end, for as long as there is exactly one way on.
+    // **Across held joins only** (the owner, 2026-11-11): a wall along open curves runs as far as
+    // the open profile row they make and no further, so it stops where a continuity is not set,
+    // as it stops at a fork. Ends that merely touch are two curves, and a wall that ran on into
+    // the next one was a wall nobody could see the extent of in the list. A loop is unchanged:
+    // it is found by touching, above, as its profile row is.
+    //
+    // Onward from the far end, for as long as there is exactly one way on and it is held.
     while let Some((i, by_its_start)) =
         the_only_piece_at(&pieces, &used, *points.last().expect("a piece has two points"))
     {
+        if !document.ends_held(tail, end_of(pieces[i].0, by_its_start)) {
+            break;
+        }
         let mut added = pieces[i].1.clone();
         if !by_its_start {
             added.reverse();
@@ -786,9 +800,13 @@ pub(crate) fn outline_chain_turning(
         points.extend(added.into_iter().skip(1));
         used[i] = true;
         curves.push(pieces[i].0);
+        tail = end_of(pieces[i].0, !by_its_start);
     }
     // And back from the near end, the same way, with each piece turned to arrive at it.
     while let Some((i, by_its_start)) = the_only_piece_at(&pieces, &used, points[0]) {
+        if !document.ends_held(head, end_of(pieces[i].0, by_its_start)) {
+            break;
+        }
         let mut added = pieces[i].1.clone();
         if by_its_start {
             added.reverse();
@@ -798,6 +816,7 @@ pub(crate) fn outline_chain_turning(
         points = added;
         used[i] = true;
         curves.insert(0, pieces[i].0);
+        head = end_of(pieces[i].0, !by_its_start);
     }
     Ok(Chain { points, curves, closed: false })
 }
@@ -2885,6 +2904,54 @@ mod chain_tests {
         id
     }
 
+    /// Holds every place ends meet, as setting a continuity there does: every end at one place on
+    /// one point. An open chain crosses a join only where it is held.
+    fn hold_every_join(doc: &mut Document) {
+        let mut places: Vec<(Point3<f64>, fieldform_scene::NodeId)> = Vec::new();
+        let ids: Vec<CurveId> = doc.curves.keys().copied().collect();
+        for id in ids {
+            let curve = doc.curves.get_mut(&id).expect("listed");
+            let n = curve.control_points().len();
+            for i in [0, n - 1] {
+                let p = curve.control_points()[i];
+                let node = match places.iter().find(|(q, _)| (q - p).norm() <= JOINED_MM) {
+                    Some((_, node)) => *node,
+                    None => {
+                        let node = fieldform_scene::NodeId::new();
+                        places.push((p, node));
+                        node
+                    }
+                };
+                curve.place_on(i, Some(node));
+            }
+        }
+    }
+
+    /// **A chain crosses only the joins that are held** (the owner, 2026-11-11), so a wall runs
+    /// as far as the open profile row and no further: three lines touching end to end, the first
+    /// join held, are a chain of two; a joint relation at the second carries it on to the third.
+    #[test]
+    fn a_chain_stops_at_a_join_that_is_not_held() {
+        let mut doc = Document::new();
+        let a = line(&mut doc, (0.0, 0.0), (10.0, 0.0));
+        let b = line(&mut doc, (10.0, 0.0), (20.0, 5.0));
+        let c = line(&mut doc, (20.0, 5.0), (20.0, 15.0));
+        assert_eq!(outline_chain(&doc, a, None).expect("a chain").curves, [a], "touching is not held");
+        let joint = fieldform_scene::NodeId::new();
+        doc.curves.get_mut(&a).unwrap().place_on(1, Some(joint));
+        doc.curves.get_mut(&b).unwrap().place_on(0, Some(joint));
+        assert_eq!(outline_chain(&doc, a, None).expect("a chain").curves, [a, b]);
+        assert_eq!(outline_chain(&doc, c, None).expect("a chain").curves, [c], "from the far side too");
+        use fieldform_scene::{CurveEnd, End, JointContinuity, Relation, RelationId, RelationRecord};
+        let relation = Relation::Joint {
+            master: CurveEnd { curve: b, end: End::End },
+            slave: CurveEnd { curve: c, end: End::Start },
+            continuity: JointContinuity::G1,
+        };
+        doc.relations.insert(RelationId::new(), RelationRecord { relation, broken: None });
+        assert_eq!(outline_chain(&doc, a, None).expect("a chain").curves, [a, b, c], "a joint relation holds it too");
+    }
+
     /// The corners a chain turns at and its two ends, in order — which is what a chain of
     /// straight lines is, however many points each line was sampled to.
     fn corners(points: &[Point3<f64>]) -> Vec<(f64, f64)> {
@@ -2911,6 +2978,7 @@ mod chain_tests {
         // Drawn from its far end back.
         let b = line(&mut doc, (20.0, 5.0), (10.0, 0.0));
         let c = line(&mut doc, (20.0, 5.0), (20.0, 15.0));
+        hold_every_join(&mut doc);
 
         let from_a = outline_chain(&doc, a, None).expect("a chain");
         assert!(!from_a.closed);
@@ -2985,6 +3053,7 @@ mod chain_tests {
         let mut doc = Document::new();
         let wall = line(&mut doc, (0.0, 0.0), (10.0, 0.0));
         let aim = line(&mut doc, (10.0, 0.0), (10.0, 40.0));
+        hold_every_join(&mut doc);
         let walked_on = outline_chain(&doc, wall, None).expect("a chain");
         assert_eq!(walked_on.curves, [wall, aim]);
         let kept_apart = outline_chain(&doc, wall, Some(aim)).expect("a chain");
@@ -3030,6 +3099,7 @@ mod chain_tests {
                 doc.curves_created.insert(id, when as u64 + 1);
                 drawn.push(id);
             }
+            hold_every_join(&mut doc);
             let (originals, copies) = drawn.split_at(zig.len());
             for own in [originals, copies] {
                 for &seed in own {

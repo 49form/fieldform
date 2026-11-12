@@ -301,6 +301,42 @@ impl App {
         true
     }
 
+    /// Whether Space means "keep, and lift again" this frame: an extrude or inset is pending and no
+    /// field has the keyboard but its own panel's. A name being typed anywhere else keeps its spaces.
+    pub(crate) fn space_chains_cage_session(&self, ctx: &egui::Context) -> bool {
+        let Some(session) = self.cage_session.as_ref() else { return false };
+        !ctx.egui_wants_keyboard_input() || ctx.memory(|m| m.focused()) == Some(field_id(session.command.id))
+    }
+
+    /// **Space with an extrude or inset pending keeps it and lifts the next from its cap** (the
+    /// owner, 2026-11-12): a run of extrusions on the key other modellers teach for one. E again
+    /// does the same and still does; Space was the palette alone until then (R7).
+    ///
+    /// A number half-typed into the panel is taken first, as Tab takes it, so `2`, `0`, Space
+    /// keeps a cap at 20. One that does not read leaves the session pending with the reason under
+    /// its row, rather than keeping a cap somewhere the person did not ask for.
+    pub(crate) fn cage_session_again(&mut self, ctx: &egui::Context) {
+        let Some(session) = self.cage_session.as_mut() else { return };
+        let command = session.command;
+        let typed = session.panel.typing.take();
+        // The field the number was typed into is not drawn again, and the space itself is not text.
+        ctx.memory_mut(|m| m.surrender_focus(field_id(command.id)));
+        ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t == " ")));
+        if let Some(text) = typed {
+            let rows = self.cage_panel_rows();
+            let at = self.cage_session.as_ref().map_or(0, |s| s.panel.focus).min(rows.len().saturating_sub(1));
+            if let Some(row) = rows.get(at)
+                && let Err(why) = self.cage_panel_set(row.key, text.trim())
+            {
+                if let Some(session) = self.cage_session.as_mut() {
+                    session.panel.error = Some(why);
+                }
+                return;
+            }
+        }
+        self.invoke_command(command);
+    }
+
     /// Tab and Shift+Tab with a cage session pending: confirm, then the next row or the one before.
     pub(crate) fn cage_panel_tab(&mut self, back: bool) {
         let rows = self.cage_panel_rows();
@@ -435,7 +471,7 @@ impl App {
                 ui.label(egui::RichText::new(why).color(ui.visuals().warn_fg_color).small());
             }
             ui.separator();
-            ui.label(egui::RichText::new("Enter keep · Esc put back · Tab next · drag the cap").weak().small());
+            ui.label(egui::RichText::new("Enter keep · Space keep and again · Esc put back · Tab next · drag the cap").weak().small());
         });
         if !middle_down {
             panel.scrub = None;

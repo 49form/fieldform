@@ -1342,6 +1342,62 @@ impl Command for SetImages {
     }
 }
 
+/// Sets the whole list of section cuts, before and after.
+pub struct SetSections {
+    before: Vec<fieldform_scene::SectionCut>,
+    after: Vec<fieldform_scene::SectionCut>,
+}
+
+impl SetSections {
+    pub fn new(before: Vec<fieldform_scene::SectionCut>, after: Vec<fieldform_scene::SectionCut>) -> Self {
+        Self { before, after }
+    }
+}
+
+impl Command for SetSections {
+    fn name(&self) -> &str {
+        "sections.set"
+    }
+
+    fn execute(&mut self, doc: &mut Document) -> Result<(), OpError> {
+        doc.sections = self.after.clone();
+        Ok(())
+    }
+
+    fn undo(&mut self, doc: &mut Document) -> Result<(), OpError> {
+        doc.sections = self.before.clone();
+        Ok(())
+    }
+}
+
+/// Sets the whole list of curvature combs, before and after.
+pub struct SetCombs {
+    before: Vec<fieldform_scene::CurvatureComb>,
+    after: Vec<fieldform_scene::CurvatureComb>,
+}
+
+impl SetCombs {
+    pub fn new(before: Vec<fieldform_scene::CurvatureComb>, after: Vec<fieldform_scene::CurvatureComb>) -> Self {
+        Self { before, after }
+    }
+}
+
+impl Command for SetCombs {
+    fn name(&self) -> &str {
+        "combs.set"
+    }
+
+    fn execute(&mut self, doc: &mut Document) -> Result<(), OpError> {
+        doc.combs = self.after.clone();
+        Ok(())
+    }
+
+    fn undo(&mut self, doc: &mut Document) -> Result<(), OpError> {
+        doc.combs = self.before.clone();
+        Ok(())
+    }
+}
+
 /// Sets or removes an import's record.
 pub struct SetSource {
     id: fieldform_scene::id::SourceId,

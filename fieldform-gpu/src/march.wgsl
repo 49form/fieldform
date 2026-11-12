@@ -30,6 +30,14 @@
 // pass is a fixed program that reads what the march wrote.
 @group(0) @binding(8) var<storage, read_write> extras: array<u32>;
 
+// The still's reflected march (backlog item 54): per pixel, the reflected hit's normal in xyz
+// and in w its distance along the reflected ray, or a negative word where there is nothing to
+// shade -- -1 a miss, -2 a ray whose budget ran out, -3 a pixel no reflected ray left. Written
+// by `reflect_march` and read by the lighting pass, which rebuilds the ray it was found on
+// through `reflected_direction` in `camera.wgsl`. Sized with the frame only while a still
+// traces reflections; sixteen bytes otherwise, bound and never touched.
+@group(0) @binding(12) var<storage, read_write> reflections: array<vec4<f32>>;
+
 // **The skip grid** (performance-plan-of-action.md §5 V5). A cube of `n³` cells about the scene,
 // each holding a distance no point of that cell is nearer the surface than -- or nothing, where
 // the cell might hold surface. The march asks the grid before it asks the field, and where the
@@ -813,85 +821,47 @@ fn shadow(p: vec3<f32>, n: vec3<f32>, light: vec3<f32>, reach: f32, softness: f3
     return clamp(lit, 0.0, 1.0);
 }
 
-// What the primary ray found, for whichever entry point asked.
-//
-// **Two entry points share this because the draft tier must not compile what it never runs.**
-// `march` reads the field at five places and `field_normal` once, so every operand of the
-// composition is written into one entry point six times over, and the driver's compile is a power
-// of about 2 to 2.5 in the result (`union-compile-8fa06b7.md`). Two of those six are the
-// occlusion's five samples and the shadow's walk, which the draft tier never takes — it was a
-// uniform branch, so the draft waited for the driver to compile both anyway. Measured at about
-// **half the compile** on anything that walks: `draft_tier_cost.rs`.
-//
-// One function and two thin entry points rather than two copies of the march. A second copy of
-// this body is the thing that has been broken twice by being "simplified" into one path, and it
-// would be broken again by being duplicated into two.
-//
-// **Since loop spec P5 there is one entry point here, and the still's extras are `occlude`'s.**
-// They went to a dispatch of their own so they could be marched for one pixel in four, which a
-// lane of this march cannot do for itself without the other three lanes waiting on it; one in four
-// is off, and the split pays at every pixel too, so the still traces with `march`. This stays a
-// function so that whatever reads the primary ray reads the one copy of it.
-struct Primary {
-    // False for a thread with no pixel: past the band, or past the image edge. Such a thread has
-    // written nothing and must do nothing.
-    live: bool,
-    // Whether it reached a surface. A miss has already written the buffers that say so.
-    hit: bool,
-    index: u32,
-    p: vec3<f32>,
-    normal: vec3<f32>,
+// The normal of a hit at `p`, read where the march last stood outside (`at`) -- unless the
+// section's cut face owns the point. Whichever operand defined the value here owns the normal,
+// exactly as a boolean's does, and the body's normal on the cap would shade it as though it were
+// curved: the giveaway that a section was drawn rather than traced. One rule for the primary ray
+// and the reflected one (item 54), since a reflected ray shading the cap by the body's normal
+// would show a curved reflection of a flat cut. The carried normal is read whether or not the
+// cap wins, because reading it is what leaves a blend's seam scale for `occlude`.
+fn hit_normal(p: vec3<f32>, at: vec3<f32>, cut: f32, here: f32) -> vec3<f32> {
+    let carried = field_normal(at);
+    if cut >= here {
+        return section_normal(p);
+    }
+    return carried;
 }
 
-/// The pixel this thread owns, marched. Writes `output` and `owners`; leaves `extras` to the
-/// caller.
-fn trace_primary(gid: vec3<u32>) -> Primary {
-    let nothing = Primary(false, false, 0u, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0));
-    let width = camera.frame.x;
-    let height = camera.frame.y;
-    // The dispatch covers this band's rows only; `gid.y` counts from the band's first row.
-    let row = gid.y + camera.band.x;
-    if gid.x >= width || gid.y >= camera.band.y || row >= height {
-        return nothing;
-    }
-    let pixel = vec2<u32>(gid.x, row);
-    let index = row * width + gid.x;
+// What a march along one ray found: whether it reached a surface, how far along the ray that
+// was, and where the hit's normal is read (`Settle` moves the hit onto the surface but reads
+// the normal where the march last stood outside); and whether the budget ran out short of
+// `far` -- a ray that is neither a hit nor a miss, which a reflected march counts.
+struct Marched {
+    hit: bool,
+    exhausted: bool,
+    t: f32,
+    t_normal: f32,
+}
 
-    // **The cull is a statement about the primary ray and nothing else.** It is loaded here and
-    // cleared before every return below, and the occlusion and the shadow -- marched by `occlude`,
-    // a dispatch of its own that never loads it -- run with the whole scene. They have to: a shadow
-    // ray goes toward the light, which can be across the view, and a body outside this tile's
-    // frustum can perfectly well stand between this surface and the sun. One rule, rather than an
-    // exception per secondary ray.
-    load_tile_mask(pixel);
-
-    let ray = primary_ray(camera, pixel);
-    let origin = ray.origin;
-    let dir = ray.dir;
-
-    let far = camera.lens.z;
-    let epsilon = camera.lens.w;
-    let budget = camera.frame.z;
-
-    // Start where the ray enters the scene's sphere, when there is one -- see `Camera.scene`.
-    // Every step across the empty space in front of a model was a step the field was asked
-    // for nothing, and a divided field pays for those at its stretch factor; this removes
-    // them exactly. `max(.., 0)` keeps an eye inside the sphere where it is.
-    var t = 0.0;
+// **The one march loop**, for the primary ray and for a reflected one (backlog item 54; the
+// shading notes' section 15.4): the skip grid's hops, over-relaxation with its vouching,
+// confirmation and refusal, the exact finish on an outline, and settling onto the surface.
+// Lifted out of `trace_primary` as a pure refactor -- the pictures before and after are the
+// same bytes, `reflection_scenes` holds them -- and never copied, for the reason
+// `camera.wgsl`'s header gives: a second loop that drifted by a step would find a different
+// surface, and nothing would say which of the two was wrong.
+//
+// `start` is where the ray begins along `dir` from `origin` -- the scene sphere's entry for a
+// primary ray, a few thresholds off the surface for a reflected one -- and `far` where it gives
+// up. The tile mask, `exact_reads` and `seam_scale` are the thread's own and are read here as
+// the loop always read them; a reflected ray marches with whatever its primary ray left.
+fn march_ray(origin: vec3<f32>, dir: vec3<f32>, start: f32, far: f32, epsilon: f32, budget: u32) -> Marched {
+    var t = start;
     var hit = false;
-    if camera.scene.w > 0.0 {
-        let oc = origin - camera.scene.xyz;
-        let b = dot(oc, dir);
-        let c = dot(oc, oc) - camera.scene.w * camera.scene.w;
-        let disc = b * b - c;
-        if disc < 0.0 {
-            output[index] = vec4<f32>(0.0, 0.0, 0.0, -1.0);
-            owners[index] = 0xffffffffu;
-            tile_live = false;
-            return Primary(true, false, index, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0));
-        }
-        t = max(-b - sqrt(disc), 0.0);
-    }
     // See `RELAX_REST`. `reach` is the step that brought the ray here when it was a long one,
     // and nought when it was plain; `before` is the reading it was taken from.
     //
@@ -1088,6 +1058,94 @@ fn trace_primary(gid: vec3<u32>) -> Primary {
     if t_normal < 0.0 {
         t_normal = t;
     }
+    return Marched(hit, !hit && t <= far, t, t_normal);
+}
+
+// What the primary ray found, for whichever entry point asked.
+//
+// **Two entry points share this because the draft tier must not compile what it never runs.**
+// `march` reads the field at five places and `field_normal` once, so every operand of the
+// composition is written into one entry point six times over, and the driver's compile is a power
+// of about 2 to 2.5 in the result (`union-compile-8fa06b7.md`). Two of those six are the
+// occlusion's five samples and the shadow's walk, which the draft tier never takes — it was a
+// uniform branch, so the draft waited for the driver to compile both anyway. Measured at about
+// **half the compile** on anything that walks: `draft_tier_cost.rs`.
+//
+// One function and two thin entry points rather than two copies of the march. A second copy of
+// this body is the thing that has been broken twice by being "simplified" into one path, and it
+// would be broken again by being duplicated into two.
+//
+// **Since loop spec P5 there is one entry point here, and the still's extras are `occlude`'s.**
+// They went to a dispatch of their own so they could be marched for one pixel in four, which a
+// lane of this march cannot do for itself without the other three lanes waiting on it; one in four
+// is off, and the split pays at every pixel too, so the still traces with `march`. This stays a
+// function so that whatever reads the primary ray reads the one copy of it.
+struct Primary {
+    // False for a thread with no pixel: past the band, or past the image edge. Such a thread has
+    // written nothing and must do nothing.
+    live: bool,
+    // Whether it reached a surface. A miss has already written the buffers that say so.
+    hit: bool,
+    index: u32,
+    p: vec3<f32>,
+    normal: vec3<f32>,
+}
+
+/// The pixel this thread owns, marched. Writes `output` and `owners`; leaves `extras` to the
+/// caller.
+fn trace_primary(gid: vec3<u32>) -> Primary {
+    let nothing = Primary(false, false, 0u, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0));
+    let width = camera.frame.x;
+    let height = camera.frame.y;
+    // The dispatch covers this band's rows only; `gid.y` counts from the band's first row.
+    let row = gid.y + camera.band.x;
+    if gid.x >= width || gid.y >= camera.band.y || row >= height {
+        return nothing;
+    }
+    let pixel = vec2<u32>(gid.x, row);
+    let index = row * width + gid.x;
+
+    // **The cull is a statement about the primary ray and nothing else.** It is loaded here and
+    // cleared before every return below, and the occlusion and the shadow -- marched by `occlude`,
+    // a dispatch of its own that never loads it -- run with the whole scene. They have to: a shadow
+    // ray goes toward the light, which can be across the view, and a body outside this tile's
+    // frustum can perfectly well stand between this surface and the sun. One rule, rather than an
+    // exception per secondary ray.
+    load_tile_mask(pixel);
+
+    let ray = primary_ray(camera, pixel);
+    let origin = ray.origin;
+    let dir = ray.dir;
+
+    let far = camera.lens.z;
+    let epsilon = camera.lens.w;
+    let budget = camera.frame.z;
+
+    // Start where the ray enters the scene's sphere, when there is one -- see `Camera.scene`.
+    // Every step across the empty space in front of a model was a step the field was asked
+    // for nothing, and a divided field pays for those at its stretch factor; this removes
+    // them exactly. `max(.., 0)` keeps an eye inside the sphere where it is.
+    var t = 0.0;
+    var hit = false;
+    if camera.scene.w > 0.0 {
+        let oc = origin - camera.scene.xyz;
+        let b = dot(oc, dir);
+        let c = dot(oc, oc) - camera.scene.w * camera.scene.w;
+        let disc = b * b - c;
+        if disc < 0.0 {
+            output[index] = vec4<f32>(0.0, 0.0, 0.0, -1.0);
+            owners[index] = 0xffffffffu;
+            tile_live = false;
+            return Primary(true, false, index, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0));
+        }
+        t = max(-b - sqrt(disc), 0.0);
+    }
+
+    // The loop itself, shared with a reflected ray: see `march_ray`.
+    let marched = march_ray(origin, dir, t, far, epsilon, budget);
+    hit = marched.hit;
+    t = marched.t;
+    let t_normal = marched.t_normal;
 
     if !hit {
         output[index] = vec4<f32>(0.0, 0.0, 0.0, -1.0);
@@ -1112,10 +1170,7 @@ fn trace_primary(gid: vec3<u32>) -> Primary {
     owners[index] = owner;
     // Read where the march last stood outside, which for every hit `settle` did not move is the
     // hit itself; see `Settle` for why not on the surface.
-    var normal = field_normal(origin + dir * t_normal);
-    if cut >= here {
-        normal = section_normal(p);
-    }
+    let normal = hit_normal(p, origin + dir * t_normal, cut, here);
     output[index] = vec4<f32>(normal, t);
     tile_live = false;
     return Primary(true, true, index, p, normal);
@@ -1141,6 +1196,70 @@ fn march(@builtin(global_invocation_id) gid: vec3<u32>) {
     // reads as open rather than brighter than open.
     let seam = select(1.0, seam_scale, camera.key_light.w >= 0.5);
     extras[found.index] = pack2x16float(vec2<f32>(seam, 1.0));
+}
+
+// **The still tier's reflected march** (backlog item 54; the shading notes, section 15.4): from
+// every pixel this band's march hit, one more ray through `march_ray` along the direction the
+// traced lobe reflects, and what it finds written for the lighting pass to shade. A dispatch of
+// its own after `march` in the same pass, for the reasons `occlude` is one; and over every pixel
+// of the band rather than `occlusion_pixels`' quarter, because a mirror reflection is the
+// high-frequency thing being judged and a fill would blur exactly that.
+//
+// A primary march in every respect but its origin: the raw reading as its step, never the
+// shading marches' scale (`camera.occlusion.w`), which walks through thin material; the whole
+// scene with no tile mask, since a reflected ray goes anywhere; and `scene()`, so a sectioned
+// part reflects the cut part and not the whole one. The origin sits `REFLECT_OFFSET` thresholds
+// off the surface (`reflect_origin`), and the loop's own refusal does the rest: a reading under
+// the threshold whose look-ahead comes back up is the surface the ray is leaving.
+//
+// `far` is the exit of the scene's sphere where there is one, since a ray that has left the
+// sphere can hit nothing after it. A ray that runs out of steps short of that is written as
+// exhausted, which the lighting pass shades as a miss and `read_reflections` can count -- the
+// one symptom of a budget set too low that does not read as "reflections are missing on this
+// scene", which nobody traces back to a constant.
+@compute @workgroup_size(8, 8, 1)
+fn reflect_march(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if camera.reflect.w < 0.5 {
+        return;
+    }
+    let width = camera.frame.x;
+    let height = camera.frame.y;
+    let row = gid.y + camera.band.x;
+    if gid.x >= width || gid.y >= camera.band.y || row >= height {
+        return;
+    }
+    let pixel = vec2<u32>(gid.x, row);
+    let index = row * width + gid.x;
+    let found = output[index];
+    if found.w < 0.0 {
+        reflections[index] = vec4<f32>(0.0, 0.0, 0.0, -3.0);
+        return;
+    }
+    let ray = primary_ray(camera, pixel);
+    let p = ray.origin + ray.dir * found.w;
+    let n = normalize(found.xyz);
+    let dir = reflected_direction(camera, pixel, n, -ray.dir);
+    let origin = reflect_origin(camera, p, n);
+    var far = camera.lens.z;
+    if camera.scene.w > 0.0 {
+        let oc = origin - camera.scene.xyz;
+        let b = dot(oc, dir);
+        let c = dot(oc, oc) - camera.scene.w * camera.scene.w;
+        let disc = b * b - c;
+        if disc >= 0.0 {
+            far = min(far, max(-b + sqrt(disc), 0.0));
+        }
+    }
+    let marched = march_ray(origin, dir, 0.0, far, camera.lens.w, u32(camera.reflect.x));
+    if !marched.hit {
+        reflections[index] = vec4<f32>(0.0, 0.0, 0.0, select(-1.0, -2.0, marched.exhausted));
+        return;
+    }
+    let q = origin + dir * marched.t;
+    let cut = section_distance(q);
+    let here = field(q);
+    let normal = hit_normal(q, origin + dir * marched.t_normal, cut, here);
+    reflections[index] = vec4<f32>(normal, marched.t);
 }
 
 // **The still tier's occlusion and shadow, at the pixels `occlusion_pixels` names** — every one as

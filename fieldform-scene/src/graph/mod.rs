@@ -19,10 +19,11 @@
 //! that is the difference between the parametric layer arriving as pure addition and arriving
 //! as a rewrite.
 
-use crate::id::{CageId, NodeId};
+use crate::id::{CageId, NodeId, ParamId};
 use ::serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+mod family;
 mod lattice;
 mod node;
 mod operand;
@@ -30,6 +31,7 @@ mod params;
 mod pattern;
 mod serde;
 
+pub use family::Family;
 pub use lattice::{Banding, CellMap, LatticeCell, LatticePhase};
 pub use node::{uniform_factor, Node};
 pub use operand::Operand;
@@ -878,6 +880,47 @@ impl Graph {
     /// invalidate: the next call to `roots` sees whatever the graph now says.
     pub fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
         self.nodes.get_mut(&id)
+    }
+
+    /// Parses every Expression block's text under `names` -- what a document does once its
+    /// parameters are known, after a read, and the one place a text read from a file becomes a
+    /// tree. The first text that does not parse is answered with its node and the error.
+    pub fn resolve_written(&mut self, names: &dyn Fn(&str) -> Option<ParamId>) -> Result<(), (NodeId, crate::ParseError)> {
+        let mut ids: Vec<NodeId> = self.nodes.keys().copied().collect();
+        ids.sort();
+        for id in ids {
+            if let Some(Node::Expression { text, .. }) = self.nodes.get_mut(&id) {
+                text.resolve(names).map_err(|e| (id, e))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Re-renders every Expression block's text with the names `names` gives: a rename, so
+    /// each text says the new name and its tree is untouched.
+    pub fn rerender_written(&mut self, names: &dyn Fn(ParamId) -> String) {
+        for node in self.nodes.values_mut() {
+            if let Node::Expression { text, .. } = node {
+                text.rerender(names);
+            }
+        }
+    }
+
+    /// Every parameter the Expression blocks read, each once: references inside a text are ids
+    /// in a tree rather than `ParamRef`s, so `param_refs` cannot list them and a reader that
+    /// asks "who reads this parameter" adds these.
+    pub fn written_references(&self) -> Vec<(NodeId, ParamId)> {
+        let mut out: Vec<(NodeId, ParamId)> = self
+            .nodes
+            .iter()
+            .filter_map(|(id, node)| match node {
+                Node::Expression { text, .. } => Some(text.references().into_iter().map(move |p| (*id, p))),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        out.sort();
+        out
     }
 
     /// Every node in the graph, including any the output does not reach.

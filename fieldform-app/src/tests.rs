@@ -2247,7 +2247,7 @@
     /// is typed, capped. The optional current is the new part — a field with nothing yet offers
     /// every choice, which is what the ramp-driver field does before a ramp is picked.
     #[test]
-    fn a_reference_fields_suggestions_offer_everything_and_narrow_by_what_is_typed() {
+    fn a_reference_fields_suggestions_offer_what_it_can_take_and_narrow_by_what_is_typed() {
         use super::{suggested, RefChoice};
         let choices = vec![
             RefChoice::named(1u32, "Ramp"),
@@ -2276,22 +2276,38 @@
         );
         assert!(suggested(&choices, "zzz", true).is_empty());
 
-        // **A refused choice is offered and marked, not left out** -- the owner's ruling: a
-        // missing row answers nothing, and why a body is not an option is the question somebody
-        // has while looking at the list rather than after submitting a name.
-        let mut with_refusal = vec![RefChoice::named(1u32, "Plane"), RefChoice::named(2, "Sphere")];
-        with_refusal[0].refusal = Some("a point has no interior");
-        let rows = suggested(&with_refusal, "", false);
-        assert_eq!(keys(rows.clone()), [1, 2], "both rows are offered");
-        assert_eq!(
-            rows.iter().map(|(_, _, r)| r.is_some()).collect::<Vec<_>>(),
-            [true, false],
-            "and the refused one carries its reason, which is what greys it"
-        );
+        // **A refused choice is left out.** Reversed by the owner 2026-11-07, who had first ruled
+        // that a refused row be offered greyed with its reason: a point and a curve sitting in an
+        // offset's list read as things it could take ("things like the offset tool should not list
+        // items like points and curves as input in its field -- apply this across all tools"). The
+        // reason is still said when a refused block is typed or dropped.
+        let mut with_refusal = vec![RefChoice::named(1u32, "Point"), RefChoice::named(2, "Sphere")];
+        with_refusal[0].refusal = Some("a point has no volume");
+        assert_eq!(keys(suggested(&with_refusal, "", false)), [2], "only what it can take");
+        assert_eq!(keys(suggested(&with_refusal, "poi", true)), Vec::<u32>::new(), "typed for, still not offered");
 
         let many: Vec<RefChoice<u32>> =
             (0..25).map(|i| RefChoice::named(i, &format!("Block {i}"))).collect();
         assert_eq!(suggested(&many, "", false).len(), 10, "a long list is cut at ten");
+    }
+
+    /// **A field's list never covers the field** (the owner, 2026-11-07): below it while it fits,
+    /// above it when only above has the room, and on the roomier side, scrolling, when neither does.
+    #[test]
+    fn a_reference_list_opens_where_it_leaves_its_field_in_sight() {
+        use crate::app::block_list::reference_list_placement as place;
+        use eframe::egui;
+        let screen = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let field_at = |y: f32| egui::Rect::from_min_size(egui::pos2(100.0, y), egui::vec2(120.0, 20.0));
+        let (above, room) = place(field_at(100.0), screen, 200.0);
+        assert!(!above && room >= 200.0, "high on the screen: below, with room for all of it");
+        let (above, room) = place(field_at(550.0), screen, 200.0);
+        assert!(above && room >= 200.0, "near the bottom: above, with room for all of it");
+        let (above, room) = place(field_at(290.0), screen, 400.0);
+        assert!(!above && room < 400.0, "too tall for either side: the roomier side, scrolling");
+        let field = field_at(550.0);
+        let (_, room) = place(field, screen, 200.0);
+        assert!(field.top() - room >= screen.top(), "and never past the top of the screen");
     }
 
     /// A ramp is addressed in a ramp's words, not a block's — a mistyped name is told "no ramp is
@@ -4699,7 +4715,7 @@
             use fieldform_scene::Ownership;
             let square: Vec<CurveId> = (0..4).map(|_| CurveId::new()).collect();
             let loose = CurveId::new();
-            let profiles = ProfileRows { at: None, loops: vec![square.clone()] };
+            let profiles = ProfileRows { at: None, loops: vec![square.clone()], chains: Vec::new() };
 
             // Each case: the variables, how every other curve is held, and whether the variables
             // are read — a block holding a curve reads it, and a free one is read by nothing.
@@ -5087,7 +5103,7 @@
             let joints = points_in(&doc, part);
             assert_eq!(joints.len(), 4, "four corners, four joints");
             let alone = read_through(&mut stack, &mut doc, part, Node::Point { at: [ParamRef::Literal(0.0); 3] });
-            let profiles = ProfileRows { at: None, loops: fieldform_field::profile_partition(&doc) };
+            let profiles = ProfileRows { at: None, loops: fieldform_field::profile_partition(&doc), chains: Vec::new() };
             assert_eq!(profiles.loops.len(), 1, "the square is one held loop");
             assert_eq!(
                 blocks_a_line_can_call(&doc, part, &profiles),
@@ -5235,7 +5251,7 @@
             blocks: &[NodeId],
         ) -> Vec<(super::super::Block, Vec<super::super::Block>)> {
             use super::super::{folded_curve_row_in, nest_rows, Block, ProfileRows};
-            let profiles = ProfileRows { at: None, loops: fieldform_field::profile_partition(doc) };
+            let profiles = ProfileRows { at: None, loops: fieldform_field::profile_partition(doc), chains: Vec::new() };
             let nesting = doc.nesting_in(&doc.parts[&part].graph);
             let readers = |id| nesting.readers_of_curve(id);
             let mut flat: Vec<Block> = square
@@ -5403,6 +5419,25 @@
             // Along an open chain of three sides, as a wall named by the middle one.
             let (mut doc, base, square) = square_document();
             doc.curves.remove(&square[3]);
+            // Held at its two joins, as a continuity set there holds them: an open chain is
+            // walked across held joins only (the owner, 2026-11-11), and one that only touched
+            // would be a wall along the middle side alone.
+            let mut places: Vec<(Point3<f64>, NodeId)> = Vec::new();
+            for side in &square[..3] {
+                let curve = doc.curves.get_mut(side).expect("a side");
+                let n = curve.control_points().len();
+                for i in [0, n - 1] {
+                    let p = curve.control_points()[i];
+                    let node = match places.iter().find(|(q, _)| (q - p).norm() < 1e-9) {
+                        Some((_, node)) => *node,
+                        None => {
+                            places.push((p, NodeId::new()));
+                            places.last().unwrap().1
+                        }
+                    };
+                    curve.place_on(i, Some(node));
+                }
+            }
             let lid = second_part(&mut doc, "Lid");
             extrude_of(
                 &mut doc,
@@ -6547,7 +6582,7 @@
         use fieldform_scene::CurveId;
         let square: Vec<CurveId> = (0..4).map(|_| CurveId::new()).collect();
         let loose = CurveId::new();
-        let profiles = ProfileRows { at: None, loops: vec![square.clone()] };
+        let profiles = ProfileRows { at: None, loops: vec![square.clone()], chains: Vec::new() };
         for (id, readers, its_own, what) in [
             (square[0], 0, false, "the curve heading the loop, nothing reading it"),
             (square[0], 1, false, "the curve heading the loop, an extrude reading it"),
@@ -6907,14 +6942,12 @@
         let taker = |name: &str| takers.iter().find(|(n, _)| *n == name).expect("a taker").1;
         let takes = |block: &str, given| operand_refusal(&doc, &g, taker(block), given).is_none();
 
-        // A point: refused wherever the block needs an interior, taken where the block is a
-        // motion, adds to the field, or reaches to one on purpose.
-        for block in ["boolean", "shell", "morph", "twist", "pattern"] {
+        // A point: refused by every block but a blend, which reaches to one on purpose (the
+        // owner's ruling 2026-11-07, which took it out of an offset's and a mirror's lists too).
+        for block in ["boolean", "shell", "morph", "twist", "pattern", "offset", "mirror"] {
             assert!(!takes(block, dot), "{block} should refuse a point");
         }
-        for block in ["blend", "offset", "mirror"] {
-            assert!(takes(block, dot), "{block} should take a point");
-        }
+        assert!(takes("blend", dot), "a blend should take a point");
 
         // Unbounded: refused wherever the block needs a bound. A boolean takes one, because
         // trimming a part with a half-space is what `Node::Plane` exists for.

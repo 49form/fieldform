@@ -37,6 +37,7 @@ pub fn operation_word(node: &Node) -> &'static str {
         Node::Cage(_) => "Cage",
         Node::Mesh(_) => "Mesh",
         Node::Sphere { .. } => "Sphere",
+        Node::Expression { .. } => "Expression",
         Node::Cuboid { .. } => "Cube",
         Node::SkewedBox { .. } => "SkewedBox",
         Node::Cylinder { .. } => "Cylinder",

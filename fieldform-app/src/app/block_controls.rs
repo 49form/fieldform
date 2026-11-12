@@ -664,6 +664,9 @@ impl App {
             Node::Sphere { centre, radius } => {
                 self.sphere_controls(ui, id, centre, radius)
             }
+            Node::Expression { text, frame, size, divisor, claim } => {
+                self.expression_controls(ui, id, text, frame, size, divisor, claim)
+            }
             Node::Cuboid { centre, size, turn, edge } => {
                 self.cuboid_controls(ui, id, centre, size, turn, edge)
             }

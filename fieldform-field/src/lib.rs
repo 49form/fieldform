@@ -39,6 +39,7 @@ pub use hole::{hole_basis, into_material, Hole, HoleSection};
 mod lattice;
 mod measure;
 mod mesh;
+mod written;
 mod overlay;
 pub use overlay::{
     display_graph_with_stand_ins, is_reference_body, pick_bounds, plane_frames, point_positions,
@@ -128,7 +129,7 @@ pub use property_table::{
     EXCLUDED, ROWS,
 };
 pub use measure::{
-    Anchored, MassProperties, Measured, Thinness, thinness,
+    anchored_corners, Anchored, MassProperties, Measured, Thinness, thinness, ANCHORED_CORNERS_MAX,
 };
 pub use verify::{
     find_overstep, verify_critical, verify_unprotected, BlendMovement, CriticalReport, Overstep,
@@ -147,6 +148,7 @@ pub use profile::{
 pub(crate) use profile::{
     Depth, Extrusion, RevolvedWedge, SkewExtrusion, chain_plane, outline_chain_turning,
 };
+pub use written::WrittenField;
 pub use primitive::{Cuboid, Edge, EdgedCuboid, SkewedBox, Sphere};
 pub(crate) use primitive::{EdgedCone, EdgedCylinder};
 pub(crate) use primitive::{Capsule, Cone, Cylinder, Plane, Point, Torus};
@@ -841,7 +843,6 @@ mod tests {
     #[test]
     fn a_cage_whose_walls_have_no_height_yet_still_gives_a_finite_field() {
         use fieldform_cage::edit::extrude::{extrude, Direction, Mode};
-        use fieldform_cage::FaceId;
         let cube = Cage::cube_of(100.0);
         let top = cube
             .face_ids()

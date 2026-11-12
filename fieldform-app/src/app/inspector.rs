@@ -4,6 +4,9 @@
 
 use crate::*;
 
+/// The console panel's smallest height: heading, entry field and one line of the log.
+pub(crate) const CONSOLE_MIN_HEIGHT: f32 = 92.0;
+
 impl App {
     /// One parametric number: a drag field, and a V mark that names it.
     ///
@@ -894,27 +897,19 @@ impl App {
     /// Allow agent (`mcp-server-spec.md` §9.1): off until a person turns it on, and then kept.
     /// A session started with `--agent-host` already belongs to an agent, so it has no choice to
     /// make and the row says whose it is.
-    fn allow_agent_row(&mut self, ui: &mut egui::Ui) {
+    /// Edit > Allow agent and `allowagent`: turns it the other way, and keeps it for next time.
+    pub(crate) fn toggle_allow_agent(&mut self) {
         if self.agent_host.as_ref().is_some_and(|h| h.mode == agent::server::HostMode::Launch) {
-            ui.label(egui::RichText::new("This session was started by an agent.").weak());
+            self.warn("This session was started by an agent, so it is the agent's already");
             return;
         }
-        let mut allow = self.allow_agent;
-        let changed = ui
-            .checkbox(&mut allow, "Allow agent")
-            .on_hover_text(
-                "Lets an MCP client attached to this session read and edit the open document.                  Every line it runs is written in the console, and it works only in the                  document's folder. Turn it off to disconnect it.",
-            )
-            .changed();
-        if changed {
-            let ctx = ui.ctx().clone();
-            self.set_allow_agent(allow, &ctx);
-            if !cfg!(test)
-                && !self.script_running
-                && let Err(why) = display_quality::save_allow_agent(self.allow_agent)
-            {
-                self.say(format!("Allow agent is {} for this session only: {why}", if self.allow_agent { "on" } else { "off" }));
-            }
+        let ctx = self.egui_ctx.clone();
+        self.set_allow_agent(!self.allow_agent, &ctx);
+        if !cfg!(test)
+            && !self.script_running
+            && let Err(why) = display_quality::save_allow_agent(self.allow_agent)
+        {
+            self.say(format!("Allow agent is {} for this session only: {why}", if self.allow_agent { "on" } else { "off" }));
         }
     }
 
@@ -993,7 +988,9 @@ impl App {
                     // something to read back through and shrunk when the blocks matter more.
                     .resizable(true)
                     .default_size(170.0)
-                    .size_range(64.0..=560.0)
+                    // At its smallest, room for the heading, the entry field and one line of the
+                    // log, so the newest reply is still readable with the panel dragged right down.
+                    .size_range(CONSOLE_MIN_HEIGHT..=560.0)
                     .show_inside(ui, |ui| self.console(ui));
                 let part_name = self
                     .doc
@@ -1048,7 +1045,6 @@ impl App {
                 // to do and what should have happened before either guess.
                 egui::Panel::bottom("display_settings").show_inside(ui, |ui| {
                 ui.separator();
-                self.allow_agent_row(ui);
                 // **One heading over all of it, and shut until it is wanted.** These are the
                 // settings for *looking* at the part rather than for what the part is — the
                 // finish, the room it is lit by, the mesh, the draft overlay — and open they

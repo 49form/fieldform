@@ -287,8 +287,11 @@ pub fn insert_ring(mesh: &QuadMesh, edge: (VertexId, VertexId), t: f64) -> Resul
 
     let new_vertex_count = positions.len();
     let new_face_count = faces.len();
+    let mut new = rebuild("insert_ring", positions, &faces)?;
+    // A creased edge the ring crosses is split, and both halves stay creased.
+    new.carry_creases(mesh, |v| vec![v], true);
     Ok(EditResult {
-        mesh: rebuild("insert_ring", positions, &faces)?,
+        mesh: new,
         new_vertices: appended_vertices(original_vertices, new_vertex_count),
         new_faces: appended_faces(original_faces, new_face_count),
         replaced,
@@ -347,6 +350,8 @@ pub fn delete_faces(mesh: &QuadMesh, delete: &[FaceId]) -> Result<EditResult, Ed
         }
         e => EditError::bug("delete_faces", e),
     })?;
+    let mut new = new;
+    new.carry_creases(mesh, |v| vertex_map[v.index()].into_iter().collect(), false);
     Ok(EditResult {
         mesh: new,
         new_vertices: Vec::new(),
@@ -440,8 +445,22 @@ pub fn dissolve_edges(mesh: &QuadMesh, edges: &[(VertexId, VertexId)]) -> Result
         faces.push(p);
     }
     let (positions, faces, vertex_map) = without_unused(mesh.position_list(), faces);
+    let mut new = rebuild("dissolve_edges", positions, &faces)?;
+    new.carry_creases(mesh, |v| vertex_map[v.index()].into_iter().collect(), false);
+    // **A crease the dissolved loop crossed joins up again**, since dissolving is the inverse of
+    // inserting the ring that split it: a vertex that went with two creased edges leaves those
+    // edges' far ends joined by one edge, which is creased.
+    if mesh.has_creases() {
+        for gone in mesh.vertex_ids().filter(|v| vertex_map[v.index()].is_none()) {
+            if let [x, y] = mesh.creased_neighbours(gone)[..]
+                && let (Some(x), Some(y)) = (vertex_map[x.index()], vertex_map[y.index()])
+            {
+                new.set_creased(x, y, true);
+            }
+        }
+    }
     Ok(EditResult {
-        mesh: rebuild("dissolve_edges", positions, &faces)?,
+        mesh: new,
         new_vertices: Vec::new(),
         new_faces: Vec::new(),
         replaced: HashMap::new(),
@@ -581,8 +600,10 @@ pub fn fill_hole(mesh: &QuadMesh, edge: (VertexId, VertexId)) -> Result<EditResu
     }
 
     let (new_vertex_count, new_face_count) = (positions.len(), faces.len());
+    let mut new = rebuild("fill_hole", positions, &faces)?;
+    new.carry_creases(mesh, |v| vec![v], false);
     Ok(EditResult {
-        mesh: rebuild("fill_hole", positions, &faces)?,
+        mesh: new,
         new_vertices: appended_vertices(original_vertices, new_vertex_count),
         new_faces: appended_faces(original_faces, new_face_count),
         replaced: HashMap::new(),
@@ -778,6 +799,8 @@ pub fn bridge(
         }
         e => EditError::bug("bridge", e),
     })?;
+    let mut new = new;
+    new.carry_creases(mesh, |v| vec![v], false);
     Ok(EditResult {
         mesh: new,
         new_vertices: appended_vertices(original_vertices, new_vertex_count),
@@ -994,6 +1017,10 @@ pub fn weld(mesh: &QuadMesh, pairs: &[(VertexId, VertexId)]) -> Result<EditResul
         ),
         e => EditError::bug("weld", e),
     })?;
+    // Two creased edges welded into one stay one creased edge; one whose ends were welded
+    // together is gone, and so is its crease.
+    let mut new = new;
+    new.carry_creases(mesh, |v| vertex_map[v.index()].into_iter().collect(), false);
     Ok(EditResult {
         mesh: new,
         new_vertices: Vec::new(),

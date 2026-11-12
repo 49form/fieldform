@@ -11,7 +11,8 @@
 //! size (`snap size=` is refused by the verb for the same reason), and a view moves the one camera
 //! there is. That is right for a host the agent owns and wrong for a person's session, so attach
 //! mode must give this its own render target before it offers the tool (Phase D, question 5 of
-//! the discovery report). `size`, `camera`, `show`, `hide` and `section` are therefore not offered.
+//! the discovery report). `size`, `camera`, `show`, `hide` and `section` are therefore not offered;
+//! `file` is, since keeping the picture asks nothing of the camera.
 
 use super::server::{Answer, Job};
 use super::tools::Reply;
@@ -22,6 +23,8 @@ pub(crate) struct SnapshotWait {
     pub(crate) job: tokio::sync::oneshot::Sender<Answer>,
     pub(crate) path: std::path::PathBuf,
     pub(crate) view: String,
+    /// Whether the picture is the caller's to keep (`file=`), rather than a file to read and drop.
+    pub(crate) keep: bool,
 }
 
 const VIEWS: [&str; 8] = ["iso", "front", "back", "left", "right", "top", "bottom", "current"];
@@ -58,9 +61,56 @@ impl App {
             let _ = job.reply.send(fail(e));
             return;
         }
+        // **A window nobody can see draws no frames**, and a still is a frame: waiting for one
+        // would hold every call behind it until the window came back. Said instead.
+        if self.window_hidden {
+            let e = tool_error(
+                "not_available",
+                "the host's window is minimised, so it draws no frames to take a picture from; restore it and ask again",
+            );
+            let _ = job.reply.send(fail(e));
+            return;
+        }
+        // `file=` keeps the picture where the caller asked, through the same guard every file key
+        // an agent names goes through; without it the picture is written, read back and dropped.
+        let allow_overwrite = job.args.get("allow_overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+        let kept = match job.args.get("file").and_then(|v| v.as_str()) {
+            None => None,
+            Some(given) if !given.to_lowercase().ends_with(".png") => {
+                let mut e = tool_error("bad_value", format!("`file={given}` is not a .png; the tool answers with a PNG"));
+                e.key = Some("file".into());
+                let _ = job.reply.send(fail(e));
+                return;
+            }
+            Some(given) => match paths::resolve(given, &self.agent.roots, true, allow_overwrite) {
+                Ok(real) => Some(real),
+                Err(paths::PathRefusal::Outside) => {
+                    let roots: Vec<String> = self.agent.roots.iter().map(|r| r.display().to_string()).collect();
+                    let mut e = tool_error(
+                        "path_outside_root",
+                        format!("`file={given}` is outside the folders an agent may use: {}", roots.join(", ")),
+                    );
+                    e.key = Some("file".into());
+                    e.accepted = roots;
+                    let _ = job.reply.send(fail(e));
+                    return;
+                }
+                Err(paths::PathRefusal::WouldOverwrite(path)) => {
+                    let mut e = tool_error("would_overwrite", format!("{} exists; pass allow_overwrite to replace it", path.display()));
+                    e.key = Some("file".into());
+                    let _ = job.reply.send(fail(e));
+                    return;
+                }
+            },
+        };
+        let keep = kept.is_some();
         let dir = self.agent.roots.first().cloned().unwrap_or_else(std::env::temp_dir);
         self.agent.snapshots += 1;
-        let path = dir.join(format!("snapshot-{}-{}.png", std::process::id(), self.agent.snapshots));
+        let path = kept.unwrap_or_else(|| dir.join(format!("snapshot-{}-{}.png", std::process::id(), self.agent.snapshots)));
+        // A kept file named twice would otherwise read back the last picture if this one failed.
+        if keep {
+            let _ = std::fs::remove_file(&path);
+        }
         let file = path.to_string_lossy().replace('\\', "/");
         let line = if view == "current" {
             format!("snap file=\"{file}\"")
@@ -78,17 +128,31 @@ impl App {
             let _ = job.reply.send(fail(e));
             return;
         }
-        self.agent.snapshot = Some(SnapshotWait { job: job.reply, path, view });
+        self.agent.snapshot = Some(SnapshotWait { job: job.reply, path, view, keep });
     }
 
     /// Answers the snapshot in flight once the verb has finished with it.
     pub(crate) fn finish_snapshot(&mut self) {
+        // Minimised while a picture was in flight: the frame it waits for will not come.
+        if self.window_hidden
+            && let Some(wait) = self.agent.snapshot.take()
+        {
+            self.pending_snap = None;
+            let e = tool_error("not_available", "the host's window was minimised before the picture was drawn; restore it and ask again");
+            let _ = wait.job.send(fail(e));
+            if !wait.keep {
+                let _ = std::fs::remove_file(&wait.path);
+            }
+            return;
+        }
         if self.agent.snapshot.is_none() || self.pending_snap.is_some() {
             return;
         }
         let Some(wait) = self.agent.snapshot.take() else { return };
         let bytes = std::fs::read(&wait.path).ok();
-        let _ = std::fs::remove_file(&wait.path);
+        if !wait.keep {
+            let _ = std::fs::remove_file(&wait.path);
+        }
         let answer = match bytes {
             None => fail(tool_error("timeout", "the view did not finish a still, so no picture was written")),
             Some(bytes) => {
@@ -102,6 +166,7 @@ impl App {
                             "width": w,
                             "height": h,
                             "bodies_drawn": bodies,
+                            "file": wait.keep.then(|| wait.path.display().to_string()),
                             "note": "the picture is the viewport's own size; this host's camera was moved to take it",
                         }),
                         is_error: false,

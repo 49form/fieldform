@@ -63,6 +63,7 @@ pub struct ViewSnapshot {
     pub sections: Vec<(Vector3<f64>, f64)>,
     pub material: Material,
     pub occlusion: bool,
+    pub reflections: bool,
     pub exact_finish: bool,
     pub environment: EnvironmentChoice,
     pub still_frames: u32,
@@ -82,6 +83,7 @@ impl View<'_> {
             sections: self.sections.clone(),
             material: self.material.clone(),
             occlusion: self.occlusion,
+            reflections: self.reflections,
             exact_finish: self.exact_finish,
             environment: self.environment,
             still_frames: self.still_frames,
@@ -156,6 +158,12 @@ pub(super) fn still_frame(camera: &mut Camera, look: &Look, view: &ViewSnapshot,
         && std::env::var_os("FIELDFORM_BAKE_FINISH").is_none();
     if view.occlusion && view.environment.wants_occlusion() {
         camera.occlusion = Some(Occlusion::for_scene(look.lights[0].direction, view.scene.1));
+    }
+    // The reflected march, where the view wants one and the room shows it (item 54). Whether
+    // this material's lobe can be traced, and as a mirror or a glossy sample, is decided here
+    // once a frame and never per pixel: the material is a uniform.
+    if view.reflections && view.environment.wants_reflections() {
+        camera.reflections = Reflections::for_material(&view.material, view.still_frames);
     }
 }
 

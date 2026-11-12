@@ -7,6 +7,17 @@ Third-party material that is incorporated or closely followed:
   equations follow Google Filament (https://github.com/google/filament), which is licensed under
   the Apache License 2.0. Where code or constants are carried over from it, they remain under that
   licence.
+* Glossy reflections (fieldform-gpu/src/camera.wgsl, `reflected_direction`): the GGX visible-normal
+  sampler follows E. Heitz, "Sampling the GGX Distribution of Visible Normals", Journal of Computer
+  Graphics Techniques 7(4), 2018, as published; no code is carried over.
+* Sharp creases on a cage (fieldform-subd/src/lib.rs `subdivide`, patch.rs): the crease rules follow
+  H. Hoppe et al., "Piecewise Smooth Surface Reconstruction", SIGGRAPH 1994, and T. DeRose, M. Kass
+  and T. Truong, "Subdivision Surfaces in Character Animation", SIGGRAPH 1998, as published; no code
+  is carried over.
+* Block-family colour check (tools/design/family_palette_check.py): the colour-vision simulation
+  follows G. M. Machado, M. M. Oliveira and L. A. F. Fernandes, "A Physiologically-based Model for
+  Simulation of Color Vision Deficiency", IEEE Transactions on Visualization and Computer Graphics
+  15(6), 2009 (its severity-1.0 matrices); the colour difference is CIEDE2000 (CIE 142-2001).
 * Vendored sources, each under its own licence and kept unmodified: Fidget (vendor/fidget, MPL-2.0)
   and the OpenCASCADE bindings (vendor/opencascade-rs, LGPL-2.1). The STEP importer links
   OpenCASCADE Technology (LGPL-2.1 with the OCCT exception) and runs as its own process.

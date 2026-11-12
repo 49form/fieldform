@@ -628,3 +628,114 @@ fn bridging_two_opposite_edges_of_a_hole_fills_it() {
     assert!(Cage::try_from_mesh(bridged.mesh.clone()).is_ok(), "the cube is closed again");
     assert_eq!(bridged.new_vertices.len(), 0);
 }
+
+
+// ---------------------------------------------------------------------------------------------
+// Creases through the edits: every primitive rebuilds from a face list that knows nothing of
+// them, so each carries them itself -- and one that forgets drops them with no error.
+
+fn creased(mut m: QuadMesh, edges: &[(usize, usize)]) -> QuadMesh {
+    for &(a, b) in edges {
+        assert_eq!(m.set_creased(v(a), v(b), true), Some(true), "{a}-{b} is an edge");
+    }
+    m
+}
+
+#[test]
+fn a_ring_across_a_creased_edge_creases_both_halves_and_dissolving_it_joins_them() {
+    // 0-1 is on the ring's path and 0-3 runs across it, so only the first is split.
+    let m = creased(cube(), &[(0, 1), (0, 3)]);
+    let ringed = insert_ring(&m, (v(0), v(1)), 0.5).unwrap();
+    let r = &ringed.mesh;
+    assert!(!r.is_creased(v(0), v(1)), "the split edge is gone");
+    let middle = ringed.new_vertices.iter().copied().find(|&n| r.is_creased(v(0), n)).expect("the half from 0");
+    assert!(r.is_creased(middle, v(1)), "and the half to 1");
+    assert_eq!(r.crease_count(), 3, "two halves and the untouched 0-3");
+    // Dissolving the ring is its inverse, creases included.
+    let ring: Vec<(VertexId, VertexId)> = r
+        .edges()
+        .filter(|&(a, b)| ringed.new_vertices.contains(&a) && ringed.new_vertices.contains(&b))
+        .collect();
+    let back = dissolve_edges(r, &ring).unwrap().mesh;
+    assert_eq!(back.face_count(), 6);
+    assert_eq!(back.crease_count(), 2);
+    let corner = |p: Point3<f64>| back.vertex_ids().find(|&x| (back.vertex_position(x) - p).norm() < 1e-12).unwrap();
+    let (a, b) = (corner(m.vertex_position(v(0))), corner(m.vertex_position(v(1))));
+    assert!(back.is_creased(a, b), "the crease is whole again");
+}
+
+#[test]
+fn an_extrude_keeps_a_rim_crease_at_the_base_and_takes_an_inner_one_up_with_the_cap() {
+    // The +Z face split in two by a ring: the edge between the halves is inside the region.
+    let split_top = insert_ring(&cube(), (v(4), v(5)), 0.5).unwrap();
+    let mut m = split_top.mesh.clone();
+    let top: Vec<FaceId> = m.face_ids().filter(|&f| m.face_vertices(f).iter().all(|&c| m.vertex_position(c).z > 0.49)).collect();
+    assert_eq!(top.len(), 2);
+    let inner = m
+        .edges()
+        .find(|&(a, b)| {
+            let (pa, pb) = (m.vertex_position(a), m.vertex_position(b));
+            pa.z > 0.49 && pb.z > 0.49 && pa.x.abs() < 1e-12 && pb.x.abs() < 1e-12
+        })
+        .unwrap();
+    m.set_creased(inner.0, inner.1, true);
+    assert_eq!(m.set_creased(v(5), v(6), true), Some(true)); // on the region's rim
+    let up = extrude::extrude(&m, &top, extrude::Mode::Region, extrude::Direction::Normal, 1.0).unwrap().mesh;
+    assert!(up.is_creased(v(5), v(6)), "the rim crease stays at the base");
+    assert_eq!(up.crease_count(), 2);
+    let raised = up.creases().find(|&e| e != (v(5), v(6))).unwrap();
+    assert!(
+        up.vertex_position(raised.0).z > 1.4 && up.vertex_position(raised.1).z > 1.4,
+        "the inner crease went up with the cap"
+    );
+}
+
+#[test]
+fn deleting_faces_keeps_the_creases_on_edges_that_remain() {
+    let m = creased(cube(), &[(0, 1), (4, 5)]);
+    // Faces 0 (-Z) and 2 (-Y) both hold 0-1; deleting one leaves the edge on the other.
+    let open = delete_faces(&m, &[FaceId::from_index(0)]).unwrap();
+    let map = open.vertex_map.as_ref().unwrap();
+    let (a, b) = (map[0].unwrap(), map[1].unwrap());
+    assert!(open.mesh.is_creased(a, b));
+    assert_eq!(open.mesh.crease_count(), 2);
+}
+
+#[test]
+fn a_weld_keeps_a_crease_whose_ends_survive() {
+    let m = creased(cube(), &[(4, 5)]);
+    let gone = delete_faces(&m, &[FaceId::from_index(1)]).unwrap();
+    // The +Z hole's rim, with 4-5 creased on it; a weld of two rim corners keeps the crease's
+    // ends, renumbered.
+    let map = gone.vertex_map.clone().unwrap();
+    let (four, five, six) = (map[4].unwrap(), map[5].unwrap(), map[6].unwrap());
+    assert!(gone.mesh.is_creased(four, five));
+    let welded = weld(&gone.mesh, &[(six, five)]);
+    if let Ok(w) = welded {
+        let wm = w.vertex_map.unwrap();
+        let (a, b) = (wm[four.index()].unwrap(), wm[five.index()].unwrap());
+        assert!(w.mesh.is_creased(a, b), "the crease is still between its two ends");
+    }
+}
+
+#[test]
+fn turning_a_shell_over_keeps_every_crease() {
+    let inside_out: Vec<Vec<u32>> = cube().quad_lists().into_iter().map(|mut q| { q.reverse(); q }).collect();
+    let mut m = mesh(cube().position_list(), &inside_out);
+    m.set_creased(v(0), v(1), true);
+    m.set_creased(v(2), v(6), true);
+    let body = crate::CageBody::new(m);
+    assert_eq!(body.shells_flipped(), 1, "the fixture is inside out");
+    assert!(body.mesh().is_creased(v(0), v(1)) && body.mesh().is_creased(v(2), v(6)));
+}
+
+#[test]
+fn filling_and_bridging_keep_the_creases_they_do_not_touch() {
+    let m = creased(cube(), &[(0, 1), (4, 5)]);
+    let open = delete_faces(&m, &[FaceId::from_index(1)]).unwrap();
+    let map = open.vertex_map.clone().unwrap();
+    let (four, five) = (map[4].unwrap(), map[5].unwrap());
+    let filled = fill_hole(&open.mesh, (four, five)).unwrap().mesh;
+    assert!(filled.is_creased(four, five) && filled.is_creased(map[0].unwrap(), map[1].unwrap()));
+    assert_eq!(filled.crease_count(), 2);
+}

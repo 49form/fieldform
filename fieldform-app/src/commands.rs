@@ -204,11 +204,18 @@ pub struct Ctx {
     pub section_on: bool,
     /// Display quality allows occlusion at all.
     pub occlusion_possible: bool,
+    /// Display quality allows traced reflections at all.
+    pub reflections_possible: bool,
     pub control_points: bool,
     pub view_cube: bool,
+    /// Whether an MCP client may attach to this session (Edit > Allow agent).
+    pub allow_agent: bool,
+    /// Whether an agent started this session, which leaves it nothing to allow.
+    pub agent_launched: bool,
     /// A pending block shows the floating tool panel, rather than only its rows in the list.
     pub floating_panel: bool,
     pub idle_occlusion: bool,
+    pub idle_reflections: bool,
     pub draft_on: bool,
     pub grid_on: bool,
     /// The blocks panel shows the graph rather than the notebook.
@@ -298,12 +305,12 @@ fn cage_control(c: &Ctx) -> Result<(), &'static str> {
 fn graph_shown(c: &Ctx) -> Result<(), &'static str> {
     if c.graph_shown { Ok(()) } else { Err("The blocks are shown as a list; `view show=graph` first") }
 }
-fn section_on(c: &Ctx) -> Result<(), &'static str> {
-    if c.section_on { Ok(()) } else { Err("Turn Section on first") }
-}
 // Or a sketch under way, so the same entry stops one whatever is selected by then.
 fn a_plane_selected(c: &Ctx) -> Result<(), &'static str> {
     if c.plane_selected || c.sketching { Ok(()) } else { Err("Select a plane first") }
+}
+fn agent_not_launched(c: &Ctx) -> Result<(), &'static str> {
+    if c.agent_launched { Err("This session was started by an agent, so it is the agent's already") } else { Ok(()) }
 }
 fn a_curve_selected(c: &Ctx) -> Result<(), &'static str> {
     if c.curve_selected { Ok(()) } else { Err("Select a curve first") }
@@ -314,6 +321,15 @@ fn occlusion_possible(c: &Ctx) -> Result<(), &'static str> {
     } else {
         Err("Off while Display quality is Fast, which never traces occlusion or shadows. Choose \
              Balanced or Full to have this back.")
+    }
+}
+
+fn reflections_possible(c: &Ctx) -> Result<(), &'static str> {
+    if c.reflections_possible {
+        Ok(())
+    } else {
+        Err("Off while Display quality is Fast, which never traces reflections. Choose Balanced \
+             or Full to have this back.")
     }
 }
 
@@ -458,13 +474,16 @@ const PRIMITIVES: &[&str] = &["Create", "Primitives"];
 const SWEEP: &[&str] = &["Create", "Sweep"];
 const FEATURES: &[&str] = &["Create", "Features"];
 const MODIFY: &[&str] = &["Modify"];
+/// What reads the part and the curves without changing them: sections, measurements and the
+/// curvature comb (the owner, 2026-11-08), gathered out of View, which is about how things look.
+const EVALUATE: &[&str] = &["Evaluate"];
 /// The cage tools, in a menu of their own (the owner, 2026-10-24): what edits the cage's
 /// topology, what grows a selection along it, and what checks it.
 const SUBD: &[&str] = &["Sub-D"];
 const HELP: &[&str] = &["Help"];
 
 /// The top-level menus, left to right.
-pub const MENUS: &[&str] = &["File", "Edit", "View", "Create", "Modify", "Sub-D", "Help"];
+pub const MENUS: &[&str] = &["File", "Edit", "View", "Create", "Modify", "Evaluate", "Sub-D", "Help"];
 
 /// Which separator group each submenu sits in, inside its parent: the submenu's own entries
 /// carry their groups *within* it.
@@ -640,8 +659,8 @@ fn build() -> Vec<Command> {
         op("file.export_stl", "export", "Export STL...").menu(FILE, 1)
             .hint("Meshes the part and writes it as STL. `export file=… detail=fine` without the dialog."),
         op("image.block", "saveimage", "Save Image...").menu(FILE, 1).aliases(&["render", "picture", "png", "jpeg"])
-            .hint("A Save Image block: the viewport as a PNG or JPEG at any size, with the settings kept \
-                   in the document. `saveimage width=5000 ss=2 bg=transparent 'hero'` from a line."),
+            .hint("Asks where, saves the picture there, and keeps a Save Image block to save it again. \
+                   `saveimage file=\"shot.png\" width=5000 ss=2` from a line."),
         op("image.save_again", "saveagain", "Save image again").aliases(&["snapshot again", "render again"])
             .hint("Saves another picture with the settings used last, to the next free name."),
         op("file.import", "import", "Import...").menu(FILE, 1)
@@ -684,6 +703,14 @@ fn build() -> Vec<Command> {
             .keys(&["F2"])
             .hint("A new name for the selected row, typed into the row. From the console any row by \
                    name: `rename 'Sphere_0' to=ball`."),
+        // In Edit rather than at the foot of the block list (the owner, 2026-11-11): a setting
+        // about who may edit the document, beside the other edits, and not a row the list has to
+        // make room for.
+        op("edit.allow_agent", "allowagent", "Allow agent").menu(EDIT, 2).when(agent_not_launched)
+            .checked(|c| c.allow_agent)
+            .hint("Lets an MCP client attached to this session read and edit the open document. \
+                   Every line it runs is written in the console, and it works only in the \
+                   document's folder. Turn it off to disconnect it. Kept for next time."),
         op("edit.paste_here", "pastehere", "Paste here").when(has_clipboard_curve)
             .hint("Puts the copied curve down with its start under the cursor, moved as one piece \
                    so its shape is kept."),
@@ -691,25 +718,28 @@ fn build() -> Vec<Command> {
         // ---------------------------------------------------------------------------- View
         // A checkbox reading the real state rather than a button that toggles it blind: the
         // menu has to say whether the cut is on, since a viewport with nothing in it cannot.
-        op("view.section", "section", "Section").menu(VIEW, 0).checked(|c| c.section_on)
+        op("view.section", "section", "Section").menu(EVALUATE, 0).checked(|c| c.section_on)
             .keys(&["X"])
             .hint("Cuts away everything past a plane so you can see inside. Drag the handles to \
                    move it. Changes the view only — the part is not modified. The first makes a \
                    section; after that it switches the current one on or off."),
-        op("view.section_new", "addsection", "New section").menu(VIEW, 0)
+        op("view.section_new", "addsection", "New section").menu(EVALUATE, 0)
             .hint("Another cut, made where the selection is and switched on beside the others: \
-                   what is past any of them is cut away. Each section has a row in the block list."),
-        op("view.measure", "measure", "Measure").menu(VIEW, 0)
+                   what is past any of them is cut away. Each is a block in the list, saved with the \
+                   document; open its row to type where it is. `addsection origin=0,0,10 turn=90,0,0`."),
+        op("view.measure", "measure", "Measure").menu(EVALUATE, 1)
             .hint("Volume, surface area and balance point of the selected body — or of the whole \
                    part when nothing is selected. Reported in the console."),
         // Beside Measure because it is the same kind of question asked of the same thing.
-        op("view.thickness", "thickness", "Thickness").menu(VIEW, 0)
+        op("view.thickness", "thickness", "Thickness").menu(EVALUATE, 1)
             .hint("How thin the part gets, where, and how much of its surface is below that — \
                    read from the field rather than the mesh. Reported in the console. \
                    `thickness min=0.8` names the threshold."),
-        op("view.section_flip", "flipsection", "Flip section").menu(VIEW, 1).when(section_on)
-            .aliases(&["flip"]).keys(&["Shift+X"])
-            .hint("Keeps the other half"),
+        op("evaluate.comb", "comb", "Curvature comb").menu(EVALUATE, 2)
+            .hint("Draws the selected curve's curvature along it: at each sample a tooth the \
+                   curvature long, the tips joined. A smooth envelope is a fair curve; a step is a \
+                   tangent-only joint. A block in the list, fitted once and then a number: \
+                   `comb curve=arc teeth=96`, `comb block='Curvature Comb' -fit`."),
         op("view.control_points", "points", "Show control points").menu(VIEW, 2)
             .checked(|c| c.control_points)
             .hint("Every curve's control points, not only the selected curve's. Click one to pick \
@@ -728,6 +758,12 @@ fn build() -> Vec<Command> {
                    ambient occlusion and a soft shadow from the key light, then refined until it \
                    stops changing. Dragging never pays for either. Turn it off if a settled frame \
                    takes too long on this machine."),
+        op("view.idle_reflections", "reflections", "Reflections when idle").menu(VIEW, 2)
+            .when(reflections_possible).checked(|c| c.idle_reflections)
+            .hint("Once the view has been still for a moment, a chrome, glossy or clear-coated part \
+                   reflects the rest of the model: one more ray traced through the field from every \
+                   pixel, refined with the still. A matte part costs nothing. Turn it off if a \
+                   settled chrome part takes too long on this machine."),
         op("view.draft", "draft", "Draft analysis").menu(VIEW, 2).checked(|c| c.draft_on)
             .hint("Colour each face by whether it has enough draft to leave a mould. The pull \
                    direction, angle and tolerance are under Display in the part panel, or \
@@ -826,6 +862,10 @@ fn build() -> Vec<Command> {
             .hint("Click a surface: the axis stands on it, leaving along the field's direction, \
                    50 mm long. It is derived from the body, so it follows it: its block has a U, \
                    a V and a length rather than points."),
+        op("create.expression", "expression", "Expression").menu(PRIMITIVES, 2).aliases(&["written field", "formula", "write"])
+            .hint("A field written as arithmetic over x, y, z — `sqrt(x*x + y*y + z*z) - radius` is a \
+                   sphere. Angles in degrees; no vectors, no conditionals; the block carries a region, \
+                   a divisor and a claim, and Verify measures the claim."),
         op("create.sphere", "sphere", "Sphere").menu(PRIMITIVES, 1).session(SPHERE_P)
             .hint("A ball, by centre and radius"),
         op("create.cube", "cube", "Cube").menu(PRIMITIVES, 1).session(CUBE_P).aliases(&["box"])
@@ -963,13 +1003,15 @@ fn build() -> Vec<Command> {
                    exactly."),
         op("cage.extrude", "cageextrude", "Extrude faces").menu(SUBD, 0).when(cage_control).tool()
             .hint("Lifts the selected faces and lets you drag the cap out; Enter keeps, Esc puts \
-                   it back, E again extrudes from the new cap. Or `cageextrude faces=1 distance=10 \
+                   it back, Space or E again keeps it and extrudes from the new cap. Or \
+                   `cageextrude faces=1 distance=10 \
                    direction=normal|vertex_normals|x|y|z mode=region|individual`."),
         op("cage.extrude_edges", "extrudeedges", "Extrude open edges").when(cage_control)
             .hint("Grows an open mesh at its rim: `extrudeedges edges=0-1,1-2 distance=5`."),
         op("cage.inset", "cageinset", "Inset faces").menu(SUBD, 0).when(cage_control).tool().keys(&["I"])
             .hint("Insets the selected faces within their surface and lets you push the cap in or \
-                   out; Enter keeps, Esc puts it back. Or `cageinset faces=1 thickness=2 depth=0`."),
+                   out; Enter keeps, Esc puts it back, Space or I again keeps it and insets the new \
+                   cap. Or `cageinset faces=1 thickness=2 depth=0`."),
         op("cage.insert_ring", "insertring", "Insert edge ring").menu(SUBD, 0).when(cage_control).tool().keys(&["Ctrl+R"])
             .hint("A loop of new edges through the one named, splitting every face it crosses: \
                    `insertring edge=0-1 t=0.5`, or `count=3` for three evenly spaced. From the menu \
@@ -984,6 +1026,12 @@ fn build() -> Vec<Command> {
             .hint("Takes the selected edges out, merging the faces either side -- the inverse of \
                    Insert edge ring, and what Delete does with edges selected: \
                    `dissolveedges edges=0-1,1-2`."),
+        op("cage.crease", "crease", "Crease").menu(SUBD, 0).when(cage_control)
+            .hint("Makes the selected edges sharp: the surface folds along them instead of \
+                   rounding over. Click an edge, double-click for its whole loop, then Crease; or \
+                   `crease edges=0-1,1-2`. Creased edges draw thicker, in magenta."),
+        op("cage.uncrease", "uncrease", "Uncrease").menu(SUBD, 0).when(cage_control)
+            .hint("Makes the selected creased edges round again: `uncrease edges=0-1,1-2`."),
         op("cage.bridge_faces", "bridgefaces", "Bridge faces").menu(SUBD, 0).when(cage_control)
             .hint("Takes a region of faces off each side and bridges the rims they leave: select \
                    the two regions and run it, or `bridgefaces a=1,2 b=5,6 divisions=1`. B with \
@@ -1085,7 +1133,9 @@ fn build() -> Vec<Command> {
             .hint("Cage, field, field + cage, in turn."),
         op("view.toggle_visibility", "hide", "Hide / show").menu(VIEW, 3).keys(&["H"])
             .when(something_selected)
-            .hint("Turns the selected block's eye over."),
+            .hint("Turns the selected block's eye over; `hide target=Sphere_0` hides that block."),
+        op("view.show", "show", "Show")
+            .hint("Draws a hidden block again: `show target=Sphere_0`, or the selected one."),
         op("view.show_all", "showall", "Show all").menu(VIEW, 3).keys(&["Alt+H"])
             .aliases(&["unhide"])
             .hint("Every hidden body drawn again."),
@@ -1117,6 +1167,25 @@ fn build() -> Vec<Command> {
             .hint("`relate -parallel master=A slave=B`, or -perpendicular, -equal, -concentric, -mirror."),
         op("profile.break", "break", "Break relation")
             .hint("Deletes what drives a curve, moving nothing: `break slave=B`."),
+        // **What holds where two curve ends meet** (the owner, 2026-11-05: "a marking menu that
+        // allows you to set tangency (G0, G1, G2)"). The ring a right-click on a join opens is
+        // the three fixed-argument entries below, and each is echoed naming the join, so it
+        // replays. G0 is the absence of a joint relation, so it is `break` said at a join.
+        op("curve.continuity", "continuity", "Continuity").when(a_curve_selected)
+            .hint("At a join: `continuity at=Line.end g=1`; g=0 is positional only, and \
+                   `lead=Curve` says which curve the other follows; `-break` lets the join go."),
+        cmd("curve.continuity.0", "curve.continuity", "continuity", "G0 position").args(&[("g", "0")])
+            .when(a_curve_selected)
+            .hint("The ends meet and nothing more: takes out a G1 or G2 there."),
+        cmd("curve.continuity.1", "curve.continuity", "continuity", "G1 tangent").args(&[("g", "1")])
+            .when(a_curve_selected)
+            .hint("The two curves leave the join in one direction."),
+        cmd("curve.continuity.2", "curve.continuity", "continuity", "G2 curvature").args(&[("g", "2")])
+            .when(a_curve_selected)
+            .hint("One direction and one curvature across the join."),
+        cmd("curve.continuity.break", "curve.continuity", "continuity", "Break").args(&[("break", "true")])
+            .when(a_curve_selected)
+            .hint("Lets the join go: its ends stop moving together, and nothing moves."),
         op("profile.realign", "realign", "Realign")
             .hint("Re-derives a relation found broken on open: `realign slave=B`."),
         op("curve.set_points", "set", "Set")
@@ -1438,7 +1507,6 @@ mod tests {
             ("D", m(true, false), "edit.duplicate"),
             ("H", Modifiers { ctrl: false, shift: false, alt: true }, "view.show_all"),
             ("X", m(false, false), "view.section"),
-            ("X", m(false, true), "view.section_flip"),
             ("Space", m(false, false), "palette.open"),
             ("R", m(false, true), "edit.repeat"),
             ("F2", m(false, false), "block.rename"),
@@ -1466,7 +1534,9 @@ mod tests {
         // modelling keys, and Ctrl+R and I for the cage's Insert Edge and Inset (R9) -- which
         // brings the modelling keys to the fifteen the cap allows; and A and Home for Frame all, the
         // graph view's spec (`view.frame_all` frames the viewport too); and Ctrl+F for the graph's Find.
-        assert_eq!(km.bindings().len(), 38, "no binding added or lost beyond those");
+        // Less Shift+X, which went with Flip section (the owner, 2026-11-08).
+        assert_eq!(km.bindings().len(), 37, "no binding added or lost beyond those");
+        assert!(km.lookup(&Shortcut::new("X", m(false, true))).is_none(), "Shift+X went with Flip section");
         assert!(km.lookup(&Shortcut::new("Slash", m(false, false))).is_none(), "F replaced /");
     }
 
@@ -1502,7 +1572,7 @@ mod tests {
             ("morph", "modify.morph"), ("new", "file.new"), ("draw", "draw.plane"),
             ("section", "view.section"), ("open", "file.open"), ("save", "file.save"),
             ("saveas", "file.save_as"), ("import", "file.import"), ("export", "file.export_stl"),
-            ("saveimage", "image.block"), ("saveagain", "image.save_again"),
+            ("saveimage", "image.block"), ("saveagain", "image.save_again"), ("comb", "evaluate.comb"),
             ("tess", "create.tessellate"), ("tessellate", "create.tessellate"),
             ("tesselate", "create.tessellate"), ("undo", "edit.undo"), ("redo", "edit.redo"),
             ("delete", "edit.delete_body"), ("variable", "block.make_variable"),
@@ -1515,6 +1585,7 @@ mod tests {
             ("material", "part.set_material"), ("critical", "part.critical"), ("verify", "part.verify"),
             ("environment", "view.environment"), ("draft", "view.draft"), ("grid", "view.grid"),
             ("perf", "view.perf"), ("display", "view.display"), ("tpms", "create.tpms"),
+            ("expression", "create.expression"),
             ("point", "create.point"), ("plane", "create.plane"), ("sphere", "create.sphere"),
             ("cube", "create.cube"), ("skewedbox", "create.skewbox"), ("cylinder", "create.cylinder"),
             ("cone", "create.cone"), ("torus", "create.torus"), ("capsule", "create.capsule"),

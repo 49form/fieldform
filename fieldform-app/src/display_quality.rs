@@ -99,16 +99,16 @@ impl DisplayQuality {
     pub(crate) fn hint(self) -> &'static str {
         match self {
             Self::Fast => {
-                "480 px while dragging, a 720 px still drawn once, no shadows or occlusion, a \
+                "480 px while dragging, a 720 px still drawn once, no shadows, occlusion or reflections, a \
                  64-cell bake, 4° profiles and 2° spines — for a slow or old card"
             }
             Self::Balanced => {
-                "720 px while dragging, a 1080 px still refined over four frames with shadows \
-                 and occlusion, a 128-cell bake, 2° profiles and 1° spines"
+                "720 px while dragging, a 1080 px still refined over four frames with shadows, \
+                 occlusion and reflections, a 128-cell bake, 2° profiles and 1° spines"
             }
             Self::Full => {
-                "720 px while dragging, a 1440 px still refined over eight frames with shadows \
-                 and occlusion, a 192-cell bake, 1° profiles and 0.5° spines"
+                "720 px while dragging, a 1440 px still refined over eight frames with shadows, \
+                 occlusion and reflections, a 192-cell bake, 1° profiles and 0.5° spines"
             }
             Self::Enchilada => {
                 "the whole thing: a still at the viewport's own size refined over eight \
@@ -164,6 +164,12 @@ impl DisplayQuality {
 
     /// Whether a settled frame may measure occlusion and the shadow at all.
     pub(crate) fn occlusion(self) -> bool {
+        !matches!(self, Self::Fast)
+    }
+
+    /// Whether a settled frame may trace reflections at all (item 54): off on Fast with the
+    /// occlusion, on everywhere else. The material then decides whether a frame traces any.
+    pub(crate) fn reflections(self) -> bool {
         !matches!(self, Self::Fast)
     }
 

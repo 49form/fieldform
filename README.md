@@ -1,6 +1,6 @@
 # FieldForm
 
-FieldForm is a field-based CAD kernel and modeller written in Rust. Geometry is a function from
+FieldForm is a SDF based CAD kernel and modeller written in Rust. Geometry is a function from
 space to distance — a signed distance field — rather than a mesh or a boundary representation, so
 blends, lattices and patterns compose as functions and are drawn by tracing the field directly on
 the GPU. Control cages, curves and parameters feed a composition graph that is serialized and

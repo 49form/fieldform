@@ -66,7 +66,11 @@ pub fn find_in(cage: &Cage, t: &Tessellation, epsilon: f64) -> SelfIntersections
                     _ => None,
                 }?;
                 let vertex = corners[corner];
-                (cage.valence(vertex) != 4).then_some(vertex)
+                // The descent snaps at every vertex the fast path refuses, and a crease adds its
+                // own: a dart, a turn, a junction -- usually valence four, all snapped.
+                let snaps = cage.valence(vertex) != 4
+                    || (cage.creases_at(vertex) > 0 && !cage.crease_runs_straight(vertex));
+                snaps.then_some(vertex)
             })
         })
         .collect();
@@ -238,6 +242,29 @@ mod tests {
     #[test]
     fn a_cube_and_a_refined_cube_are_clean_at_their_extraordinary_corners() {
         for cage in [cube_with(None), fieldform_subd::subdivide(&cube_with(None)).unwrap()] {
+            let found = find(&cage, 4, epsilon_length(&cage));
+            assert!(found.is_clean(), "{found:?}");
+        }
+    }
+
+    /// **A crease's ends snap as an extraordinary corner does, and are as clean.** Darts, a turn
+    /// and three creases meeting are usually valence four, so the old test of valence alone would
+    /// have read their snapped triangles as folds.
+    #[test]
+    fn a_creased_cage_is_clean_at_its_darts_turns_and_junctions() {
+        let mut every_edge = cube_with(None);
+        for (a, b) in every_edge.edges().collect::<Vec<_>>() {
+            every_edge.set_creased(a, b, true);
+        }
+        let mut refined = fieldform_subd::subdivide(&cube_with(None)).unwrap();
+        let ring = refined.face_vertices(FaceId::from_index(0));
+        for k in 0..4 {
+            refined.set_creased(ring[k], ring[(k + 1) % 4], true);
+        }
+        let quiet = refined.vertex_ids().find(|&v| refined.valence(v) == 4 && refined.creases_at(v) == 0 && !ring.contains(&v)).unwrap();
+        let n = refined.adjacent_vertices(quiet)[0];
+        refined.set_creased(quiet, n, true);
+        for cage in [every_edge, refined] {
             let found = find(&cage, 4, epsilon_length(&cage));
             assert!(found.is_clean(), "{found:?}");
         }

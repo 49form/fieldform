@@ -18,7 +18,7 @@
 //! `cargo build -p fieldform-import`
 //! `cargo run -p fieldform-io --example step_corpus -- <folder or file>... out=report.csv [limit=300] [points=300] [linear=mm]`
 
-use fieldform_field::{MeshField, ScalarField};
+use fieldform_field::MeshField;
 use nalgebra::{Point3, Vector3};
 use std::io::Write;
 use std::path::{Path, PathBuf};

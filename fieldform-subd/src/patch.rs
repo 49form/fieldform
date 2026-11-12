@@ -47,6 +47,15 @@ pub(crate) struct Patch {
     /// `None` where the vertex's ring is incomplete, so its valence cannot be known.
     valence: Vec<Option<usize>>,
     vertex_faces: Vec<Vec<FaceId>>,
+    /// One flag per half-edge, as `twin`: whether its edge is creased. Copied from the cage on
+    /// extraction and handed down by subdivision -- both halves of a creased edge stay creased.
+    sharp: Vec<bool>,
+    /// Whether any flag is set, so an uncreased patch pays nothing for the rules.
+    any_sharp: bool,
+    /// Per vertex, the far ends of its creased edges, as far as the patch can see them.
+    crease_ends: Vec<Vec<VertexId>>,
+    /// Per vertex, whether two creased edges run straight through it (see `QuadTopology`).
+    straight: Vec<bool>,
 }
 
 /// Half-edge `k` of face `f` runs from corner `k` to corner `k + 1`.
@@ -59,7 +68,8 @@ fn undirected(a: usize, b: usize) -> (usize, usize) {
 }
 
 impl Patch {
-    fn new(positions: Vec<Point3<f64>>, faces: Vec<[VertexId; 4]>) -> Self {
+    fn new(positions: Vec<Point3<f64>>, faces: Vec<[VertexId; 4]>, sharp: Vec<bool>) -> Self {
+        debug_assert_eq!(sharp.len(), faces.len() * 4, "one crease flag per half-edge");
         let vertex_count = positions.len();
 
         // Directed (origin, destination) -> half-edge, so a twin is found by looking up the
@@ -110,12 +120,45 @@ impl Patch {
             }
         }
 
+        let any_sharp = sharp.iter().any(|&s| s);
+        let mut crease_ends: Vec<Vec<VertexId>> = vec![Vec::new(); vertex_count];
+        let mut straight = vec![false; vertex_count];
+        if any_sharp {
+            for (f, corners) in faces.iter().enumerate() {
+                for k in 0..4 {
+                    if sharp[f * 4 + k] {
+                        let (a, b) = (corners[k], corners[(k + 1) % 4]);
+                        if !crease_ends[a.index()].contains(&b) {
+                            crease_ends[a.index()].push(b);
+                        }
+                        if !crease_ends[b.index()].contains(&a) {
+                            crease_ends[b.index()].push(a);
+                        }
+                    }
+                }
+            }
+            for v in 0..vertex_count {
+                let ends = &crease_ends[v];
+                // Opposite at a vertex of four faces: no face round it holds both far ends.
+                straight[v] = ends.len() == 2
+                    && valence[v] == Some(4)
+                    && !vertex_faces[v].iter().any(|f| {
+                        let c = &faces[f.index()];
+                        c.contains(&ends[0]) && c.contains(&ends[1])
+                    });
+            }
+        }
+
         Self {
             positions,
             faces,
             twin,
             valence,
             vertex_faces,
+            sharp,
+            any_sharp,
+            crease_ends,
+            straight,
         }
     }
 
@@ -158,7 +201,12 @@ impl Patch {
         let mut vertex_map: HashMap<usize, VertexId> = HashMap::new();
         let mut positions = Vec::new();
         let mut faces = Vec::with_capacity(face_list.len());
+        let mut sharp = Vec::with_capacity(face_list.len() * 4);
         for &f in &face_list {
+            // `face_half_edges[k]` leaves corner `k`, as the patch's own half-edge `k` does.
+            for he in cage.face_half_edges(FaceId::from_index(f)) {
+                sharp.push(cage.is_sharp(he));
+            }
             let corners = cage.face_vertices(FaceId::from_index(f));
             let mut local = [VertexId::from_index(0); 4];
             for (k, &c) in corners.iter().enumerate() {
@@ -181,7 +229,7 @@ impl Patch {
             })
             .collect();
 
-        (Self::new(positions, faces), face_map)
+        (Self::new(positions, faces, sharp), face_map)
     }
 
     /// One Catmull-Clark step, dropping whatever the patch is too small to determine.
@@ -212,7 +260,15 @@ impl Patch {
             edge_mid_avg /= neighbours.len() as f64;
 
             let n_f = n as f64;
-            let updated = (face_avg + edge_mid_avg * 2.0 + p.coords * (n_f - 3.0)) / n_f;
+            let smooth = (face_avg + edge_mid_avg * 2.0 + p.coords * (n_f - 3.0)) / n_f;
+            // The sharp rules: on a crease the vertex follows the crease curve, `(1, 6, 1)/8` of
+            // its two crease neighbours; where three or more meet it stays put. A dart -- one
+            // creased edge -- is smooth.
+            let updated = match self.crease_ends[v].as_slice() {
+                [a, b] => (self.positions[a.index()].coords + p.coords * 6.0 + self.positions[b.index()].coords) / 8.0,
+                ends if ends.len() >= 3 => p.coords,
+                _ => smooth,
+            };
             vertex_point[v] = Some(positions.len() as u32);
             positions.push(Point3::from(updated));
         }
@@ -226,11 +282,15 @@ impl Patch {
 
         // --- edge points, only where both adjacent faces are in the patch ---
         let mut edge_faces: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        let mut creased_edge: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
         for (f, corners) in self.faces.iter().enumerate() {
             for k in 0..4 {
                 let a = corners[k].index();
                 let b = corners[(k + 1) % 4].index();
                 edge_faces.entry(undirected(a, b)).or_default().push(f);
+                if self.sharp[f * 4 + k] {
+                    creased_edge.insert(undirected(a, b));
+                }
             }
         }
         let mut edge_point: HashMap<(usize, usize), u32> = HashMap::new();
@@ -239,16 +299,24 @@ impl Patch {
                 continue; // a boundary edge: its point depends on a face we don't have
             }
             let (a, b) = key;
-            let sum = self.positions[a].coords
-                + self.positions[b].coords
-                + self.face_centroid(FaceId::from_index(fs[0])).coords
-                + self.face_centroid(FaceId::from_index(fs[1])).coords;
+            // A creased edge's point is its midpoint, which reads neither face: that is what
+            // makes each side of a crease independent of the other.
+            let point = if creased_edge.contains(&key) {
+                (self.positions[a].coords + self.positions[b].coords) / 2.0
+            } else {
+                (self.positions[a].coords
+                    + self.positions[b].coords
+                    + self.face_centroid(FaceId::from_index(fs[0])).coords
+                    + self.face_centroid(FaceId::from_index(fs[1])).coords)
+                    / 4.0
+            };
             edge_point.insert(key, positions.len() as u32);
-            positions.push(Point3::from(sum / 4.0));
+            positions.push(Point3::from(point));
         }
 
         // --- new faces, in the same corner order `crate::subdivide` emits ---
         let mut faces: Vec<[VertexId; 4]> = Vec::new();
+        let mut sharp: Vec<bool> = Vec::new();
         let mut children = vec![[DROPPED; 4]; self.faces.len()];
         for (f, corners) in self.faces.iter().enumerate() {
             for k in 0..4 {
@@ -271,6 +339,9 @@ impl Patch {
                     VertexId::from_index(face_point[f] as usize),
                     VertexId::from_index(e_pc as usize),
                 ]);
+                // The child's first and last edges are halves of the parent's edges at this
+                // corner and keep their creases; the two inner edges are new and smooth.
+                sharp.extend([self.sharp[f * 4 + k], false, false, self.sharp[f * 4 + (k + 3) % 4]]);
             }
         }
 
@@ -289,7 +360,7 @@ impl Patch {
             }
         }
 
-        (Self::new(compact, faces), children)
+        (Self::new(compact, faces, sharp), children)
     }
 
     /// The vertices sharing an edge with `v`, each once.
@@ -359,6 +430,21 @@ impl QuadTopology for Patch {
     fn adjacent_vertices(&self, v: VertexId) -> Vec<VertexId> {
         self.ring_vertices(v)
     }
+    fn face_of(&self, he: HalfEdgeId) -> FaceId {
+        FaceId::from_index(he.index() / 4)
+    }
+    fn has_sharp(&self) -> bool {
+        self.any_sharp
+    }
+    fn is_sharp(&self, he: HalfEdgeId) -> bool {
+        self.sharp[he.index()]
+    }
+    fn crease_class(&self, v: VertexId) -> (usize, bool) {
+        (self.crease_ends[v.index()].len(), self.straight[v.index()])
+    }
+    fn crease_ends(&self, v: VertexId) -> Vec<VertexId> {
+        self.crease_ends[v.index()].clone()
+    }
 }
 
 #[cfg(test)]
@@ -416,6 +502,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// **The same guard with creases on**: darts, a straight run, turns, a pole and a junction.
+    /// The patch's sharp rules must reproduce `crate::subdivide`'s, position for position and
+    /// crease for crease, or the descent and the refine would disagree about a creased surface.
+    #[test]
+    fn a_creased_patch_subdivides_as_the_creased_cage_does() {
+        let cage = crate::crease_tests::every_kind_of_crease();
+        let (patch, _) = Patch::extract(&cage, &all_faces(&cage), 0);
+        let global = subdivide(&cage).unwrap();
+        let (local, children) = patch.subdivide();
+        let mut creased_children = 0;
+        for (f, kids) in children.iter().enumerate().take(cage.face_count()) {
+            for (k, &child) in kids.iter().enumerate() {
+                let child = child as usize;
+                let g = FaceId::from_index(f * 4 + k);
+                let expected = global.face_vertices(g);
+                let actual = local.faces[child];
+                for c in 0..4 {
+                    assert_close(
+                        local.positions[actual[c].index()],
+                        global.vertex_position(expected[c]),
+                        &format!("face {f} corner {k} vertex {c}"),
+                    );
+                    let sharp = local.sharp[child * 4 + c];
+                    assert_eq!(sharp, global.is_creased(expected[c], expected[(c + 1) % 4]), "face {f} corner {k} edge {c}");
+                    creased_children += sharp as usize;
+                }
+            }
+        }
+        assert!(creased_children > 0, "no crease reached the children");
     }
 
     /// The property the whole optimisation rests on: subdividing a *neighbourhood* gives the

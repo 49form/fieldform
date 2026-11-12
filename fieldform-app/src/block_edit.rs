@@ -49,6 +49,7 @@ pub struct Context<'a> {
 pub fn verb_of(node: &Node) -> Option<(&'static str, &'static str)> {
     Some(match node {
         Node::Sphere { .. } => ("sphere", "create.sphere"),
+        Node::Expression { .. } => ("expression", "create.expression"),
         Node::Cuboid { .. } => ("cube", "create.cube"),
         Node::SkewedBox { .. } => ("skewedbox", "create.skewbox"),
         Node::Cylinder { .. } => ("cylinder", "create.cylinder"),
@@ -120,6 +121,7 @@ pub fn node_with_keys(node: Node, args: &Args, cx: &Context) -> Result<Node, Str
         | Node::Thread { .. }
         | Node::Plane { .. }
         | Node::Point { .. } => console_keys::primitive_with_keys(node, word, args, lookup),
+        Node::Expression { .. } => console_keys::expression_with_keys(node, word, args, lookup),
         Node::Lattice { .. } => console_keys::lattice_with_keys(node, args, cx.offered, cx.seed, lookup),
         // `target` is the tool's, read when the hole is made; on a hole that exists it names
         // nothing to change, since the hole is already cut from its body.

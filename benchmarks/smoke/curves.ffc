@@ -53,7 +53,24 @@ sweep profile=s1 spine=up 'bar'
 expect target=bar volume=480 tol=1%
 sweep profile=s1 spine=s2
 
+# --- an open chain's join takes a continuity: G1, G2 in its place, then G0 takes it out again.
+# The geometry each one makes is held by the app's unit tests; these say the lines are accepted.
+line p0=0,200,0 p1=40,200,0 'ch1'
+curve p=40,200,0;50,210,0;60,210,0;70,200,0 'ch2'
+continuity at=ch1.end g=1
+continuity at=ch2.start g=2
+continuity at=ch1.end g=0
+# G0 holds the join, so the two are one open profile, and a comb reads it whole
+comb profile='Open profile 1' 'chain comb'
+
+# --- a curvature comb on a quarter arc: made with its keys, changed, re-fitted by name
+comb curve=q1 teeth=96 'arc comb'
+comb block='arc comb' scale=5 -flip
+comb block='arc comb' -fit
+
 # --- refused by name, nothing added
+continuity at=ch1.start g=1
+continuity at=ch1.end g=3
 line p0=0,0,0
 curve3 p=0,0,0;1,0,0;2,0,0
 extrude profile=w1 height=5
@@ -61,6 +78,10 @@ extrude profile=nosuch height=5
 revolve profile=r1 axis=nosuch
 extrude height=5 depth=5
 pipe curve=nosuch
+comb curve=nosuch
+comb curve=q1 teeth=1
+comb block=nosuch -fit
+comb profile=nosuch
 
 saveas file="benchmarks/smoke/curves.fform"
 snap file="benchmarks/smoke/curves.png" view=iso

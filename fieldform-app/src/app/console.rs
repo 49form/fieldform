@@ -33,11 +33,17 @@ impl App {
             // panel has almost nothing left once the heading and the entry field have taken
             // theirs, and a scroll area asked to fill a space smaller than one line of text
             // spilled over the field instead of scrolling inside what it had.
+            //
+            // **And the floor clamped too**, which the cap alone did not do: a scroll area is never
+            // shorter than egui's 64-point minimum unless told otherwise, so with the panel at its
+            // smallest the log kept its 64 points and was drawn over the entry field, the lines
+            // and the typing on top of each other (reported 2026-11-07).
             let room = ui.available_height().max(0.0);
             egui::ScrollArea::vertical()
                 .stick_to_bottom(true)
                 .auto_shrink([false, false])
                 .max_height(room)
+                .min_scrolled_height(room)
                 .id_salt("console_log")
                 .show(ui, |ui| {
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -300,6 +306,7 @@ impl App {
         // its own record (`interaction-spec.md` §6).
         // A typed line is a command like any other, so a session pending is kept first (§3.4).
         self.commit_session();
+        self.end_join_preview();
         self.echo_settle();
         self.run_command_unechoed(line);
         self.echo_rebase();
@@ -323,7 +330,7 @@ impl App {
         out
     }
 
-    fn run_command_unechoed(&mut self, line: &str) {
+    pub(crate) fn run_command_unechoed(&mut self, line: &str) {
         let line = line.trim();
         if line.is_empty() {
             return;
@@ -607,16 +614,33 @@ impl App {
                 let first = match of {
                     expect::Of::One(id) | expect::Of::Diff(id, _) | expect::Of::Ratio(id, _) => id,
                 };
-                let h0 = match prepare(first) {
-                    Ok((field, bounds)) => {
-                        let e = bounds.1 - bounds.0;
-                        // The smallest feature the block asks for bounds the first grid, so a
-                        // sheet thinner than two cells is not missed at both levels (§3.3).
-                        let feature = expect::smallest_feature(&self.doc, &graph, first);
-                        let h0 = expect::first_spacing_with_feature(e.x.max(e.y).max(e.z), feature);
-                        fields.insert(first, Ok((field, bounds)));
-                        h0
+                let every: Vec<NodeId> = match of {
+                    expect::Of::One(id) => vec![id],
+                    expect::Of::Diff(a, b) | expect::Of::Ratio(a, b) => vec![a, b],
+                };
+                for id in &every {
+                    match prepare(*id) {
+                        Ok(prepared) => {
+                            fields.insert(*id, Ok(prepared));
+                        }
+                        Err(why) => {
+                            self.expect_unresolved(what, why);
+                            return;
+                        }
                     }
+                }
+                let boxes: Vec<(Point3<f64>, Point3<f64>)> =
+                    every.iter().filter_map(|id| fields.get(id).and_then(|f| f.as_ref().ok()).map(|(_, b)| *b)).collect();
+                let e = boxes[0].1 - boxes[0].0;
+                // The smallest feature the block asks for bounds the first grid, so a sheet
+                // thinner than two cells is not missed at both levels (§3.3); and the grid is
+                // coarsened until its second level fits one measurement of every block in it.
+                let features = expect::smallest_feature(&self.doc, &graph, first);
+                let fits = |h: f64| {
+                    boxes.iter().all(|b| fieldform_field::anchored_corners(*b, h) <= fieldform_field::ANCHORED_CORNERS_MAX)
+                };
+                let h0 = match expect::first_spacing_that_fits(e.x.max(e.y).max(e.z), features, &fits) {
+                    Ok(h0) => h0,
                     Err(why) => {
                         self.expect_unresolved(what, why);
                         return;

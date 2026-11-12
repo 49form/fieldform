@@ -951,12 +951,10 @@ impl App {
         id: NodeId,
         input: fieldform_scene::Operand,
     ) -> fieldform_scene::Operand {
-        let choices = self.operand_choices(id);
-        let mut chosen = input.source();
-        self.pick_operand(ui, "Of:", "edit_input", id, &choices, &mut chosen);
-        self.reuse_hint(ui, id);
-        ui.separator();
-        chosen.map_or(input, fieldform_scene::Operand::filled)
+        // **Forwarded to the operand row, which settles the debt named above** (2026-11-07): the
+        // owner asked for Clear on an offset's field, and that row is the one that has it, along
+        // with the empty state. One row for every slot, as D9 asks.
+        self.operand_input(ui, id, input)
     }
 
     /// Where a place is, for the manipulator and the panels.
@@ -2356,12 +2354,12 @@ impl App {
     /// A curve, or a profile, by the name a person would type: a curve's own name first (any
     /// curve of a loop names the loop), then a profile's row name, as `Profile 2` or the name it
     /// was given.
-    fn curve_or_profile_named(&mut self, name: &str) -> Option<CurveId> {
+    pub(crate) fn curve_or_profile_named(&mut self, name: &str) -> Option<CurveId> {
         if let Some(id) = self.curve_named(name) {
             return Some(id);
         }
         self.refresh_profiles();
-        let keys: Vec<CurveId> = self.profiles.loops.iter().map(|l| l[0]).collect();
+        let keys = self.profiles.keys();
         keys.into_iter().find(|key| self.profile_label(*key).eq_ignore_ascii_case(name.trim()))
     }
 
@@ -3333,7 +3331,15 @@ impl App {
         // `apply_pattern` does.
         // For the reason `apply_pattern` gives: with an empty slot there is no row whose eye
         // this stands for.
+        // **Joined, the block already draws the original as its first half**, so keeping the
+        // original's own eye open drew it twice: a part measured and sampled with the seed counted
+        // beside the mirror that holds it. Its eye goes with its row then, as a joined pattern's
+        // seed does.
         match target.source() {
+            Some(target) if joined => {
+                self.set_part_graph(graph);
+                self.clear_hidden(target);
+            }
             Some(target) => {
                 let keep_drawn = eye_command(&graph, target, true);
                 self.set_part_graph_with(graph, vec![Box::new(keep_drawn)]);

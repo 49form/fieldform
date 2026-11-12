@@ -32,6 +32,8 @@ pub enum Subject {
     Degree,
     /// Vertices, edges or faces of the cage picked: the cage tools' table (R10).
     CageElements,
+    /// A join, where two curve ends meet: what holds there.
+    Joint,
 }
 
 /// The eight directions, clockwise from up, by name, for the test that walks them. South is More….
@@ -138,6 +140,20 @@ pub fn slots(subject: Subject) -> [Option<&'static str>; 8] {
             Some("cage.cut"),
             Some("cage.weld"),
         ],
+        // **G0, G1, G2 left to right across the top half**, ninety degrees apart rather than
+        // forty-five, so the three are the easiest slots to tell apart, and continuity rises the
+        // way the hand moves; Break below them, away from the three that hold. Drafted 2026-11-05
+        // and 2026-11-07 for the owner's requests; not yet ruled on.
+        Subject::Joint => [
+            Some("curve.continuity.1"),
+            None,
+            Some("curve.continuity.2"),
+            None,
+            None,
+            Some("curve.continuity.break"),
+            Some("curve.continuity.0"),
+            None,
+        ],
     }
 }
 
@@ -197,6 +213,8 @@ mod tests {
             Subject::Plane,
             Subject::Cage,
             Subject::Degree,
+            Subject::CageElements,
+            Subject::Joint,
         ] {
             let table = slots(subject);
             assert_eq!(table[MORE], None, "{subject:?}: South is More…");
@@ -224,6 +242,20 @@ mod tests {
         assert_eq!(slots(Subject::Curve)[7], Some("curve.degree_menu"), "North-West on a curve opens the degrees");
         assert_eq!(slots(Subject::Profile)[7], Some("curve.degree_menu"));
         assert_eq!(slots(Subject::Degree)[0], Some("curve.degree.1"), "and the ring starts at one");
+        assert_eq!(
+            slots(Subject::Joint),
+            [
+                Some("curve.continuity.1"),
+                None,
+                Some("curve.continuity.2"),
+                None,
+                None,
+                Some("curve.continuity.break"),
+                Some("curve.continuity.0"),
+                None,
+            ],
+            "a join: G0 West, G1 North, G2 East, Break South-West"
+        );
         assert!(!slots(Subject::Plane).contains(&Some("view.frame_selection")), "Frame moved under More…");
     }
 }

@@ -55,7 +55,8 @@ impl App {
         let mut run: Option<&'static commands::Command> = None;
         let mut passthrough: Option<String> = None;
         let mut close = false;
-        egui::Area::new(egui::Id::new("command palette area"))
+        let opened_now = state.just_opened;
+        let shown = egui::Area::new(egui::Id::new("command palette area"))
             .order(egui::Order::Foreground)
             .fixed_pos(at)
             .show(ctx, |ui| {
@@ -145,6 +146,13 @@ impl App {
                     }
                 });
             });
+        // **A left click anywhere else closes it** (the owner, 2026-11-07), as a click away from a
+        // menu does. Only Esc used to, so a palette opened by a stray Space sat over the work until
+        // somebody found the key. Not in the frame it opened, whose press -- the marking menu's
+        // More… -- may be the one that opened it.
+        if !opened_now && ctx.input(|i| i.pointer.primary_pressed()) && !shown.response.contains_pointer() {
+            close = true;
+        }
         if close || run.is_some() || passthrough.is_some() {
             if let Some(focused) = ctx.memory(|m| m.focused()) {
                 ctx.memory_mut(|m| m.surrender_focus(focused));

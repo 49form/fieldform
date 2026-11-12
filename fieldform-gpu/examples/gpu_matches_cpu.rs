@@ -234,6 +234,8 @@ fn main() {
         Scene::ScaledUniform,
         Scene::Coiled,
         Scene::Threaded,
+        Scene::Written,
+        Scene::WrittenEveryFunction,
         Scene::Holes,
         Scene::Attracted,
         Scene::Patterned,
@@ -327,6 +329,8 @@ fn main() {
         Scene::LoftedDerived,
         Scene::ThinSweptScaled,
         Scene::SpokedPipes,
+        Scene::DrilledBlock,
+        Scene::PrimitiveRuns,
         Scene::SpokedBlades,
         Scene::SpokedRibs,
         Scene::ThinBaked,
@@ -657,7 +661,9 @@ fn main() {
             .iter()
             .map(|p| match p {
                 ParamRef::Literal(v) => *v as f32,
-                ParamRef::Named(_) => unreachable!("this scene uses only literals"),
+                // The written scenes read a parameter of the document, so the slot path is
+                // what is traced rather than a literal compiled in.
+                ParamRef::Named(id) => doc.parameter_value(*id).expect("a named parameter of the scene has a value") as f32,
                 // A ramp's numbers are generated constants, not buffer slots, so a driven
                 // parameter never reaches the parameter list at all.
                 ParamRef::Field(_) => unreachable!("a driven parameter is not a slot"),
@@ -1250,6 +1256,20 @@ enum Scene {
     /// `first + k` lands on a spine that exists and is the wrong one — which is the mistake a
     /// two-pipe scene could not tell from a correct one.
     SpokedPipes,
+    /// **A block drilled with five holes in one difference** -- the shape a run of cylinders
+    /// walks when it is a difference's tools: the walk's minimum, negated by the fold.
+    ///
+    /// Five holes, no two the same radius, two of them tilted, so an off-by-one in the table's
+    /// seven-slot stride reads a neighbour's end as this one's radius and drills somewhere a
+    /// correct walk never does. And the cut first operand is itself a box, which must stay out of
+    /// the run: it is what is cut from.
+    DrilledBlock,
+    /// **Five runs, one of each other primitive**: four cones, four capsules, four spheres, four
+    /// boxes and four tori, each four in a union of their own.
+    ///
+    /// Every member differs from its neighbours in size, so a walk that read the wrong stride
+    /// or started its table in the wrong place draws a different solid rather than the same one.
+    PrimitiveRuns,
     /// **Four blades on their own spokes, in one union** — the shape `extrude_run_distance`
     /// walks, and the other kind of run.
     ///
@@ -1593,6 +1613,13 @@ enum Scene {
     /// tapering pixels' normals are differenced rather than composed, which the normal column
     /// checks against the CPU's gradient.
     ProtectedBore,
+    /// A sphere written as arithmetic, its radius a parameter (item 40): the two transcriptions
+    /// of one tree held to each other on the simplest text there is.
+    Written,
+    /// Every function the grammar offers in one text, bounded and divided, so a function whose
+    /// shader spelling drifts from the CPU's -- degrees, the floored `mod`, `round` half away,
+    /// `pow` of a negative base -- shows as a surface the two compilers disagree about.
+    WrittenEveryFunction,
     /// A hollowed cube: the cube minus an inward offset of itself.
     ///
     /// The scene the offset node needs, and it asks the one question that matters on the GPU
@@ -1676,6 +1703,8 @@ impl Scene {
             Scene::ScaledUniform => "the same, scaled by one factor about the same frame",
             Scene::Coiled => "a left-handed square-wire coil of two and a half turns, aimed",
             Scene::Threaded => "an M8 thread twenty long, opened by a clearance of 0.1",
+            Scene::Written => "a sphere written as arithmetic, its radius a parameter",
+            Scene::WrittenEveryFunction => "a written field reading every function the grammar has",
             Scene::Holes => "a block with a counterbored hole through it and a tapped M8 hole",
             Scene::Attracted => "a bar drawn toward a curve",
             Scene::Patterned => "one body patterned six times around Z",
@@ -1739,6 +1768,8 @@ impl Scene {
             }
             Scene::ThinSweptScaled => "a thin open sweep whose section scales to a half",
             Scene::SpokedPipes => "four pipes on spokes, in one union",
+            Scene::DrilledBlock => "a block drilled with five holes in one difference",
+            Scene::PrimitiveRuns => "four each of five primitives, each four a union",
             Scene::SpokedBlades => "four blades on spokes, in one union",
             Scene::SpokedRibs => "four thin blades on spokes, in one union",
             Scene::ThinBaked => "a thin extrude answered from a baked grid",
@@ -2045,6 +2076,80 @@ impl Scene {
                     graph.add(Node::Sphere { centre: fieldform_scene::Place::At(at(0.4, 0.15, 0.1)), radius: ParamRef::Literal(0.16 * CAGE_MM) }),
                 ];
                 graph.add(join(BooleanOp::Union, solids.iter().copied().map(Into::into).collect()));
+            }
+            return (doc, graph, Vec::new());
+        }
+
+        // **Runs of primitives**: a drilled block, and four of each other shape. A graph of their
+        // own, as the many-way booleans have.
+        if matches!(self, Scene::DrilledBlock | Scene::PrimitiveRuns) {
+            let mut graph = Graph::empty();
+            let at = |x: f64, y: f64, z: f64| {
+                fieldform_scene::Place::At([
+                    ParamRef::Literal(x * CAGE_MM),
+                    ParamRef::Literal(y * CAGE_MM),
+                    ParamRef::Literal(z * CAGE_MM),
+                ])
+            };
+            let mm = |v: f64| ParamRef::Literal(v * CAGE_MM);
+            if matches!(self, Scene::DrilledBlock) {
+                let block = graph.add(Node::Cuboid {
+                    edge: Default::default(),
+                    centre: at(0.0, 0.0, 0.0),
+                    size: [mm(1.0), mm(0.6), mm(0.3)],
+                    turn: fieldform_scene::no_turn(),
+                });
+                // Through, blind, tilted and breaking an edge: (x, y, lean, radius).
+                let holes = [
+                    (-0.38, 0.12, 0.0, 0.06),
+                    (-0.18, -0.1, 0.12, 0.04),
+                    (0.02, 0.05, 0.0, 0.09),
+                    (0.22, -0.15, -0.1, 0.05),
+                    (0.43, 0.22, 0.0, 0.07),
+                ];
+                let mut inputs = vec![block.into()];
+                for (x, y, lean, r) in holes {
+                    inputs.push(
+                        graph
+                            .add(Node::Cylinder {
+                                edge: Default::default(),
+                                ends: fieldform_scene::Ends::between(at(x - lean, y, -0.3), at(x + lean, y, 0.3)),
+                                radius: mm(r),
+                            })
+                            .into(),
+                    );
+                }
+                graph.add(Node::Boolean { op: BooleanOp::Difference, inputs });
+            } else {
+                let mut rows = Vec::new();
+                for (row, y) in [-0.4, -0.2, 0.0, 0.2, 0.4].into_iter().enumerate() {
+                    let mut members = Vec::new();
+                    for k in 0..4 {
+                        let x = -0.36 + 0.24 * f64::from(k);
+                        let s = 0.05 + 0.012 * f64::from(k);
+                        let ends = fieldform_scene::Ends::between(at(x, y, -0.05 - 0.02 * f64::from(k)), at(x + 0.03, y, 0.08));
+                        let node = match row {
+                            0 => Node::Cone { edge: Default::default(), ends, base_radius: mm(s), top_radius: mm(0.3 * s) },
+                            1 => Node::Capsule { ends, start_radius: mm(s * 0.8), end_radius: mm(s * 0.5) },
+                            2 => Node::Sphere { centre: at(x, y, 0.02 * f64::from(k)), radius: mm(s) },
+                            3 => Node::Cuboid {
+                                edge: Default::default(),
+                                centre: at(x, y, 0.0),
+                                size: [mm(s * 1.6), mm(s * 1.2), mm(s * (1.0 + 0.3 * f64::from(k)))],
+                                turn: fieldform_scene::no_turn(),
+                            },
+                            _ => Node::Torus {
+                                centre: at(x, y, 0.0),
+                                major_radius: mm(s),
+                                minor_radius: mm(0.25 * s),
+                                turn: fieldform_scene::no_turn(),
+                            },
+                        };
+                        members.push(graph.add(node).into());
+                    }
+                    rows.push(graph.add(Node::Boolean { op: BooleanOp::Union, inputs: members }).into());
+                }
+                graph.add(Node::Boolean { op: BooleanOp::Union, inputs: rows });
             }
             return (doc, graph, Vec::new());
         }
@@ -3889,6 +3994,47 @@ impl Scene {
         // opened by a clearance of 0.1. Built at their own size and then placed at twenty-five
         // times it, since the views frame the cage's metre: a uniform placement is exact, so
         // what is compared is still the M8, read through its designation on both sides.
+        // A field written as arithmetic (item 40), at the scene's own scale: the region is a
+        // box of the cage's size about the origin, and the radius is a parameter of the
+        // document so the slot path is what is traced, not a literal compiled in.
+        if matches!(self, Scene::Written | Scene::WrittenEveryFunction) {
+            let mut doc = Document::new();
+            let r = doc.add_parameter("r", CAGE_MM * 0.3);
+            let mut graph = Graph::empty();
+            let lit = ParamRef::Literal;
+            let (text, divisor) = match self {
+                Scene::Written => ("sqrt(x*x + y*y + z*z) - r".to_string(), 1.0),
+                // Each term's rate is bounded and the sum is under the divisor: the sphere's
+                // one, the ripple's 20 * 0.36 * pi/180 * sqrt(2) = 0.18, and the rest under a
+                // tenth together. **The steps are scaled to a hundredth**, since the comparison
+                // is of surfaces: a floor that jumps two millimetres is a surface the two
+                // compilers place a step apart wherever single precision rounds `z / 100` the
+                // other way, and `atan2` is read in the first quadrant, since its cut along the
+                // negative axis is a jump of 360 degrees -- which the first run of this scene
+                // measured as 3.58 mm against a budget of 0.05.
+                _ => (
+                    format!(
+                        "sqrt(x*x + y*y + z*z) - r + 20 * sin(x * 0.36) * cos(y * 0.36) + 8 * exp(-abs(z) / {s}) \
+                         + 0.01 * mod(x, 50) / 50 + 0.01 * floor(z / 100) - 0.01 * ceil(-z / 100) + 0.01 * round(y / 200) \
+                         + 0.01 * abs(sign(z)) + clamp(x / {s}, -1, 1) + 10 * (y / {s}) ^ 3 + 0.02 * atan2(abs(y) + 1, abs(x) + 1) \
+                         + log(x * x + 400) / 10 + tan(z / 50) + max(x, y) / {s} + min(x, y, z) / {s}",
+                        s = CAGE_MM
+                    ),
+                    2.0,
+                ),
+            };
+            let written = fieldform_scene::Written::parse(&text, &|n| (n == "r").then_some(r)).expect("the scene's text parses");
+            let side = lit(CAGE_MM * 0.9);
+            graph.add(Node::Expression {
+                text: written,
+                frame: fieldform_scene::Frame::default(),
+                size: [side, side, side],
+                divisor: lit(divisor),
+                claim: fieldform_scene::WrittenClaim::LowerBound,
+            });
+            return (doc, graph, Vec::new());
+        }
+
         if matches!(self, Scene::Coiled | Scene::Threaded) {
             let mut graph = Graph::empty();
             let lit = ParamRef::Literal;
@@ -4550,6 +4696,8 @@ impl Scene {
         match self {
             // Returned above with a graph of its own, so it never reaches this pipe or this cage.
             Scene::SpokedPipes
+            | Scene::DrilledBlock
+            | Scene::PrimitiveRuns
             | Scene::SpokedBlades
             | Scene::SpokedRibs
             // Each returned its twin's document before anything here was built.
@@ -4666,6 +4814,8 @@ impl Scene {
             | Scene::ScaledUniform
             | Scene::Coiled
             | Scene::Threaded
+            | Scene::Written
+            | Scene::WrittenEveryFunction
             | Scene::Holes
             | Scene::Attracted
             | Scene::Patterned

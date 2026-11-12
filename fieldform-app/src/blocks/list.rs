@@ -23,6 +23,8 @@ pub(crate) enum RowKey {
     Export(fieldform_scene::ExportId),
     /// A Save Image block's row (item 117).
     Image(fieldform_scene::SaveImageId),
+    /// A curvature comb's row.
+    Comb(fieldform_scene::CombId),
     Import(fieldform_scene::id::SourceId),
     /// A profile row, keyed by its first curve. Its name is `Document::profile_names`
     /// (`profile-group-spec.md` §3.3), and an empty one puts "Profile N" back.
@@ -194,6 +196,8 @@ pub(crate) enum Block {
     Export(fieldform_scene::ExportId),
     /// The viewport written as an image file — the third output block (item 117).
     Image(fieldform_scene::SaveImageId),
+    /// A curvature comb: a reading of a curve, drawn along it. Placed below what it reads.
+    Comb(fieldform_scene::CombId),
     /// Everything one file brought in, as one row that opens.
     ///
     /// A STEP assembly is one solid per body — forty of them for a real machine — and forty
@@ -212,6 +216,46 @@ pub(crate) enum Block {
     /// one of these; it is its own row, since a group of one is a disclosure triangle over
     /// nothing. `profile-group-spec.md` §3.
     Profile(CurveId),
+}
+
+impl Block {
+    /// What the block does in the graph: the family its row is framed in (the block-family notes,
+    /// section 2).
+    ///
+    /// **One of the two places the family table is written**, the other being
+    /// [`fieldform_scene::Node::family`], which answers for every block the graph holds; this
+    /// answers for the rows the graph does not hold. Exhaustive, with no wildcard, so a new kind of
+    /// row does not compile until it is filed. A named number is Reference, as every value other
+    /// blocks are driven by is; a surface, an import's group row and the three output blocks are
+    /// File; a curve and a profile row are Curve. `None` for a block this build cannot read, or one
+    /// no longer in `graph`.
+    pub(crate) fn family(&self, graph: &Graph) -> Option<fieldform_scene::Family> {
+        use fieldform_scene::Family;
+        match self {
+            // A comb is drawn the way construction geometry is, and composes nothing.
+            Block::Parameter(_) | Block::Comb(_) => Some(Family::Reference),
+            Block::Curve(_) | Block::Profile(_) => Some(Family::Curve),
+            Block::Surface(_)
+            | Block::Import(_)
+            | Block::Tessellation(_)
+            | Block::Export(_)
+            | Block::Image(_) => Some(Family::File),
+            Block::Node(id) => graph.node(*id).and_then(Node::family),
+        }
+    }
+}
+
+/// One row frame as the list drew it: which block, where, inside which frame, and how it was
+/// painted. Recorded only under test, for the tests that hold every row to a frame and every frame
+/// inside its holder's.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DrawnFrame {
+    pub(crate) block: Block,
+    pub(crate) rect: egui::Rect,
+    /// The frame this one was drawn inside, by its index in the record.
+    pub(crate) parent: Option<usize>,
+    pub(crate) paint: crate::theme::FramePaint,
 }
 
 /// One row of the block list, together with the rows drawn inside it.
@@ -708,7 +752,8 @@ pub(crate) fn nest_rows(
             | Block::Import(_)
             | Block::Tessellation(_)
             | Block::Export(_)
-            | Block::Image(_) => Vec::new(),
+            | Block::Image(_)
+            | Block::Comb(_) => Vec::new(),
         };
         // An owner further down the list holds this row; one that is not is not a row of this
         // list, and the block keeps a row of its own rather than vanishing into nothing.
@@ -784,6 +829,9 @@ pub(crate) struct ProfileRows {
     pub(crate) at: Option<u64>,
     /// Each loop's curves in walk order; the first is its key.
     pub(crate) loops: Vec<Vec<CurveId>>,
+    /// The open profiles ([`open_chains`]): each one's key, its earliest-made curve, and its
+    /// curves from one end to the other.
+    pub(crate) chains: Vec<(CurveId, Vec<CurveId>)>,
 }
 
 /// The block list on its way down to a row, after something chosen elsewhere.
@@ -954,7 +1002,24 @@ pub(crate) fn held_joint_points(
     part: PartId,
     profiles: &ProfileRows,
 ) -> std::collections::HashSet<NodeId> {
-    profiles.loops.iter().flat_map(|l| joint_points_in(doc, part, l)).collect()
+    let mut joints: std::collections::HashSet<NodeId> =
+        profiles.loops.iter().flat_map(|l| joint_points_in(doc, part, l)).collect();
+    // **And the point a join of an open chain is held by** when its continuity is set: unnamed,
+    // read by nothing, with exactly the two ends on it. It is the join's, not a block anybody made,
+    // so it takes no row, as a loop's corners take none out here; the join's ring is where it is
+    // worked. A point somebody named, or that a block reads, keeps its row.
+    if let Some(graph) = doc.parts.get(&part).map(|p| &p.graph) {
+        for (id, node) in graph.nodes() {
+            if matches!(node, Node::Point { .. })
+                && !graph.is_consumed(id)
+                && doc.node_meta.get(&id).and_then(|m| m.name.as_deref()).is_none()
+                && ends_on_point(doc, id).len() == 2
+            {
+                joints.insert(id);
+            }
+        }
+    }
+    joints
 }
 
 /// The blocks of `part` a console line may call by name or label, oldest first: those the list
@@ -1037,6 +1102,64 @@ pub(crate) fn joint_choices(
     out
 }
 
+/// Two curve ends that meet with nothing else meeting there: where a continuity can be set.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Join {
+    pub(crate) at: nalgebra::Point3<f64>,
+    /// In curve-creation order, so the earlier curve is first.
+    pub(crate) ends: [fieldform_scene::CurveEnd; 2],
+}
+
+/// Every join in the document: each place exactly two ends of open curves meet, within
+/// [`fieldform_scene::JOINED_MM`], whether a joint point holds them there or they only touch.
+///
+/// **Held or not, because a relation asks only that the ends meet.** `Relation::Joint` is made
+/// between any two ends within that distance, and an open chain -- which never gets joint points,
+/// since those come with a closed loop -- has corners as real as a loop's. Reading the points
+/// instead would have left every open chain without a way to say G1 at its corners.
+///
+/// **Three ends meeting is not a join**, as no joint is made there either (`loop_meetings`): which
+/// two of the three a continuity is between is a choice the place does not make.
+pub(crate) fn joins_in(doc: &Document) -> Vec<Join> {
+    let mut curves: Vec<&fieldform_scene::Curve> =
+        doc.curves.values().filter(|c| !c.is_closed()).collect();
+    curves.sort_by_key(|c| (doc.curves_created.get(&c.id).copied().unwrap_or(0), c.id.raw()));
+    let mut ends: Vec<(fieldform_scene::CurveEnd, nalgebra::Point3<f64>)> = Vec::new();
+    for c in curves {
+        let points = c.control_points();
+        let (Some(first), Some(last)) = (points.first(), points.last()) else { continue };
+        if points.len() < 2 {
+            continue;
+        }
+        ends.push((fieldform_scene::CurveEnd { curve: c.id, end: fieldform_scene::End::Start }, *first));
+        ends.push((fieldform_scene::CurveEnd { curve: c.id, end: fieldform_scene::End::End }, *last));
+    }
+    let meets = |a: &nalgebra::Point3<f64>, b: &nalgebra::Point3<f64>| {
+        (a - b).norm() <= fieldform_scene::JOINED_MM
+    };
+    let mut out = Vec::new();
+    for (i, (a, at)) in ends.iter().enumerate() {
+        let near: Vec<usize> = (0..ends.len()).filter(|&j| j != i && meets(at, &ends[j].1)).collect();
+        let &[j] = near.as_slice() else { continue };
+        let (b, _) = ends[j];
+        // Once per pair, and never a curve meeting itself.
+        if j < i || b.curve == a.curve {
+            continue;
+        }
+        // The other end must see only this one too, or a third end sits within reach of it.
+        if (0..ends.len()).filter(|&k| k != j && meets(&ends[j].1, &ends[k].1)).count() != 1 {
+            continue;
+        }
+        out.push(Join { at: *at, ends: [*a, b] });
+    }
+    out
+}
+
+/// The join `end` is part of, if it is part of one.
+pub(crate) fn join_of(doc: &Document, end: fieldform_scene::CurveEnd) -> Option<Join> {
+    joins_in(doc).into_iter().find(|j| j.ends.contains(&end))
+}
+
 /// The joint points that go unseen with their row: those of every row in `rows` whose curves
 /// are all in `hidden`.
 ///
@@ -1059,18 +1182,125 @@ pub(crate) fn points_hidden_with_rows(
 }
 
 impl ProfileRows {
-    /// The key of the row `curve` is in, if it is in one.
+    /// The key of the row `curve` is in, closed or open, if it is in one.
     pub(crate) fn key_of(&self, curve: CurveId) -> Option<CurveId> {
-        self.loops.iter().find(|l| l.contains(&curve)).map(|l| l[0])
+        self.loops
+            .iter()
+            .find(|l| l.contains(&curve))
+            .map(|l| l[0])
+            .or_else(|| self.chains.iter().find(|(_, c)| c.contains(&curve)).map(|(key, _)| *key))
     }
 
     /// The row's curves in walk order, or `None` when `key` heads no row.
     pub(crate) fn members(&self, key: CurveId) -> Option<&[CurveId]> {
-        self.loops.iter().find(|l| l[0] == key).map(|l| l.as_slice())
+        self.loops
+            .iter()
+            .find(|l| l[0] == key)
+            .map(|l| l.as_slice())
+            .or_else(|| self.chains.iter().find(|(k, _)| *k == key).map(|(_, c)| c.as_slice()))
     }
 
-    /// The row's number, counted from one in list order — what "Profile 2" means.
+    /// The row's number, counted from one in list order — what "Profile 2" means, or for an
+    /// open row "Open profile 2", which is counted on its own so that a chain coming or going
+    /// renumbers no closed profile.
     pub(crate) fn number(&self, key: CurveId) -> Option<usize> {
-        self.loops.iter().position(|l| l[0] == key).map(|i| i + 1)
+        self.loops
+            .iter()
+            .position(|l| l[0] == key)
+            .or_else(|| self.chains.iter().position(|(k, _)| *k == key))
+            .map(|i| i + 1)
     }
+
+    /// Whether `key` heads an open profile rather than a closed loop.
+    pub(crate) fn is_open(&self, key: CurveId) -> bool {
+        self.chains.iter().any(|(k, _)| *k == key)
+    }
+
+    /// Every row's key, the closed ones first.
+    pub(crate) fn keys(&self) -> Vec<CurveId> {
+        self.loops.iter().map(|l| l[0]).chain(self.chains.iter().map(|(k, _)| *k)).collect()
+    }
+
+    /// Every row's curves, closed and open alike.
+    pub(crate) fn all_rows(&self) -> Vec<Vec<CurveId>> {
+        self.loops.iter().cloned().chain(self.chains.iter().map(|(_, c)| c.clone())).collect()
+    }
+}
+
+/// The document's open profiles: runs of two or more open curves joined end to end at joins
+/// that are **held** -- a continuity set there, G0, G1 or G2 -- each from one end to the other.
+///
+/// **Held, not merely touching** (the owner, 2026-11-11). Two ends that happen to meet are two
+/// curves; a join somebody set a continuity on is a decision that they are one profile. So a
+/// sketch of lines that touch stays a list of lines until its joins are set, and breaking a join
+/// is what takes a chain apart again. A closed loop is still found by touching ([`ProfileRows::loops`]),
+/// and a curve in one is in no chain.
+///
+/// **Keyed by the earliest-made curve, as a loop is**, so the row stands where its first curve
+/// would have been and keeps its state while that curve stays in it. **Ordered from the end that
+/// runs the key forwards**, so a comb reading the profile reads its first curve as drawn. A join
+/// is two ends and nothing else ([`joins_in`]), so a fork ends a chain there, as a wall's chain
+/// ends at one; a ring of held joins that is not a loop -- one somebody ungrouped -- is no chain.
+pub(crate) fn open_chains(doc: &Document, loops: &[Vec<CurveId>]) -> Vec<(CurveId, Vec<CurveId>)> {
+    use fieldform_scene::{CurveEnd, End};
+    let in_loop: std::collections::HashSet<CurveId> = loops.iter().flatten().copied().collect();
+    // The one test a wall's walk asks too, so a row and the wall built from it end at one place.
+    let held = |a: CurveEnd, b: CurveEnd| doc.ends_held(a, b);
+    let mut link: std::collections::HashMap<CurveEnd, CurveEnd> = std::collections::HashMap::new();
+    for join in joins_in(doc) {
+        let [a, b] = join.ends;
+        if in_loop.contains(&a.curve) || in_loop.contains(&b.curve) || !held(a, b) {
+            continue;
+        }
+        link.insert(a, b);
+        link.insert(b, a);
+    }
+    let other = |e: End| if e == End::Start { End::End } else { End::Start };
+    let made = |id: &CurveId| (doc.curves_created.get(id).copied().unwrap_or(0), id.raw());
+    let mut seeds: Vec<CurveId> = link.keys().map(|e| e.curve).collect();
+    seeds.sort_by_key(made);
+    seeds.dedup();
+    let mut placed: std::collections::HashSet<CurveId> = std::collections::HashSet::new();
+    let mut chains = Vec::new();
+    for seed in seeds {
+        if placed.contains(&seed) {
+            continue;
+        }
+        // Back from the seed's start to the far end of the run, or round to the seed again,
+        // which is a ring.
+        let mut first = CurveEnd { curve: seed, end: End::Start };
+        let mut ring = false;
+        let mut steps = 0;
+        while let Some(&next) = link.get(&first) {
+            first = CurveEnd { curve: next.curve, end: other(next.end) };
+            steps += 1;
+            if next.curve == seed || steps > link.len() {
+                ring = true;
+                break;
+            }
+        }
+        // Then forward from that free end, each curve entered by one end and left by the other.
+        let mut run: Vec<(CurveId, bool)> = Vec::new();
+        let mut entered = first;
+        loop {
+            run.push((entered.curve, entered.end == End::End));
+            let leaving = CurveEnd { curve: entered.curve, end: other(entered.end) };
+            match link.get(&leaving) {
+                Some(&next) if !run.iter().any(|(c, _)| *c == next.curve) => entered = next,
+                _ => break,
+            }
+        }
+        placed.extend(run.iter().map(|(c, _)| *c));
+        if ring || run.len() < 2 {
+            continue;
+        }
+        let key = run.iter().map(|(c, _)| *c).min_by_key(made).expect("two curves");
+        // Turned round if that runs the key backwards.
+        if run.iter().any(|(c, backwards)| *c == key && *backwards) {
+            run.reverse();
+        }
+        chains.push((key, run.into_iter().map(|(c, _)| c).collect()));
+    }
+    chains.sort_by_key(|(key, _)| made(key));
+    chains
 }

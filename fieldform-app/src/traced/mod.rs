@@ -44,7 +44,8 @@ use eframe::egui_wgpu;
 use fieldform_field::{CageField, MeshField};
 use fieldform_gpu::{
     halton_jitter, BakedLeaf, Camera, Draft, EnvironmentChoice, EnvironmentMaps, Look,
-    Occlusion, Renderer, ShaderProgram, ShadingResources, SubmissionCost, SubmissionTicket,
+    Occlusion, Reflections, Renderer, ShaderProgram, ShadingResources, SubmissionCost,
+    SubmissionTicket,
 };
 use fieldform_scene::{CurveId, Graph, Material, ParamId};
 use nalgebra::{Point3, Vector3};
@@ -606,6 +607,12 @@ pub struct View<'a> {
     /// Whether a settled frame measures occlusion and the key light's shadow. A view setting,
     /// so it is here beside the section rather than in the document.
     pub occlusion: bool,
+    /// Whether a settled frame traces reflections: one more march from each hit pixel along the
+    /// direction the material's mirror-like lobe reflects, and what it finds substituted for the
+    /// environment the lobe would otherwise show (backlog item 54). A view setting beside
+    /// `occlusion`; whether a given frame then traces any is the material's to decide
+    /// (`Reflections::for_material`), so a matte part never pays.
+    pub reflections: bool,
     /// Whether the still's rays finish on a profile's outline rather than its bake: the rung's
     /// `DisplayQuality::exact_finish`. The draft never does.
     pub exact_finish: bool,
@@ -649,6 +656,7 @@ struct ViewKey {
     selected: Option<u32>,
     material: Material,
     occlusion: bool,
+    reflections: bool,
     exact_finish: bool,
     environment: EnvironmentChoice,
     draft: Option<Draft>,
@@ -685,6 +693,7 @@ impl ViewKey {
             selected,
             ref material,
             occlusion,
+            reflections,
             exact_finish,
             environment,
             draft,
@@ -703,6 +712,7 @@ impl ViewKey {
             selected,
             material: material.clone(),
             occlusion,
+            reflections,
             exact_finish,
             environment,
             draft,
@@ -787,6 +797,8 @@ struct Submitted {
     skipped: u32,
     /// A warm-up band: work for the card's clocks, which measures nothing about the view.
     warm: bool,
+    /// A frame whose camera carried a reflected march (item 54), for the perf line.
+    reflections: bool,
 }
 
 /// What one [`TracedView::rebuild`] cost the interface's thread, in the three parts that want
@@ -855,6 +867,8 @@ pub struct PerfReport {
     /// A warm-up band rather than a frame: see `CLOCKS_HOLD`. Its cost is of a cold card by
     /// design, so nothing is sized from it, and it is logged so that it can be seen to run.
     pub warm: bool,
+    /// The frame traced reflections (item 54): one more march per hit pixel, inside `march`.
+    pub reflections: bool,
     pub cost: SubmissionCost,
 }
 
@@ -876,11 +890,12 @@ impl PerfReport {
         };
         let cpu = cpu_ms.map_or(String::new(), |ms| format!(", cpu {ms:.1}"));
         let skipped = if self.skipped > 0 { format!(", skipped {}", self.skipped) } else { String::new() };
+        let reflections = if self.reflections { ", reflections" } else { "" };
         let breakdown = match (self.cost.march_ms, self.cost.shade_ms) {
             (Some(march), Some(shade)) => {
-                format!("march {march:.1}, shade {shade:.1}{cpu}{skipped}")
+                format!("march {march:.1}, shade {shade:.1}{cpu}{skipped}{reflections}")
             }
-            _ => format!("wall{cpu}{skipped}"),
+            _ => format!("wall{cpu}{skipped}{reflections}"),
         };
         format!("{tier} {}px {:.1} ms ({breakdown})", self.pixels, self.cost.ms())
     }
@@ -1486,6 +1501,7 @@ impl TracedView {
         let height = ((high as f32) * shrink).round().max(1.0) as u32;
         camera.jitter = [0.0, 0.0];
         camera.occlusion = None;
+        camera.reflections = None;
         renderer
             .march_stats(&camera, width, height, budget)
             .map(|capture| (capture, program.source.clone(), self.last_values.clone()))
@@ -1570,6 +1586,7 @@ impl TracedView {
                 still_frame: done.still_frame,
                 skipped: done.skipped,
                 warm: done.warm,
+                reflections: done.reflections,
                 cost,
             });
         }

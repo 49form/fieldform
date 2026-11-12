@@ -28,7 +28,7 @@ pub(crate) mod cage_panel;
 pub(crate) mod marking_ui;
 // A person's own strip of commands, and the hint an empty document shows.
 pub(crate) mod shelf;
-mod block_list;
+pub(crate) mod block_list;
 pub(crate) mod block_controls;
 mod frame_controls;
 mod operations;
@@ -38,3 +38,4 @@ mod measure;
 // The one rule the three statements about the part ask before making one.
 pub(crate) use measure::no_statement_while_a_slot_is_empty;
 pub(crate) mod inspector;
+pub(crate) mod written_panel;

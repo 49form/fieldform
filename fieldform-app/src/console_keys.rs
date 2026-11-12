@@ -120,10 +120,12 @@ pub const INFILL_LATTICE_KEYS: &[&str] = &[
 /// Verbs whose block is a document record rather than a `Node`, each with the test that holds
 /// its fields to its keys in place of `every_field_a_block_has_is_a_key_its_verb_reads`, which
 /// walks `Node` samples and cannot reach these.
-pub const NOT_A_NODE: &[(&str, &str)] = &[(
-    "image.block",
-    "image_tests::every_field_of_the_block_is_a_key_saveimage_reads_or_a_recorded_gap",
-)];
+#[cfg(test)]
+pub const NOT_A_NODE: &[(&str, &str)] = &[
+    ("image.block", "image_tests::every_field_of_the_block_is_a_key_saveimage_reads_or_a_recorded_gap"),
+    ("view.section_new", "app_tests::every_field_of_a_section_is_a_key_addsection_reads_or_a_recorded_gap"),
+    ("evaluate.comb", "app_tests::every_field_of_a_comb_is_a_key_comb_reads_or_a_recorded_gap"),
+];
 
 /// The table. Keys are the block's serialized field names wherever one exists; where the
 /// instructions chose a shorter word (`rate`, `r`, `arc`) both are read and both cover the field.
@@ -153,6 +155,48 @@ pub const VERBS: &[Verb] = &[
     Verb { op: "draw.sketch", keys: Keys::Declared { reads: &[switch("target"), switch("off")], not_read: &[] } },
     Verb { op: "curve.degree", keys: Keys::Declared { reads: &[switch("degree"), switch("target")], not_read: &[] } },
     Verb { op: "curve.degree_menu", keys: Keys::Declared { reads: &[], not_read: &[] } },
+    Verb {
+        op: "view.section_new",
+        keys: Keys::Declared {
+            reads: &[key("origin", &["origin"]), key("turn", &["turn"]), key("flip", &["flipped"])],
+            not_read: &[
+                ("id", "drawn fresh"),
+                ("number", "the next free one"),
+                ("part", "the part being edited"),
+                ("on", "made on; `section` switches it"),
+            ],
+        },
+    },
+    // `comb`: a curvature comb. `block=` names one that exists, to change it rather than make
+    // another; `fit` re-fits its scale; the quoted word is its name.
+    Verb {
+        op: "evaluate.comb",
+        keys: Keys::Declared {
+            reads: &[
+                switch("name"),
+                switch("block"),
+                switch("fit"),
+                key("curve", &["curve"]),
+                // A whole profile, closed or open: its key curve, read as one.
+                key("profile", &["curve", "whole_loop"]),
+                key("scale", &["scale"]),
+                key("teeth", &["teeth"]),
+                key("flip", &["flip"]),
+                key("hidden", &["hidden"]),
+            ],
+            not_read: &[
+                ("id", "drawn fresh"),
+                ("part", "the part being edited"),
+            ],
+        },
+    },
+    Verb {
+        op: "curve.continuity",
+        keys: Keys::Declared {
+            reads: &[switch("at"), switch("end"), switch("g"), switch("lead"), switch("break")],
+            not_read: &[],
+        },
+    },
     Verb { op: "point.live", keys: Keys::Declared { reads: &[switch("target")], not_read: &[] } },
     Verb {
         op: "create.plane",
@@ -251,6 +295,24 @@ pub const VERBS: &[Verb] = &[
     // A coil's size is two of turns, pitch and height, and the two typed say which pair it is:
     // each covers the pair's tag beside its own number. `circle=` and `square=` set the section
     // and its wire in one word, the design note's spelling; `section=` and `wire=` separately.
+    // The written field (item 40): its text in quotes, the region as one triple, the divisor,
+    // the claim, and the frame it is read in. A text that does not parse is refused with the
+    // column, and the document is unchanged.
+    Verb {
+        op: "create.expression",
+        keys: Keys::Declared {
+            reads: &[
+                key("text", &["text"]),
+                key("size", &["size"]),
+                key("divisor", &["divisor"]),
+                key("k", &["divisor"]),
+                key("claim", &["claim"]),
+                key("origin", &["origin"]),
+                key("axis", &["axis"]),
+            ],
+            not_read: &[],
+        },
+    },
     Verb {
         op: "create.coil",
         keys: Keys::Declared {
@@ -527,6 +589,10 @@ pub const VERBS: &[Verb] = &[
     // `delete target=Sphere_0`: what goes, by name -- the echo's spelling of a delete, which must not
     // lean on whatever the replay has selected. Alone, it deletes the selection, as the key does.
     Verb { op: "edit.delete_body", keys: Keys::Declared { reads: &[switch("target")], not_read: &[] } },
+    // `hide target=Sphere_0` and `show target=Sphere_0`: the block by name. Undeclared, `hide`
+    // passed every key through unread, so `hide target=x` hid whatever was selected instead.
+    Verb { op: "view.toggle_visibility", keys: Keys::Declared { reads: &[switch("target")], not_read: &[] } },
+    Verb { op: "view.show", keys: Keys::Declared { reads: &[switch("target")], not_read: &[] } },
     // `split body=Sphere by=Plane`: the body cut and what cuts it, both by name. Its halves are
     // blocks of kinds other verbs make, so it covers no field of its own; declared so a stray key
     // is refused like any other verb's, which until the registry's test found it it was not.
@@ -541,6 +607,8 @@ pub const VERBS: &[Verb] = &[
     Verb { op: "cage.weld", keys: Keys::Declared { reads: &[switch("cage"), switch("pairs"), switch("zip"), switch("at")], not_read: &[] } },
     Verb { op: "cage.cut", keys: Keys::Declared { reads: &[switch("cage"), switch("points")], not_read: &[] } },
     Verb { op: "cage.dissolve_edges", keys: Keys::Declared { reads: &[switch("cage"), switch("edges")], not_read: &[] } },
+    Verb { op: "cage.crease", keys: Keys::Declared { reads: &[switch("cage"), switch("edges")], not_read: &[] } },
+    Verb { op: "cage.uncrease", keys: Keys::Declared { reads: &[switch("cage"), switch("edges")], not_read: &[] } },
     Verb { op: "cage.extrude", keys: Keys::Declared { reads: &[switch("cage"), switch("faces"), switch("mode"), switch("direction"), switch("distance")], not_read: &[] } },
     Verb { op: "cage.extrude_edges", keys: Keys::Declared { reads: &[switch("cage"), switch("edges"), switch("direction"), switch("distance")], not_read: &[] } },
     Verb { op: "cage.inset", keys: Keys::Declared { reads: &[switch("cage"), switch("faces"), switch("mode"), switch("thickness"), switch("depth")], not_read: &[] } },
@@ -618,6 +686,8 @@ pub const VERBS: &[Verb] = &[
                 key("jpgq", &["jpeg_quality"]),
                 key("folder", &["folder"]),
                 key("pattern", &["pattern"]),
+                // The folder, name and format of one file, which is what the dialog asks for.
+                key("file", &["folder", "pattern", "format"]),
                 key("overwrite", &["overwrite"]),
                 key("capture", &["capture"]),
                 key("every", &["capture"]),
@@ -799,6 +869,7 @@ pub fn reach_of(node: &Node) -> Reach {
         Node::Cage(_) => Reach::Ops(&["create.cage"]),
         Node::Mesh(_) => Reach::NotFromTheConsole("an imported mesh arrives through `import`, and carries no numbers"),
         Node::Sphere { .. } => Reach::Ops(&["create.sphere"]),
+        Node::Expression { .. } => Reach::Ops(&["create.expression"]),
         Node::Cuboid { .. } => Reach::Ops(&["create.cube"]),
         Node::SkewedBox { .. } => Reach::Ops(&["create.skewbox"]),
         Node::Cylinder { .. } => Reach::Ops(&["create.cylinder"]),
@@ -1266,6 +1337,7 @@ pub fn primitive_with_keys(
                 *at = p;
             }
         }
+        Node::Expression { .. } => return expression_with_keys(node, word, args, lookup),
         Node::Coil { .. } => return coil_with_keys(node, word, args, lookup),
         Node::Thread { .. } => return thread_with_keys(node, word, args, lookup),
         other => {
@@ -1524,6 +1596,39 @@ pub fn coil_with_keys(mut node: Node, word: &str, args: &Args, lookup: &dyn Fn(&
 
 /// A thread with its keys applied. A designation the table does not have is refused here, by
 /// name, rather than saved for the compile to refuse.
+/// `expression text="…" size= divisor= claim= origin= axis=`: the written field's keys. The
+/// text is parsed here, under the document's names, so a line that does not parse is refused
+/// at its column and nothing is made; `k=` is `divisor=` for the people who write it that way.
+pub fn expression_with_keys(mut node: Node, word: &str, args: &Args, lookup: &dyn Fn(&str) -> Lookup) -> Result<Node, String> {
+    let one = |k: &str| -> Result<Option<ParamRef>, String> {
+        args.get(k).map(|v| param_one(word, k, v, Slot::Number, lookup)).transpose()
+    };
+    let Node::Expression { text, frame, size, divisor, claim } = &mut node else {
+        return Err(format!("`{word}` makes a written field"));
+    };
+    if let Some(v) = args.get("text") {
+        let typed = v.text();
+        let names = |name: &str| match lookup(name) {
+            Lookup::Parameter(id) => Some(id),
+            _ => None,
+        };
+        *text = fieldform_scene::Written::parse(&typed, &names)
+            .map_err(|e| format!("`{word} text=` does not parse: {e}"))?;
+    }
+    if let Some(v) = args.get("size") {
+        *size = param_triple(word, "size", v, Slot::Number, lookup)?;
+    }
+    if let Some(d) = one("divisor")?.or(one("k")?) {
+        *divisor = d;
+    }
+    if let Some(v) = args.get("claim") {
+        *claim = fieldform_scene::WrittenClaim::from_word(&v.text())
+            .ok_or_else(|| format!("`{word} claim=` is distance or bound, not {:?}", v.text()))?;
+    }
+    frame_with_keys(word, frame, args, lookup)?;
+    Ok(node)
+}
+
 pub fn thread_with_keys(mut node: Node, word: &str, args: &Args, lookup: &dyn Fn(&str) -> Lookup) -> Result<Node, String> {
     let one = |k: &str| -> Result<Option<ParamRef>, String> {
         args.get(k).map(|v| param_one(word, k, v, Slot::Number, lookup)).transpose()
@@ -2845,6 +2950,13 @@ pub(crate) mod tests {
             Node::Point { at: p(1.0, 2.0, 3.0) },
             Node::Plane { origin: Place::At(p(1.0, 2.0, 3.0)), flipped: true, turn: Turn::By(p(10.0, 20.0, 30.0)) },
             Node::Sphere { centre: Place::At(p(1.0, 2.0, 3.0)), radius: lit(5.0) },
+            Node::Expression {
+                text: fieldform_scene::Written::parse("sqrt(x*x + y*y + z*z) - 10", &|_| None).expect("no names in it"),
+                frame: frame.clone(),
+                size: p(30.0, 30.0, 30.0),
+                divisor: lit(1.0),
+                claim: fieldform_scene::WrittenClaim::Distance,
+            },
             Node::Cuboid { edge: fieldform_scene::Fillet { radius: lit(1.0), continuity: fieldform_scene::Continuity::Chamfer, second: None }, centre: Place::At(p(1.0, 2.0, 3.0)), size: p(4.0, 5.0, 6.0), turn: Turn::By(p(10.0, 20.0, 30.0)) },
             Node::SkewedBox { centre: Place::At(p(1.0, 2.0, 3.0)), edges: [p(1.0, 0.0, 0.0), p(0.0, 1.0, 0.0), p(0.0, 0.0, 1.0)] },
             Node::Cylinder { edge: fieldform_scene::Fillet { radius: lit(0.5), continuity: fieldform_scene::Continuity::G2, second: None }, ends: Ends::between(Place::At(p(0.0, 0.0, 0.0)), Place::At(p(0.0, 0.0, 9.0))), radius: lit(3.0) },

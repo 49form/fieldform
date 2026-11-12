@@ -202,18 +202,26 @@ impl App {
                     }
                     ui.separator();
                 }
+                // Each framed in its own family inside the import's File frame: a solid the file
+                // brought is a mesh (File), a cage made from one is a Cage, a curve is a Curve.
                 for id in members {
-                    self.node_block(ui, id, &[], nesting.references_of(id), false, nesting, None);
+                    self.framed_block(ui, Block::Node(id), nesting, |app, ui| {
+                        app.node_block(ui, id, &[], nesting.references_of(id), false, nesting, None);
+                    });
                 }
                 for id in surfaces {
-                    self.surface_block(ui, id);
+                    self.framed_block(ui, Block::Surface(id), nesting, |app, ui| app.surface_block(ui, id));
                 }
                 // Folded the way the list above is: a loop of the file's curves is one row
                 // here too, and a curve of a loop headed elsewhere is shown there, not twice.
                 for id in curves {
                     match self.folded_curve_row(id, nesting) {
-                        Some(Block::Profile(key)) => self.profile_block(ui, key, nesting),
-                        Some(_) => self.curve_block(ui, id, nesting.readers_of_curve(id)),
+                        Some(Block::Profile(key)) => self.framed_block(ui, Block::Profile(key), nesting, |app, ui| {
+                            app.profile_block(ui, key, nesting)
+                        }),
+                        Some(_) => self.framed_block(ui, Block::Curve(id), nesting, |app, ui| {
+                            app.curve_block(ui, id, nesting.readers_of_curve(id))
+                        }),
                         None => {}
                     }
                 }

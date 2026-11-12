@@ -43,6 +43,8 @@ pub(crate) enum BlockRef {
     Export(ExportId),
     /// The viewport written as an image file (item 117, `image_block.rs`).
     Image(fieldform_scene::SaveImageId),
+    /// A curvature comb (`comb_block.rs`).
+    Comb(fieldform_scene::CombId),
     Import(fieldform_scene::id::SourceId),
     /// A profile row, by its first curve. Selecting it selects every curve of the loop, so
     /// Delete takes them all, as one entry.
@@ -1395,6 +1397,7 @@ impl App {
                 self.say(format!("Deleted {name}"));
             }
             BlockRef::Image(id) => self.delete_image_block(id),
+            BlockRef::Comb(id) => self.delete_comb(id),
             BlockRef::Import(source) => self.delete_import(source),
             BlockRef::Profile(key) => self.delete_profile(key),
         }
@@ -1499,6 +1502,7 @@ impl App {
                 self.set_outputs(self.doc.tessellations.clone(), exports, None);
             }
             BlockRef::Image(id) => self.rename_image_block(id, text),
+            BlockRef::Comb(id) => self.rename_comb(id, text),
             BlockRef::Profile(key) => self.rename_profile(key, text),
             BlockRef::Import(source) => {
                 // An import is called what its file is called until renamed, and an empty name
@@ -1553,7 +1557,16 @@ impl App {
                     ui.close();
                 }
             }
+            BlockRef::Comb(id) => {
+                if ui.button("Fit").on_hover_text("Re-fits the scale so the longest tooth is 15 % of the curve's size").clicked() {
+                    self.fit_comb(id);
+                    ui.close();
+                }
+            }
             BlockRef::Import(_) => {}
+            // An open profile is held by the continuity at each join, so Join and Ungroup -- a
+            // loop's corners all at once -- have nothing to say about it; Break at a join does.
+            BlockRef::Profile(key) if self.profiles.is_open(key) => {}
             BlockRef::Profile(key) => {
                 let members = self.profiles.members(key).map(|m| m.to_vec()).unwrap_or_default();
                 let (held, total) = self.profile_hold(&members);
@@ -1607,6 +1620,7 @@ impl App {
                     RowKey::Image(id),
                     self.doc.images.iter().find(|b| b.id == id).and_then(|b| b.name.clone()).unwrap_or_default(),
                 ),
+                BlockRef::Comb(id) => (RowKey::Comb(id), self.comb_given_name(id)),
                 BlockRef::Import(source) => (
                     RowKey::Import(source),
                     self.doc.sources.get(&source).map(|s| s.name.clone()).unwrap_or_default(),

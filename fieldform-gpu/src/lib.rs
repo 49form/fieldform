@@ -20,6 +20,7 @@ pub mod codegen;
 #[doc(hidden)]
 pub mod cpu_march;
 mod environment;
+mod horizon_profile;
 mod flake;
 mod render;
 mod shading;
@@ -47,7 +48,8 @@ pub use environment::{
 pub use render::{
     BuildCost,
     bake_resolution_limit, compiled_source, required_limits, timing_features, Camera, Hit,
-    ImageTile, Occlusion, PipelineShelf, RenderError, Renderer, Sections, SkipGridReading,
+    ImageTile, Occlusion, PipelineShelf, ReflectedLobe, Reflections, RenderError, Renderer,
+    Sections, SkipGridReading,
     TileMaskReading, MAX_SECTIONS,
 };
 pub use shading::{

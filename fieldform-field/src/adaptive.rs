@@ -68,6 +68,7 @@ pub use fieldform_scene::MeshTolerance;
 /// model — cheap, since these levels hold at most 8³ cells.
 pub(crate) const FORCED_DEPTH: u32 = 3;
 
+
 /// One cell of the tree.
 #[derive(Debug, Clone, Copy)]
 pub struct Cell {
@@ -492,6 +493,31 @@ fn leaf_bytes(leaf: &Leaf) -> usize {
 /// The heap a branch holds: its eight children's slots.
 const BRANCH_BYTES: usize = 8 * std::mem::size_of::<Tree>() + 16;
 
+/// Whether the surface is inside `cell` though no corner said so: a few Newton steps from the
+/// centre onto the surface, and where they land. Short where the field is a lower bound, which
+/// only lands sooner -- inside the cell more often, never outside it when the surface is in it
+/// along the way -- so the error is one more look, not a body lost.
+fn surface_inside(field: &(dyn ScalarField + Sync), cell: &Cell) -> bool {
+    let mut p = Point3::from((cell.lo.coords + cell.hi().coords) * 0.5);
+    let inside = |p: &Point3<f64>| {
+        (0..3).all(|i| p[i] >= cell.lo[i] && p[i] <= cell.lo[i] + cell.size)
+    };
+    for _ in 0..4 {
+        let value = field.distance(p);
+        if value <= 0.0 {
+            // Through to the other side of everything the corners read: inside the cell, it is
+            // there to be found.
+            return inside(&p);
+        }
+        let normal = crate::mesh::surface_normal(field, p, cell.size * 1e-3);
+        p -= normal * value;
+        if !inside(&p) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Decides one cell, without descending into its children — the whole of the rule a cell is
 /// judged by, so that the tree and the memory estimate's walk over it cannot disagree.
 fn decide(
@@ -523,6 +549,21 @@ fn decide(
         // field's own declaration switches this on: a solid with no thin features keeps the
         // guess, and with it the cost the note below measured.
         None if !too_small && cell.size > feature => Decided::Branch,
+        // **A body thinner than the cell, with every corner outside it.** The interval only
+        // says "maybe", and corners are eight samples: a wing 30 mm thick inside a 219 mm cell
+        // has every corner outside and is lost whole -- reported as a plane-like part, a blend of
+        // a revolve and a mirrored sweep, that tessellated to nought triangles (2026-11-11).
+        //
+        // **Asked where the surface is, not whether it could be near.** From the centre, a few
+        // Newton steps onto the surface: where they land inside the cell, a surface crosses its
+        // interior while no corner changed sign, which only something thinner than the cell or a
+        // pocket inside it can do, and the cell is looked at closer. A surface passing beside
+        // the cell lands outside it and changes nothing. The first version branched wherever
+        // the rate bound allowed a crossing, which is every cell beside every surface: the field
+        // crate's tests went from 44 s to 598 s, and capped at eight finest cells it still made a
+        // ball at the finest detail ten times the triangles, because balancing carried the
+        // refinement onto the cells that had stopped where they should.
+        None if !too_small && surface_inside(field, cell) => Decided::Branch,
         // The interval said the surface might be here and no corner changed sign, so either it
         // misses this cell or it passes through too thinly to touch an edge.
         //
@@ -1288,17 +1329,20 @@ mod tests {
         }
     }
 
-    /// **A wall thinner than a cell is found when the field says how thin it is, and missed when
-    /// it does not.** The mesher reads the field at corners, so a 1 mm wall lying between two of
-    /// them leaves every corner outside it and every edge uncrossed — here the wall sits at
-    /// z = 4 in a 64 mm box, where the forced levels put corners at multiples of 8. That is how
-    /// a 2 mm sheet lattice came out as nothing at all from a box a few millimetres taller than
-    /// one that meshed to 130 000 triangles.
+    /// **A wall thinner than a cell is found, whether or not the field says how thin it is.** The
+    /// mesher reads the field at corners, so a 1 mm wall lying between two of them leaves every
+    /// corner outside it and every edge uncrossed — here the wall sits at z = 4 in a 64 mm box,
+    /// where the forced levels put corners at multiples of 8. That is how a 2 mm sheet lattice
+    /// came out as nothing at all from a box a few millimetres taller than one that meshed to
+    /// 130 000 triangles. A field that declares its feature size is looked at closer by that.
     ///
-    /// The silent half is not a wish for that behaviour; it is what every field that declares
-    /// nothing still gets, and it is why the declaration has to come from the field.
+    /// The silent half used to be missed, and that was written here as the behaviour every field
+    /// that declares nothing gets -- until a plane-like blend of a revolve and a mirrored sweep
+    /// tessellated to nought triangles (2026-11-11). A cell whose corners all read one side is
+    /// now asked where the surface is, by a few Newton steps from its centre, and looked at
+    /// closer where they land inside it, so a silent wall is found too.
     #[test]
-    fn a_wall_thinner_than_a_cell_is_meshed_when_the_field_declares_it() {
+    fn a_wall_thinner_than_a_cell_is_meshed_whether_or_not_the_field_declares_it() {
         let tol = MeshTolerance {
             chord_mm: 0.05,
             angle_deg: 10.0,
@@ -1328,8 +1372,8 @@ mod tests {
         let silent =
             mesh_field_adaptive(&Wall { at: 4.0, thickness: 1.0, silent: true }, box_of, &tol);
         assert!(
-            silent.triangles.is_empty(),
-            "without the declaration the corners never straddle the wall, so nothing is found: {} triangles says this test no longer measures what it was written for",
+            silent.triangles.len() > 100,
+            "without the declaration the walk from the centre still finds the wall: {} triangles",
             silent.triangles.len()
         );
     }

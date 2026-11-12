@@ -188,6 +188,31 @@ impl End {
     }
 }
 
+impl Document {
+    /// Whether two curve ends are **held** together: both sitting on one point block, or joined by
+    /// a joint relation. A continuity set at a join, G0, G1 or G2, does one or the other.
+    ///
+    /// **The one test of what makes open curves one open profile** (the owner, 2026-11-11): the
+    /// block list's open profile rows and a wall's walk along an open chain both cross a join only
+    /// where this says so, so a row and the wall built from it cannot disagree about where the
+    /// chain ends. Touching alone is not held: two ends that happen to meet are two curves.
+    pub fn ends_held(&self, a: CurveEnd, b: CurveEnd) -> bool {
+        let point = |e: CurveEnd| {
+            let c = self.curve(e.curve)?;
+            c.placed_on(e.end.index(c.control_points().len()))
+        };
+        if let (Some(p), Some(q)) = (point(a), point(b))
+            && p == q
+        {
+            return true;
+        }
+        self.relations.values().any(|r| match &r.relation {
+            Relation::Joint { master, slave, .. } => (*master == a && *slave == b) || (*master == b && *slave == a),
+            _ => false,
+        })
+    }
+}
+
 /// Why a relation was refused, or cannot be derived.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum RelationError {

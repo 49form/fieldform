@@ -334,6 +334,48 @@ pub fn first_spacing(longest_mm: f64) -> f64 {
     first_spacing_with_feature(longest_mm, None)
 }
 
+/// The first grid, chosen by the rule above and then **made to fit**: doubled until two levels
+/// of it -- `h` and `h/2`, which every verdict needs -- fit one measurement (`fits(h/2)`), but
+/// never past what a thin wall needs.
+///
+/// **Why the two kinds of feature are told apart here.** The floor exists because a sheet thinner
+/// than about two cells can vanish from a marching mesh at every coarse grid, and two levels that
+/// both miss it agree on the wrong answer with an error estimate of nought. A fillet cannot vanish:
+/// it is a little material in a corner, which a coarse grid measures a little wrong, and the
+/// difference between two levels is then exactly the error estimate that says so. So a blend's
+/// radius asks for a fine first grid where one fits, and gives way where one does not; a thin
+/// wall's never gives way, and a body too large to hold a grid fine enough for it is refused with
+/// the reason.
+///
+/// Before this, the reference parts measured nothing at all: a fillet sized the first grid, the
+/// second level was past the corner budget, and every tolerance was unresolved with no estimate.
+pub fn first_spacing_that_fits(longest_mm: f64, features: Features, fits: &dyn Fn(f64) -> bool) -> Result<f64, String> {
+    let smallest = match (features.thin, features.blend) {
+        (Some(t), Some(b)) => Some(t.min(b)),
+        (t, b) => t.or(b),
+    };
+    let mut h = first_spacing_with_feature(longest_mm, smallest);
+    // The coarsest the thin wall allows: a quarter of it, on the same power-of-two ladder.
+    let coarsest = features
+        .thin
+        .filter(|t| *t > 0.0 && t.is_finite())
+        .map_or(f64::INFINITY, |t| first_spacing_with_feature(f64::INFINITY, Some(t)));
+    while !fits(h / 2.0) {
+        if h * 2.0 > coarsest {
+            return Err(format!(
+                "its thinnest wall, {} mm, needs cells of {} mm or finer, and two grids that fine of a body this size are more than one measurement holds; measure the thin part on its own",
+                features.thin.unwrap_or_default(),
+                coarsest
+            ));
+        }
+        if h > longest_mm {
+            return Err("no grid fits one measurement of it".to_string());
+        }
+        h *= 2.0;
+    }
+    Ok(h)
+}
+
 /// The finest grid any expect measures at (§3.3's `h_min`).
 pub const H_MIN: f64 = 1.0 / 64.0;
 
@@ -402,35 +444,45 @@ pub fn decide(
 /// at, asked before anything is compiled, and a number the user typed is the one a reader can
 /// check against the block. A solid lattice is left out deliberately: its phase is a density, not
 /// a length, and its features are bounded by the cell size rather than by a wall.
-pub fn smallest_feature(doc: &fieldform_scene::Document, graph: &Graph, target: NodeId) -> Option<f64> {
+pub fn smallest_feature(doc: &fieldform_scene::Document, graph: &Graph, target: NodeId) -> Features {
     use fieldform_scene::{LatticePhase, Node, Outline};
     let alone = graph_of(graph, target);
     let number = |r: &fieldform_scene::ParamRef| r.resolve(&|id| doc.parameter_value(id));
-    let mut smallest: Option<f64> = None;
-    let mut note = |v: Option<f64>| {
+    let mut features = Features::default();
+    let note = |into: &mut Option<f64>, v: Option<f64>| {
         if let Some(v) = v.filter(|v| *v > 0.0 && v.is_finite()) {
-            smallest = Some(smallest.map_or(v, |s: f64| s.min(v)));
+            *into = Some(into.map_or(v, |s: f64| s.min(v)));
         }
     };
     for (_, node) in alone.nodes() {
         match node {
             Node::Lattice { phase, .. } => match phase {
-                LatticePhase::Sheet { thickness, .. } => note(number(thickness)),
-                LatticePhase::Strut { radius } => note(number(radius)),
+                LatticePhase::Sheet { thickness, .. } => note(&mut features.thin, number(thickness)),
+                LatticePhase::Strut { radius } => note(&mut features.thin, number(radius)),
                 LatticePhase::Solid { .. } => {}
             },
-            Node::Shell { thickness, .. } => note(number(thickness)),
-            Node::Infill { wall, .. } => note(number(wall)),
-            Node::Blend { fillet, .. } => note(number(&fillet.radius)),
-            Node::Pattern { fillet, join: true, .. } => note(number(&fillet.radius)),
+            Node::Shell { thickness, .. } => note(&mut features.thin, number(thickness)),
+            Node::Infill { wall, .. } => note(&mut features.thin, number(wall)),
+            Node::Blend { fillet, .. } => note(&mut features.blend, number(&fillet.radius)),
+            Node::Pattern { fillet, join: true, .. } => note(&mut features.blend, number(&fillet.radius)),
             other => {
                 if let Some(Outline::Wall { thickness, .. }) = other.outline() {
-                    note(number(thickness));
+                    note(&mut features.thin, number(thickness));
                 }
             }
         }
     }
-    smallest
+    features
+}
+
+/// The smallest lengths a block's own numbers name, in the two kinds the first grid treats
+/// differently ([`first_spacing_that_fits`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Features {
+    /// A wall, sheet, strut or shell: material that can vanish from a coarse mesh.
+    pub thin: Option<f64>,
+    /// A fillet's radius: material a coarse mesh measures a little wrong, never misses.
+    pub blend: Option<f64>,
 }
 
 /// The graph that draws only `target` and what it reads, so a block that is an operand of
@@ -557,6 +609,27 @@ mod tests {
         assert_eq!(first_spacing(20.0), 0.5);
         assert_eq!(first_spacing(3.0), 1.0 / 16.0);
         assert_eq!(first_spacing(1000.0), 1.0);
+    }
+
+    /// A body too large for two levels of the rule's grid is measured coarser rather than not at
+    /// all, a fillet's radius gives way the same, and a thin wall never does. The 1 m cube needs
+    /// h/2 = 4 mm to fit: 255 corners a side is 16.6 M, where 2 mm is 505 a side and 129 M.
+    #[test]
+    fn the_first_grid_gives_way_to_the_budget_for_a_fillet_and_never_for_a_thin_wall() {
+        let max = fieldform_field::ANCHORED_CORNERS_MAX;
+        let big = (Point3::new(-500.0, -500.0, -500.0), Point3::new(500.0, 500.0, 500.0));
+        let fits_big = |h: f64| fieldform_field::anchored_corners(big, h) <= max;
+        assert_eq!(first_spacing_that_fits(1000.0, Features::default(), &fits_big), Ok(8.0));
+        let fillet = Features { thin: None, blend: Some(1.5) };
+        assert_eq!(first_spacing_that_fits(1000.0, fillet, &fits_big), Ok(8.0));
+        let wall = Features { thin: Some(1.0), blend: None };
+        let why = first_spacing_that_fits(1000.0, wall, &fits_big).unwrap_err();
+        assert!(why.contains("thinnest wall"), "{why}");
+        // Where it fits, the rule's own grid stands: a quarter of the wall.
+        let small = (Point3::new(0.0, 0.0, 0.0), Point3::new(40.0, 40.0, 40.0));
+        let fits_small = |h: f64| fieldform_field::anchored_corners(small, h) <= max;
+        assert_eq!(first_spacing_that_fits(40.0, wall, &fits_small), Ok(0.25));
+        assert_eq!(first_spacing_that_fits(40.0, fillet, &fits_small), Ok(0.25));
     }
 
     /// A thin feature pulls the first grid down to a quarter of itself, whatever the body's size

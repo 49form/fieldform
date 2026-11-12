@@ -787,6 +787,24 @@ impl App {
     }
 }
 
+/// The console line a cage verb ran as: its word and every key it was given, in a fixed order,
+/// naming the cage only where the document holds more than one -- the echo's convention, so the
+/// same edit writes the same line in every run. `None` for an op no command has a word for.
+pub(crate) fn cage_console_line(op: &str, args: &Args, several_cages: bool) -> Option<String> {
+    let word = crate::commands::by_id(op)?.console_name;
+    let mut keys: Vec<(String, String)> = args
+        .iter()
+        .filter(|(k, _)| *k != "cage" || several_cages)
+        .map(|(k, v)| (k.to_string(), v.text()))
+        .collect();
+    keys.sort();
+    let mut line = word.to_string();
+    for (k, v) in keys {
+        line.push_str(&format!(" {k}={v}"));
+    }
+    Some(line)
+}
+
 /// `faces` grouped into edge-connected regions, each in the order given.
 pub(crate) fn face_groups(mesh: &QuadMesh, faces: &[FaceId]) -> Vec<Vec<FaceId>> {
     let mut groups: Vec<Vec<FaceId>> = Vec::new();
@@ -829,7 +847,7 @@ pub(crate) fn args_from_selection(op: &str, args: &Args, picked: &[Selection]) -
             "cage.delete_faces" if missing("faces") && !faces.is_empty() => {
                 args = args.with("faces", Value::Str(faces.join(",")));
             }
-            "cage.dissolve_edges" if missing("edges") && !edges.is_empty() => {
+            "cage.dissolve_edges" | "cage.crease" | "cage.uncrease" if missing("edges") && !edges.is_empty() => {
                 args = args.with("edges", Value::Str(edges.iter().map(edge_text).collect::<Vec<_>>().join(",")));
             }
             "cage.fill_hole" if missing("edge") => {
@@ -916,6 +934,9 @@ mod tests {
         let loop_ = [Selection::Edge(v(0), v(1)), Selection::Edge(v(1), v(2))];
         let args = args_from_selection("cage.dissolve_edges", &Args::new(), &loop_);
         assert_eq!(text(&args, "edges").as_deref(), Some("0-1,1-2"));
+        for op in ["cage.crease", "cage.uncrease"] {
+            assert_eq!(text(&args_from_selection(op, &Args::new(), &loop_), "edges").as_deref(), Some("0-1,1-2"), "{op}");
+        }
 
         let faces = [Selection::Face(FaceId::from_index(3)), Selection::Face(FaceId::from_index(5))];
         assert_eq!(text(&args_from_selection("cage.delete_faces", &Args::new(), &faces), "faces").as_deref(), Some("3,5"));

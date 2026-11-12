@@ -520,6 +520,11 @@ struct FrameTargets {
     owners: wgpu::Buffer,
     extras: wgpu::Buffer,
     hdr: wgpu::Buffer,
+    /// The still's reflected hits (item 54), sixteen bytes a pixel: allocated by the first still
+    /// at this size that traces reflections and kept with the targets, since a session that
+    /// traces them once traces them on every still after. `None` until then -- a frame that
+    /// traces none binds a stub in its place, so a matte part never pays for the buffer.
+    reflections: Option<wgpu::Buffer>,
     present: wgpu::Texture,
     /// The texture as the lighting pass writes it and as egui reads it: plain 8-bit holding
     /// display-encoded values.
@@ -575,9 +580,32 @@ impl FrameTargets {
             owners: storage("owners", pixels * 4),
             extras: storage("extras", pixels * 4),
             hdr: storage("hdr", pixels * 16),
+            reflections: None,
             present,
             view,
         }
+    }
+
+    /// Allocates the reflection buffer where this set has none, and says whether it did -- the
+    /// bind groups that named the stub in its place have to be made again.
+    fn ensure_reflections(&mut self, device: &wgpu::Device) -> bool {
+        if self.reflections.is_some() {
+            return false;
+        }
+        let pixels = u64::from(self.width) * u64::from(self.height);
+        self.reflections = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("reflections"),
+            size: pixels * 16,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }));
+        true
+    }
+
+    /// The reflection buffer, or `stub` where none has been allocated: what the march and the
+    /// lighting pass bind at the reflections' slot, which a frame that traces none never reads.
+    fn reflections_or<'a>(&'a self, stub: &'a wgpu::Buffer) -> &'a wgpu::Buffer {
+        self.reflections.as_ref().unwrap_or(stub)
     }
 }
 
@@ -611,6 +639,9 @@ pub struct ShadingResources {
     uniform: wgpu::Buffer,
     /// The camera, written each frame rather than allocated each frame.
     camera: wgpu::Buffer,
+    /// Sixteen bytes bound at the reflections' slot by every frame whose targets have no
+    /// reflection buffer: a bind group has to name something there, and nothing reads it.
+    stub: wgpu::Buffer,
     /// One set of targets per frame size in use — the drag size and the still size — so
     /// switching tiers costs nothing.
     ///
@@ -741,6 +772,7 @@ impl ShadingResources {
                     },
                     count: None,
                 },
+                storage_entry(7, true),
             ],
         });
         let texture_entry = |binding: u32, dimension: wgpu::TextureViewDimension| {
@@ -806,6 +838,12 @@ impl ShadingResources {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let stub = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("reflections stub"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
 
         Ok(Self {
             pipeline,
@@ -814,6 +852,7 @@ impl ShadingResources {
             environment,
             uniform,
             camera,
+            stub,
             targets: Vec::new(),
             current: 0,
             next_generation: 1,
@@ -892,6 +931,10 @@ impl ShadingResources {
 
     fn targets(&self) -> Option<&FrameTargets> {
         self.targets.get(self.current)
+    }
+
+    fn targets_mut(&mut self) -> Option<&mut FrameTargets> {
+        self.targets.get_mut(self.current)
     }
 
     /// The lit frame as a texture to sample, once a frame has been presented: 8-bit,
@@ -1183,6 +1226,13 @@ impl Renderer {
         let lit_last = if first + count >= height { height } else { (first + count).saturating_sub(reach) };
         let lit = (lit_first, lit_last.saturating_sub(lit_first));
         shading.ensure_targets(&self.device, width, height);
+        // The reflection buffer, the first time a still at this size traces reflections (item
+        // 54): the bind groups below named the stub in its place, so they are made again.
+        if camera.reflections.is_some()
+            && shading.targets_mut().is_some_and(|t| t.ensure_reflections(&self.device))
+        {
+            shading.bindings = None;
+        }
         let (ticket, slot) = shading.timing.begin();
         let generation = shading.generation();
 
@@ -1203,6 +1253,7 @@ impl Renderer {
                     &targets.gbuffer,
                     &targets.owners,
                     &targets.extras,
+                    targets.reflections_or(&shading.stub),
                 ),
             });
             let atlas = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1231,6 +1282,7 @@ impl Renderer {
                     entry(4, targets.extras.as_entire_binding()),
                     entry(5, targets.hdr.as_entire_binding()),
                     entry(6, wgpu::BindingResource::TextureView(&targets.view)),
+                    entry(7, targets.reflections_or(&shading.stub).as_entire_binding()),
                 ],
             });
             shading.bindings = Some(FrameBindings {
@@ -1264,6 +1316,8 @@ impl Renderer {
                 (first, count),
                 cull_groups > 0,
                 measured,
+                // The still's frame index, which seeds a glossy reflection's sample.
+                accumulated,
             )),
         );
         self.queue
@@ -1371,6 +1425,7 @@ impl Renderer {
                 (first, count),
                 false,
                 // It marches no occlusion, so measures none.
+                0,
                 0,
             )),
         );
@@ -1505,6 +1560,44 @@ impl Renderer {
         drop(view);
         readback.unmap();
         Ok(out)
+    }
+
+    /// What the last still frame's reflected march found, per pixel (item 54): the reflected
+    /// hit's normal and its distance along the reflected ray, or a negative distance where there
+    /// is nothing -- `-1` a miss, `-2` a ray whose budget ran out, `-3` a pixel no ray left.
+    /// For the examples and tests that hold the march to the arithmetic, and for the count of
+    /// exhausted rays the budget is judged by. `None` where no still at this size has traced
+    /// reflections, so there is no buffer to read.
+    pub fn read_reflections(
+        &self,
+        shading: &ShadingResources,
+    ) -> Result<Option<Vec<[f32; 4]>>, RenderError> {
+        let targets = shading.targets().ok_or(RenderError::Readback)?;
+        let Some(buffer) = &targets.reflections else {
+            return Ok(None);
+        };
+        let bytes = buffer.size();
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("reflections-readback"),
+            size: bytes,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        encoder.copy_buffer_to_buffer(buffer, 0, &readback, 0, bytes);
+        self.queue.submit(Some(encoder.finish()));
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|_| RenderError::Readback)?;
+        let view = slice.get_mapped_range();
+        let out: Vec<[f32; 4]> = bytemuck::cast_slice::<u8, [f32; 4]>(&view).to_vec();
+        drop(view);
+        readback.unmap();
+        Ok(Some(out))
     }
 
     /// What the last frame's marches measured beyond the surface, per pixel: how open it is and

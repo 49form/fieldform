@@ -769,11 +769,42 @@ impl Environment for Showroom {
     }
 }
 
+/// A horizon: a cool grey sky over a bright white horizon line and a dark floor, the same all the
+/// way round. The owner's picture, read by elevation (`horizon_profile`): a glossy part reflects
+/// the line as one crisp highlight that follows its curvature, which is the look a showroom
+/// photograph is lit for.
+///
+/// Its colours are sRGB in the picture and linear here, so the profile is decoded once per sample
+/// rather than read as numbers it is not; between two rows it is mixed in linear light.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Horizon;
+
+impl Environment for Horizon {
+    fn radiance(&self, dir: Vector3<f32>) -> [f32; 3] {
+        use crate::horizon_profile::HORIZON_ROWS;
+        let last = (HORIZON_ROWS.len() - 1) as f32;
+        let elevation = dir.z.clamp(-1.0, 1.0).asin();
+        // Row 0 is straight up and the last straight down: a panorama's rows, by latitude.
+        let t = ((0.5 - elevation / PI) * last).clamp(0.0, last);
+        let row = (t.floor() as usize).min(HORIZON_ROWS.len() - 2);
+        let linear = |c: [u8; 3]| c.map(srgb_to_linear);
+        lerp3(linear(HORIZON_ROWS[row]), linear(HORIZON_ROWS[row + 1]), t - row as f32)
+    }
+}
+
+/// One sRGB channel, eight bits, as linear light.
+fn srgb_to_linear(c: u8) -> f32 {
+    let c = f32::from(c) / 255.0;
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
 /// The environments the viewport offers, as `View > Environment` lists them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EnvironmentChoice {
     Studio,
     Showroom,
+    /// The owner's horizon gradient (2026-11-07). See [`Horizon`].
+    Horizon,
     Zebra,
     /// Each pixel's normal painted as a colour, lighting nothing (backlog item 116).
     ///
@@ -793,9 +824,10 @@ pub enum EnvironmentChoice {
 }
 
 impl EnvironmentChoice {
-    pub const ALL: [EnvironmentChoice; 4] = [
+    pub const ALL: [EnvironmentChoice; 5] = [
         EnvironmentChoice::Studio,
         EnvironmentChoice::Showroom,
+        EnvironmentChoice::Horizon,
         EnvironmentChoice::Zebra,
         EnvironmentChoice::Normals,
     ];
@@ -804,6 +836,7 @@ impl EnvironmentChoice {
         match self {
             EnvironmentChoice::Studio => "Studio",
             EnvironmentChoice::Showroom => "Showroom",
+            EnvironmentChoice::Horizon => "Horizon",
             EnvironmentChoice::Zebra => "Zebra stripes",
             EnvironmentChoice::Normals => "Normals",
         }
@@ -821,6 +854,10 @@ impl EnvironmentChoice {
             }
             EnvironmentChoice::Showroom => {
                 "Rows of ceiling strips over a polished floor, lit by the room alone."
+            }
+            EnvironmentChoice::Horizon => {
+                "A grey sky over one bright horizon line and a dark floor, the same all the way \
+                 round: a glossy part shows the line as a single crisp highlight."
             }
             EnvironmentChoice::Zebra => {
                 "Black and white bands for reading surface continuity. They show in a mirror \
@@ -862,10 +899,18 @@ impl EnvironmentChoice {
         !matches!(self, EnvironmentChoice::Zebra | EnvironmentChoice::Normals)
     }
 
+    /// Whether a reflection of the part in itself means anything here (item 54). Not under
+    /// zebra, which would lay the part's own image over the very stripes being inspected; not
+    /// under normals, which are not lit at all.
+    pub fn wants_reflections(self) -> bool {
+        !matches!(self, EnvironmentChoice::Zebra | EnvironmentChoice::Normals)
+    }
+
     pub(crate) fn environment(self) -> Box<dyn Environment> {
         match self {
             EnvironmentChoice::Studio => Box::new(Studio::default()),
             EnvironmentChoice::Showroom => Box::new(Showroom),
+            EnvironmentChoice::Horizon => Box::new(Horizon),
             EnvironmentChoice::Zebra => Box::new(Zebra::default()),
             // **Never sampled, and still baked.** The lighting pass returns the normal before it
             // reads a map, so what this answers reaches nothing; answering *something* keeps
@@ -880,7 +925,10 @@ impl EnvironmentChoice {
     pub(crate) fn settings(self) -> BakeSettings {
         match self {
             EnvironmentChoice::Studio => BakeSettings::default(),
-            EnvironmentChoice::Showroom | EnvironmentChoice::Zebra => BakeSettings::sharp(),
+            // The horizon's line is a few rows of the picture thick, so it is baked sharp too.
+            EnvironmentChoice::Showroom | EnvironmentChoice::Horizon | EnvironmentChoice::Zebra => {
+                BakeSettings::sharp()
+            }
             // As the studio's, matching the maps above: nothing samples them.
             EnvironmentChoice::Normals => BakeSettings::default(),
         }
@@ -940,5 +988,33 @@ mod choice_tests {
         // Straight up is the middle of a strip (u = 0); a quarter-unit across is between strips.
         let between = Showroom.radiance(Vector3::new(0.5, 0.0, 1.0).normalize())[0];
         assert!(up > between * 4.0, "strip {up} between {between}");
+    }
+
+    /// **The horizon is the owner's picture, read by elevation**: straight up and straight down
+    /// are its first and last rows, the brightest direction is its brightest row's height, and
+    /// it is the same colour all the way round.
+    #[test]
+    fn the_horizon_is_the_pictures_profile_by_elevation_and_the_same_all_round() {
+        use crate::horizon_profile::HORIZON_ROWS;
+        let linear = |c: [u8; 3]| c.map(srgb_to_linear);
+        let close = |a: [f32; 3], b: [f32; 3]| a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-5);
+        assert!(close(Horizon.radiance(Vector3::z()), linear(HORIZON_ROWS[0])), "zenith");
+        assert!(close(Horizon.radiance(-Vector3::z()), linear(HORIZON_ROWS[359])), "nadir");
+        let brightest = (0..360).max_by_key(|&r| HORIZON_ROWS[r].iter().map(|&c| c as u32).sum::<u32>()).unwrap();
+        let elevation = (0.5 - brightest as f32 / 359.0) * PI;
+        let peak = (0..1801)
+            .map(|i| (i as f32 / 1800.0 - 0.5) * PI)
+            .max_by(|a, b| {
+                let v = |e: f32| Horizon.radiance(Vector3::new(e.cos(), 0.0, e.sin())).iter().sum::<f32>();
+                v(*a).total_cmp(&v(*b))
+            })
+            .unwrap();
+        assert!((peak - elevation).abs() < 0.01, "brightest at {peak} rad, the picture's row says {elevation}");
+        for azimuth in [0.0_f32, 1.0, 2.5, 4.0] {
+            let d = Vector3::new(azimuth.cos() * 0.6, azimuth.sin() * 0.6, 0.8);
+            assert!(close(Horizon.radiance(d), Horizon.radiance(Vector3::new(0.6, 0.0, 0.8))), "azimuth {azimuth}");
+        }
+        assert_eq!(EnvironmentChoice::from_name("horizon"), Some(EnvironmentChoice::Horizon));
+        assert!(EnvironmentChoice::Horizon.wants_reflections() && !EnvironmentChoice::Horizon.has_lamps());
     }
 }

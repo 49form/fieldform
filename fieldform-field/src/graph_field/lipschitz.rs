@@ -108,9 +108,11 @@ fn lipschitz_of_node(document: &Document, graph: &Graph, node: NodeId, depth: us
         | Node::Transform { input, .. }
         // Multiplied by the least factor, which is exactly what undoes the squeeze's stretch.
         | Node::Scale { input, .. } => recurse(input),
-        // An exact distance field, or one that has already divided by its own bound.
+        // An exact distance field, or one that has already divided by its own bound -- a
+        // written field by the divisor the person gave it, which is their claim to keep.
         Node::Cage(_)
         | Node::Mesh(_)
+        | Node::Expression { .. }
         | Node::Sphere { .. }
         | Node::Cuboid { .. }
         | Node::SkewedBox { .. }
@@ -357,6 +359,9 @@ fn true_distance_at(document: &Document, graph: &Graph, node: NodeId, depth: usi
             edge.continuity != fieldform_scene::Continuity::G2
                 || document.resolve(&edge.radius).is_some_and(|r| r <= 0.0)
         }
+        // A written field is what its claim says, and nothing here can check that: the
+        // block's verify action is where the claim is measured.
+        Node::Expression { claim, .. } => *claim == fieldform_scene::WrittenClaim::Distance,
         Node::Cage(_)
         | Node::Mesh(_)
         | Node::Sphere { .. }
@@ -1048,6 +1053,7 @@ pub(crate) fn driven_refusal(node: &Node) -> Option<CompileError> {
         | Node::Pipe { .. }
         | Node::Blend { .. } => return None,
         Node::Sphere { .. } => "a sphere's centre or radius",
+        Node::Expression { .. } => "a written field's region or divisor",
         Node::Cuboid { .. } => "a cuboid's centre or size",
         Node::SkewedBox { .. } => "a skewed box's centre or edges",
         Node::Cylinder { .. } => "a cylinder's ends or radius",

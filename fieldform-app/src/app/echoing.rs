@@ -23,7 +23,7 @@ impl App {
             .filter(|(id, _)| !snapshot.names.contains_key(id))
             .map(|(id, _)| (id, self.derived_label(id)))
             .collect();
-        snapshot.profile_labels = self.profiles.loops.iter().map(|l| (l[0], self.profile_label(l[0]))).collect();
+        snapshot.profile_labels = self.profiles.keys().into_iter().map(|k| (k, self.profile_label(k))).collect();
         EchoBase { snapshot, part: self.active_part, moves: self.document_moves }
     }
 
@@ -93,7 +93,9 @@ impl App {
             || self.point_drag.is_some()
             || self.marquee.is_some()
             || self.curve_edit_before.is_some()
-            || self.weight_edit_before.is_some();
+            || self.weight_edit_before.is_some()
+            // A preview is not an edit: it is put back before anything is kept.
+            || self.join_preview.is_some();
         if !busy {
             self.echo_settle();
         }
@@ -116,7 +118,7 @@ impl App {
             let curve = |t: &str| self.curve_named(t);
             let profile = |t: &str| {
                 self.curve_named(t).or_else(|| {
-                    self.profiles.loops.iter().map(|l| l[0]).find(|key| self.profile_label(*key).eq_ignore_ascii_case(t.trim()))
+                    self.profiles.keys().into_iter().find(|key| self.profile_label(*key).eq_ignore_ascii_case(t.trim()))
                 })
             };
             let inside = |n: &Node, c: CurveId| self.inside_of(n, c);

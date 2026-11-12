@@ -72,13 +72,17 @@ pub struct MeshField {
     /// One normal per triangle *corner*, when the mesh came from a file rather than a cage.
     ///
     /// Empty for a cage, whose `shading_normals` are the limit surface's own analytic normals
-    /// and are genuinely per-vertex — a subdivision surface is smooth everywhere, so there are
-    /// no creases to preserve and a second set would say the same thing twice.
+    /// and are genuinely per-vertex everywhere but on a crease — and a crease is a few edges of
+    /// the cage, so its corners go in `crease_corners` instead of a full second set.
     ///
     /// Per corner rather than per vertex because a crease needs one vertex to carry a different
     /// normal for each face meeting there, which a per-vertex array cannot express. See
     /// [`MeshField::from_mesh`] for what goes in it.
     corner_normals: Vec<[Vector3<f64>; 3]>,
+    /// A cage's per-corner normals, for only the triangles touching a creased edge: each side of
+    /// the crease shades with its own normal right up to the crease, where a per-vertex normal
+    /// would blend the two across a whole row of triangles. Empty on an uncreased cage.
+    crease_corners: HashMap<u32, [Vector3<f64>; 3]>,
     face_normals: Vec<Vector3<f64>>,
     /// Angle-weighted vertex pseudonormals (Bærentzen & Aanæs). The angle weighting is
     /// what makes the inside/outside test correct rather than merely usually-right.
@@ -158,7 +162,9 @@ impl MeshField {
         // each triangle came from is a different question, asked by the conformal cell map
         // through `SurfaceMap`.
         let shared = crate::shared_tessellation(cage, levels);
-        Ok(Self::from_triangles(shared.positions.clone(), shared.normals.clone(), shared.triangles.clone()))
+        let mut field = Self::from_triangles(shared.positions.clone(), shared.normals.clone(), shared.triangles.clone());
+        field.crease_corners = shared.crease_corner_normals.iter().copied().collect();
+        Ok(field)
     }
 
     /// Builds the field from an arbitrary closed triangle mesh — an import, rather than a cage.
@@ -383,6 +389,7 @@ impl MeshField {
             triangles,
             shading_normals,
             corner_normals: Vec::new(),
+            crease_corners: HashMap::new(),
             face_normals,
             vertex_pseudonormals,
             edge_pseudonormals,
@@ -480,7 +487,7 @@ impl MeshField {
                 let (u, v, w) = barycentric(point, a, b, c);
                 // Per corner when the mesh carries them, which is the case that has creases to
                 // keep. A cage has none and interpolates its own analytic normals instead.
-                let (na, nb, nc) = match self.corner_normals.get(i) {
+                let (na, nb, nc) = match self.corner_normals.get(i).or_else(|| self.crease_corners.get(&(i as u32))) {
                     Some([na, nb, nc]) => (*na, *nb, *nc),
                     None => (
                         self.shading_normals[t[0] as usize],
@@ -822,6 +829,64 @@ mod tests {
             }
         }
         assert!(worst < 1e-9, "worst distance disagreement {worst}");
+    }
+
+    fn creased_cube(size: f64) -> Cage {
+        let mut cube = Cage::cube_of(size);
+        for (a, b) in cube.edges().collect::<Vec<_>>() {
+            cube.set_creased(a, b, true);
+        }
+        cube
+    }
+
+    /// **Each side of a crease shades with its own normal right up to the crease**, and a point
+    /// whose closest point is on the crease reads the bisector. Per-vertex normals alone would
+    /// tilt the face's last row of triangles toward the other side, which is a crease drawn soft.
+    #[test]
+    fn a_creased_cage_shades_each_side_with_its_own_normal_up_to_the_crease() {
+        let field = MeshField::from_cage(&creased_cube(10.0), 4).unwrap();
+        for p in [Point3::new(4.97, 0.3, 5.2), Point3::new(4.999, -2.1, 5.01), Point3::new(-4.98, 4.98, 5.4)] {
+            let n = field.closest(p).normal;
+            assert!((n - Vector3::z()).norm() < 1e-9, "beside the crease at {p:?} the +Z face reads {n:?}");
+        }
+        let n = field.closest(Point3::new(5.5, 0.3, 5.5)).normal;
+        assert!((n - Vector3::new(1.0, 0.0, 1.0).normalize()).norm() < 1e-9, "on the crease: {n:?}");
+    }
+
+    /// The contract holds over a creased cage: a true distance away from its creases, where the
+    /// gradient turns by right.
+    #[test]
+    fn a_creased_cage_has_a_unit_gradient_away_from_its_creases() {
+        let field = MeshField::from_cage(&creased_cube(10.0), 3).unwrap();
+        let points: Vec<Point3<f64>> = box_probes()
+            .into_iter()
+            .filter(|p| {
+                let d = [p.x.abs() - 5.0, p.y.abs() - 5.0, p.z.abs() - 5.0];
+                let near = |a: f64, b: f64| (a - b).abs() < 0.05;
+                !(near(d[0], d[1]) || near(d[1], d[2]) || near(d[0], d[2]))
+            })
+            .collect();
+        assert!(points.len() > 200);
+        let worst = crate::gradient_deviation(&field, &points, 1e-4);
+        assert!(worst < 1e-6, "worst gradient deviation {worst}");
+    }
+
+    /// A creased cage's tessellation is one closed mesh: the per-side normals live per triangle
+    /// corner and the welds are untouched, so nothing a crease does can open a seam.
+    #[test]
+    fn a_creased_cages_tessellation_is_closed() {
+        let mut cage = fieldform_subd::subdivide_n(&Cage::cube_of(10.0), 1).unwrap();
+        let ring = cage.face_vertices(fieldform_cage::FaceId::from_index(0));
+        for k in 0..4 {
+            cage.set_creased(ring[k], ring[(k + 1) % 4], true);
+        }
+        let far = cage.vertex_ids().last().unwrap();
+        for n in cage.adjacent_vertices(far) {
+            cage.set_creased(far, n, true);
+        }
+        let t = crate::shared_tessellation(&cage, 3);
+        assert!(!t.crease_corner_normals.is_empty());
+        MeshField::from_mesh(t.positions.clone(), t.triangles.clone()).expect("closed and manifold");
     }
 
     /// D8's standing requirement for any new field source. A box is flat-sided, so the

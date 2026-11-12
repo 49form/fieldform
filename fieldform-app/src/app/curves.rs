@@ -59,7 +59,8 @@ impl App {
                 }
             }
             let closed = newly_closed_rows(previous.as_deref(), &loops);
-            self.profiles = ProfileRows { at: Some(self.curve_revision), loops };
+            let chains = crate::blocks::list::open_chains(&self.doc, &loops);
+            self.profiles = ProfileRows { at: Some(self.curve_revision), loops, chains };
             let can_join = join && self.point_drag.is_none() && self.pending_curve.is_none();
             for i in closed {
                 let key = self.profiles.loops[i][0];
@@ -172,7 +173,9 @@ impl App {
     /// curve. Refreshed first, for the same reason `curve_in_hand` is.
     fn selected_profile_key(&mut self) -> Option<CurveId> {
         let curve = self.curve_in_hand()?;
-        self.profiles.key_of(curve)
+        // A closed loop's: joining and ungrouping are about a loop's corners, and an open
+        // profile is held by the continuity set at each of its joins.
+        self.profiles.key_of(curve).filter(|key| !self.profiles.is_open(*key))
     }
 
     pub(crate) fn join_selected(&mut self) {
@@ -192,13 +195,12 @@ impl App {
     }
 
     /// What a profile row is called: the name given to it, or "Profile N" by its place in
-    /// the list.
+    /// the list -- "Open profile N" for an open one, counted on its own.
     pub(crate) fn profile_label(&self, key: CurveId) -> String {
-        self.doc
-            .profile_names
-            .get(&key)
-            .cloned()
-            .unwrap_or_else(|| format!("Profile {}", self.profiles.number(key).unwrap_or(0)))
+        self.doc.profile_names.get(&key).cloned().unwrap_or_else(|| {
+            let kind = if self.profiles.is_open(key) { "Open profile" } else { "Profile" };
+            format!("{kind} {}", self.profiles.number(key).unwrap_or(0))
+        })
     }
 
     /// Names a profile row, or clears its name with an empty one so it reads "Profile N"
@@ -216,8 +218,7 @@ impl App {
     /// (`profile-group-spec.md` §3.3).
     pub(crate) fn prune_profile_names(&mut self) {
         self.refresh_profiles();
-        let keys: std::collections::HashSet<CurveId> =
-            self.profiles.loops.iter().map(|l| l[0]).collect();
+        let keys: std::collections::HashSet<CurveId> = self.profiles.keys().into_iter().collect();
         self.doc.profile_names.retain(|key, _| keys.contains(key));
     }
 
@@ -274,6 +275,17 @@ impl App {
         replace: Option<fieldform_scene::RelationId>,
         relation: fieldform_scene::Relation,
     ) {
+        self.set_relation_with(replace, relation, Vec::new());
+    }
+
+    /// The same, with `first` run ahead of it in the one entry: what holds a join's ends together
+    /// before the continuity between them is set, so one undo takes back both.
+    fn set_relation_with(
+        &mut self,
+        replace: Option<fieldform_scene::RelationId>,
+        relation: fieldform_scene::Relation,
+        first: Vec<Box<dyn fieldform_ops::Command>>,
+    ) {
         if let Err(why) =
             fieldform_scene::relation::refuse_reason_replacing(&self.doc, &relation, replace)
         {
@@ -284,7 +296,7 @@ impl App {
         let record = fieldform_scene::RelationRecord { relation: relation.clone(), broken: None };
         // Derived on a copy, so the command records the move from where the points were.
         let mut after = self.doc.clone();
-        let mut commands: Vec<Box<dyn fieldform_ops::Command>> = Vec::new();
+        let mut commands: Vec<Box<dyn fieldform_ops::Command>> = first;
         if let Some(old) = replace
             && let Some(was) = self.doc.relations.get(&old).cloned()
         {
@@ -332,6 +344,304 @@ impl App {
             }
         };
         self.make_relation(fieldform_scene::Relation::Joint { master, slave, continuity });
+    }
+
+    /// Why `relation` would be refused, or `None` when it would not -- said with what would let
+    /// it through, where something would.
+    ///
+    /// **A joint that needs a point another joint of the same curve owns is let through by a
+    /// higher degree, so the refusal names it.** A cubic has four points: G2 at one end owns the
+    /// second and third, and G1 at the other end wants the third. Reported as a loop of three
+    /// cubics whose last joint "refuses to go anything other than G0": both ways round were
+    /// refused, one as a ring of followers and one for this, and neither said what to do. A
+    /// curve's ends own `continuity` points each from their end, so the end-to-end need is the two
+    /// together and both end points: degree `here + there + 1`. Only for a single span, which is
+    /// what a degree change can be made on.
+    pub(crate) fn joint_refusal(
+        &self,
+        relation: &fieldform_scene::Relation,
+        replace: Option<fieldform_scene::RelationId>,
+    ) -> Option<String> {
+        use fieldform_scene::relation::RelationError;
+        let why = fieldform_scene::relation::refuse_reason_replacing(&self.doc, relation, replace).err()?;
+        let mut text = why.to_string();
+        let owns = |c: fieldform_scene::JointContinuity| match c {
+            fieldform_scene::JointContinuity::G1 => 1,
+            fieldform_scene::JointContinuity::G2 => 2,
+        };
+        if let (RelationError::Owned { .. }, fieldform_scene::Relation::Joint { slave, continuity, .. }) = (&why, relation)
+            && let Some(curve) = self.doc.curve(slave.curve)
+            && curve.is_single_span()
+        {
+            let there: usize = self
+                .doc
+                .relations
+                .iter()
+                .filter(|(id, _)| Some(**id) != replace)
+                .filter_map(|(_, r)| match &r.relation {
+                    fieldform_scene::Relation::Joint { slave: s, continuity: c, .. }
+                        if s.curve == slave.curve && s.end != slave.end =>
+                    {
+                        Some(owns(*c))
+                    }
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            let degree = owns(*continuity) + there + 1;
+            if degree > curve.degree() && degree <= 9 {
+                text.push_str(&format!(
+                    " \u{2014} raise {} to degree {degree} to give this end points of its own",
+                    curve.name
+                ));
+            }
+        }
+        Some(text)
+    }
+
+    /// `continuity at=<curve>.<start|end> g=0|1|2 [lead=<curve>]`: what holds at the join that
+    /// end is part of. G0 is positional only, which is the absence of a joint relation, so it
+    /// breaks the one there; G1 and G2 make one, or replace the one there.
+    ///
+    /// With no `at`, the selected curve's join, when it has exactly one -- which is what a
+    /// palette pick of G1 can mean -- and otherwise refused with what to name. The marking menu
+    /// on a join always names it, so its echo replays.
+    pub(crate) fn continuity_command(&mut self, args: &Args) {
+        const USAGE: &str = "`continuity at=Line.end g=1`";
+        let breaking = crate::console_keys::flag(args, "break");
+        if breaking && args.get("g").is_some() {
+            self.warn(format!("Break or a g=, not both — {USAGE}, or `continuity at=Line.end -break`"));
+            return;
+        }
+        let continuity = match args.get("g").and_then(|v| v.as_f64()) {
+            _ if breaking => None,
+            Some(g) if g == 0.0 => None,
+            Some(g) if g == 1.0 => Some(fieldform_scene::JointContinuity::G1),
+            Some(g) if g == 2.0 => Some(fieldform_scene::JointContinuity::G2),
+            Some(other) => {
+                self.warn(format!("g={other} — a join is G0, G1 or G2"));
+                return;
+            }
+            None => {
+                self.warn(format!("Say which: g=0, g=1 or g=2 — {USAGE}"));
+                return;
+            }
+        };
+        let end = if args.get("at").is_some() {
+            match self.curve_end_argument(args, "at", "end", fieldform_scene::End::End) {
+                Ok(end) => end,
+                Err(why) => {
+                    self.warn(format!("{why} — {USAGE}"));
+                    return;
+                }
+            }
+        } else {
+            let Some(curve) = self.selected_curve else {
+                self.warn(format!("Name the join — {USAGE}"));
+                return;
+            };
+            let mine: Vec<fieldform_scene::CurveEnd> = joins_in(&self.doc)
+                .iter()
+                .flat_map(|j| j.ends)
+                .filter(|e| e.curve == curve)
+                .collect();
+            let name = self.curve_label(curve);
+            match mine.as_slice() {
+                [end] => *end,
+                [] => {
+                    self.warn(format!("{name} meets no other curve end — {USAGE}"));
+                    return;
+                }
+                _ => {
+                    self.warn(format!(
+                        "{name} is joined at both ends: say which — `at={name}.start` or `at={name}.end`"
+                    ));
+                    return;
+                }
+            }
+        };
+        if breaking {
+            self.break_join(end);
+            return;
+        }
+        let lead = match args.get("lead").and_then(|v| v.as_str()) {
+            None => None,
+            Some(name) => match self.curve_named(name) {
+                Some(id) => Some(id),
+                None => {
+                    self.warn(format!("no curve is called `{name}`"));
+                    return;
+                }
+            },
+        };
+        self.set_join_continuity(end, continuity, lead);
+    }
+
+    /// Lets the join `end` is part of go, as one entry: its continuity out and its ends free to
+    /// part, nothing moved. The ring's Break and `continuity -break`.
+    pub(crate) fn break_join(&mut self, end: fieldform_scene::CurveEnd) {
+        let Some(join) = join_of(&self.doc, end) else {
+            self.warn(format!("{} meets no other curve end", self.curve_label(end.curve)));
+            return;
+        };
+        let names = format!("{} and {}", self.curve_label(join.ends[0].curve), self.curve_label(join.ends[1].curve));
+        let commands = release_join_commands(&self.doc, self.active_part, join.ends);
+        if commands.is_empty() {
+            self.say(format!("{names} are not held — nothing to break"));
+            return;
+        }
+        self.gesture = None;
+        let batch = Box::new(fieldform_ops::Batch::new("join.break", commands));
+        if let Err(e) = self.stack.execute(&mut self.doc, batch) {
+            self.warn(e.to_string());
+            return;
+        }
+        self.after_document_change();
+        self.say(format!("Broke the join of {names} — they move apart now, nothing moved"));
+    }
+
+    /// A curve's name, for a sentence.
+    fn curve_label(&self, id: CurveId) -> String {
+        self.doc.curve(id).map(|c| c.name.clone()).unwrap_or_default()
+    }
+
+    /// Sets what holds at the join `end` is part of, as one entry: G0 breaks the joint relation
+    /// there, G1 and G2 make one in its place. `lead` names the curve the other follows.
+    ///
+    /// **Which curve leads, when nobody says.** The one that already leads there, so G1 turned
+    /// into G2 changes nothing else; otherwise the earlier curve. And when that way round is
+    /// refused -- the follower's points already claimed by another relation, which is what a
+    /// second corner of one curve meets -- the other way round, since the join was what was asked
+    /// for and either curve leading makes it. Refused only when both are, with the first reason.
+    pub(crate) fn set_join_continuity(
+        &mut self,
+        end: fieldform_scene::CurveEnd,
+        continuity: Option<fieldform_scene::JointContinuity>,
+        lead: Option<CurveId>,
+    ) {
+        let Some(join) = join_of(&self.doc, end) else {
+            let end_word = match end.end {
+                fieldform_scene::End::Start => "start",
+                fieldform_scene::End::End => "end",
+            };
+            self.warn(format!(
+                "{}.{end_word} meets no other curve end — a join is where exactly two ends meet",
+                self.curve_label(end.curve)
+            ));
+            return;
+        };
+        let [a, b] = join.ends;
+        let names = format!("{} and {}", self.curve_label(a.curve), self.curve_label(b.curve));
+        let existing = joint_relation_between(&self.doc, a, b);
+        // Every continuity holds the two ends together, G0 included: that is what G0 is.
+        let hold = match hold_join_commands(&self.doc, self.active_part, join.ends, join.at) {
+            Ok(commands) => commands,
+            Err(why) => {
+                self.warn(why);
+                return;
+            }
+        };
+        let Some(continuity) = continuity else {
+            let mut commands = hold;
+            if let Some((id, _)) = &existing
+                && let Some(record) = self.doc.relations.get(id)
+            {
+                commands.push(Box::new(SetRelation::remove(*id, record.clone())));
+            }
+            if commands.is_empty() {
+                self.say(format!("{names} are already held at G0 — positional only"));
+                return;
+            }
+            self.gesture = None;
+            let batch = Box::new(fieldform_ops::Batch::new("join.hold", commands));
+            if let Err(e) = self.stack.execute(&mut self.doc, batch) {
+                self.warn(e.to_string());
+                return;
+            }
+            self.after_document_change();
+            self.say(format!("{names} held at G0 — positional only; Break lets them part"));
+            return;
+        };
+        let pairs: Vec<(fieldform_scene::CurveEnd, fieldform_scene::CurveEnd)> = match lead {
+            Some(l) if l == a.curve => vec![(a, b)],
+            Some(l) if l == b.curve => vec![(b, a)],
+            Some(l) => {
+                let other = self.curve_label(l);
+                self.warn(format!("{other} is not one of the two curves at this join: {names}"));
+                return;
+            }
+            None => match &existing {
+                Some((_, fieldform_scene::Relation::Joint { master, slave, .. })) => {
+                    vec![(*master, *slave), (*slave, *master)]
+                }
+                _ => vec![(a, b), (b, a)],
+            },
+        };
+        let replace = existing.as_ref().map(|(id, _)| *id);
+        let mut refusals: Vec<String> = Vec::new();
+        for (master, slave) in pairs {
+            let relation = fieldform_scene::Relation::Joint { master, slave, continuity };
+            if existing.as_ref().is_some_and(|(_, r)| *r == relation) && hold.is_empty() {
+                self.say(format!("{} — it already held", relation.describe(&self.doc)));
+                return;
+            }
+            match self.joint_refusal(&relation, replace) {
+                None => {
+                    self.set_relation_with(replace, relation, hold);
+                    return;
+                }
+                Some(why) => refusals.push(why),
+            }
+        }
+        // Each way round that was tried, said: when both are refused, the one somebody can act
+        // on is as likely to be the second as the first.
+        if !refusals.is_empty() {
+            self.warn(refusals.join("; and the other way round, "));
+        }
+    }
+
+    /// The line that sets a join's continuity, naming the join by one of its ends, so a pick in
+    /// the marking menu is echoed as something a script can replay. `None` where a curve's name
+    /// would not find that curve again -- two of one name, from a file older than names being
+    /// kept apart.
+    pub(crate) fn continuity_line(
+        &self,
+        join: [fieldform_scene::CurveEnd; 2],
+        g: u8,
+        lead: Option<CurveId>,
+    ) -> Option<String> {
+        let said = |id: CurveId| {
+            let name = self.doc.curve(id)?.name.clone();
+            (self.curve_named(&name) == Some(id) && !name.contains('"')).then_some(name)
+        };
+        let at = join[0];
+        let name = said(at.curve)?;
+        let end = match at.end {
+            fieldform_scene::End::Start => "start",
+            fieldform_scene::End::End => "end",
+        };
+        let mut line = format!("continuity at=\"{name}.{end}\" g={g}");
+        if let Some(lead) = lead {
+            line.push_str(&format!(" lead=\"{}\"", said(lead)?));
+        }
+        Some(line)
+    }
+
+    /// The join under a viewport position, within a few pixels of where its two ends meet, among
+    /// the curves that are shown.
+    pub(crate) fn join_at(&self, aspect: f32, rect: egui::Rect, pos: egui::Pos2) -> Option<Join> {
+        const REACH: f32 = 10.0;
+        joins_in(&self.doc)
+            .into_iter()
+            .filter(|j| j.ends.iter().all(|e| !self.hidden_curves.contains(&e.curve)))
+            .filter_map(|j| {
+                self.camera
+                    .project_to_screen(aspect, rect, j.at.cast::<f32>())
+                    .map(|screen| (j, screen.distance(pos)))
+            })
+            .filter(|(_, d)| *d <= REACH)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(j, _)| j)
     }
 
     /// `set <curve>.p<i>=x,y,z` -- spec §6 and §9.3, the word an outside driver or an AI edit
@@ -666,7 +976,8 @@ impl App {
     /// A corner's choices as a list -- none, G1 or G2, either curve leading -- with a choice
     /// that would be refused greyed and the reason on hover, which is `refuse_reason` said
     /// where the choice is made rather than after it. What was picked, if anything: the
-    /// corner's dropdown under its profile and the viewport's right-click both draw this.
+    /// corner's dropdown under its profile draws this, and is where the leading curve is chosen;
+    /// the viewport's right-click on a join is the G0 / G1 / G2 ring, which picks it for you.
     fn joint_choice_list(
         &self,
         ui: &mut egui::Ui,
@@ -741,33 +1052,6 @@ impl App {
         if let Some(choice) = picked {
             self.apply_joint_choice(existing.map(|(id, _)| id), choice);
         }
-    }
-
-    /// The same choices on a right-click of a corner in the viewport.
-    pub(crate) fn joint_menu(&mut self, ui: &mut egui::Ui, point: NodeId) {
-        let ends = ends_on_point(&self.doc, point);
-        let &[a, b] = ends.as_slice() else { return };
-        let existing = joint_relation_between(&self.doc, a, b);
-        ui.label(egui::RichText::new("Corner continuity").weak());
-        if let Some(choice) = self.joint_choice_list(ui, a, b, existing.as_ref()) {
-            self.apply_joint_choice(existing.map(|(id, _)| id), choice);
-        }
-    }
-
-    /// The joint under a viewport position, within a few pixels: the point two ends sit on
-    /// whose dot is nearest the pointer.
-    pub(crate) fn joint_at(&self, aspect: f32, rect: egui::Rect, pos: egui::Pos2) -> Option<NodeId> {
-        const REACH: f32 = 10.0;
-        self.point_positions()
-            .into_iter()
-            .filter_map(|(id, at)| {
-                self.camera
-                    .project_to_screen(aspect, rect, at.cast::<f32>())
-                    .map(|screen| (id, screen.distance(pos)))
-            })
-            .filter(|(id, d)| *d <= REACH && ends_on_point(&self.doc, *id).len() == 2)
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(id, _)| id)
     }
 
     /// What this curve follows, chosen on its own panel: parallel, perpendicular and equal
@@ -1001,6 +1285,16 @@ impl App {
         match self.selected_block {
             Some(outputs::BlockRef::Profile(key)) => {
                 self.profiles.members(key).map(|m| m.to_vec()).unwrap_or_default()
+            }
+            // A comb's row says which curve it reads by lighting it.
+            // A comb on a whole profile lights all of it.
+            Some(outputs::BlockRef::Comb(id)) => {
+                let Some(curve) = self.comb_curve(id) else { return Vec::new() };
+                let whole = self.doc.combs.iter().any(|c| c.id == id && c.whole_loop);
+                match self.profiles.key_of(curve).and_then(|key| self.profiles.members(key)) {
+                    Some(members) if whole => members.to_vec(),
+                    _ => vec![curve],
+                }
             }
             _ => Vec::new(),
         }

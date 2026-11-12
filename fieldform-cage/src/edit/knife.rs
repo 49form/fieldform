@@ -114,8 +114,11 @@ fn apply(mesh: &QuadMesh, plan: Plan) -> Result<Cut, EditError> {
     }
     let new_vertex_count = positions.len();
     let new_face_count = faces.len();
+    let mut new = rebuild("cut", positions, &faces)?;
+    // A cut across a creased edge splits it, and both halves stay creased.
+    new.carry_creases(mesh, |v| vec![v], true);
     let result = EditResult {
-        mesh: rebuild("cut", positions, &faces)?,
+        mesh: new,
         new_vertices: (original_vertices..new_vertex_count).map(VertexId::new).collect(),
         new_faces: (original_faces..new_face_count).map(FaceId::new).collect(),
         replaced,

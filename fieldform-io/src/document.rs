@@ -168,6 +168,12 @@ pub(crate) const EXPORTS_PATH: &str = "outputs/exports.json";
 /// The Save Image blocks, in the order they were made -- backlog item 117. Left out when there
 /// are none, as the other two are; a build that predates them carries the entry through.
 pub(crate) const IMAGES_PATH: &str = "outputs/images.json";
+/// The section cuts, in the order they were made. A view setting rather than an output, so it
+/// sits under `view/`; left out when there are none.
+pub(crate) const SECTIONS_PATH: &str = "view/sections.json";
+/// The curvature combs, in the order they were made. Beside the relations, being records about
+/// curves that change none of them; left out when there are none.
+pub(crate) const COMBS_PATH: &str = "history/combs.json";
 
 /// Directory prefix holding one entry per cage.
 pub(crate) const CAGES_PREFIX: &str = "cages/";
@@ -418,6 +424,16 @@ pub fn update_archive(archive: &mut Archive, document: &Document) -> Result<(), 
     } else {
         archive.put_json(IMAGES_PATH, &document.images)?;
     }
+    if document.sections.is_empty() {
+        archive.remove(SECTIONS_PATH);
+    } else {
+        archive.put_json(SECTIONS_PATH, &document.sections)?;
+    }
+    if document.combs.is_empty() {
+        archive.remove(COMBS_PATH);
+    } else {
+        archive.put_json(COMBS_PATH, &document.combs)?;
+    }
     if document.curves_created.is_empty() {
         archive.remove(CURVES_CREATED_PATH);
     } else {
@@ -664,6 +680,12 @@ pub fn from_archive(archive: &Archive) -> Result<Document, FormatError> {
     let images = archive
         .get_json::<Vec<fieldform_scene::SaveImage>>(IMAGES_PATH)?
         .unwrap_or_default();
+    let sections = archive
+        .get_json::<Vec<fieldform_scene::SectionCut>>(SECTIONS_PATH)?
+        .unwrap_or_default();
+    let combs = archive
+        .get_json::<Vec<fieldform_scene::CurvatureComb>>(COMBS_PATH)?
+        .unwrap_or_default();
 
     let curves_created = archive
         .get_json::<std::collections::BTreeMap<CurveId, u64>>(CURVES_CREATED_PATH)?
@@ -748,6 +770,8 @@ pub fn from_archive(archive: &Archive) -> Result<Document, FormatError> {
         tessellations,
         exports,
         images,
+        sections,
+        combs,
         meshes,
         curves: json.curves.into_iter().collect(),
         parameters: parameters_from_json(json.parameters)?,
@@ -761,6 +785,25 @@ pub fn from_archive(archive: &Archive) -> Result<Document, FormatError> {
     // The editor refuses a cycle on the keystroke that would close it; a file can say one
     // anyway, and a document holding one cannot evaluate. Refused with the loop named, as the
     // editor would have named it.
+    // The written fields' texts, parsed now that every parameter is known: a node read from
+    // a file carries its text alone, and a tree is what the compilers lower. A name a text
+    // cannot find refuses the file, naming the block, as a parameter's expression does.
+    let by_name: std::collections::HashMap<String, fieldform_scene::ParamId> = document
+        .parameters
+        .values()
+        .map(|p| (p.name.clone(), p.id))
+        .collect();
+    let names = |name: &str| by_name.get(name).copied();
+    for part in document.parts.values_mut() {
+        if let Err((node, e)) = part.graph.resolve_written(&names) {
+            let label = document
+                .node_meta
+                .get(&node)
+                .and_then(|m| m.name.clone())
+                .unwrap_or_else(|| node.to_string());
+            return Err(FormatError::Expression { node: label, reason: e.to_string() });
+        }
+    }
     if let Err(cycle) = document.parameter_order() {
         let names: Vec<String> = cycle
             .iter()
@@ -899,6 +942,59 @@ mod tests {
         assert!(archive.paths_under("outputs/").next().is_none());
     }
 
+    /// **A section cut round-trips with every setting**, a place taken from a block and a
+    /// facing typed among them, and a document without one writes no entry.
+    #[test]
+    fn a_section_cut_round_trips_and_none_writes_nothing() {
+        let mut doc = Document::new();
+        let part = fieldform_scene::PartId::new();
+        let point = fieldform_scene::NodeId::new();
+        let cut = fieldform_scene::SectionCut {
+            id: fieldform_scene::SectionCutId::new(),
+            number: 3,
+            part,
+            on: true,
+            origin: fieldform_scene::Place::From { node: point },
+            turn: fieldform_scene::Turn::By([
+                fieldform_scene::ParamRef::Literal(10.0),
+                fieldform_scene::ParamRef::Literal(-20.0),
+                fieldform_scene::ParamRef::Literal(30.0),
+            ]),
+            flipped: true,
+        };
+        doc.sections = vec![cut];
+        let back = from_archive(&to_archive(&doc).expect("writes")).expect("reads");
+        assert_eq!(back.sections, vec![cut]);
+        let archive = to_archive(&Document::new()).expect("writes");
+        assert!(archive.paths_under("view/").next().is_none());
+    }
+
+    /// A comb comes back as it went, and a document with none writes no entry for them, so it
+    /// is the file it was before combs existed.
+    #[test]
+    fn a_comb_round_trips_and_a_document_with_no_combs_writes_no_combs_entry() {
+        let mut doc = Document::new();
+        let curve = fieldform_scene::Curve::polyline(
+            CurveId::new(),
+            "line",
+            vec![Point3::new(0.0, 0.0, 0.0), Point3::new(10.0, 2.0, 0.0)],
+            false,
+        )
+        .unwrap();
+        let mut comb = fieldform_scene::CurvatureComb::new(fieldform_scene::PartId::new(), &curve);
+        comb.flip = true;
+        comb.name = Some("check".into());
+        // A number that JSON spells exactly, so the test is of the record and not of the float
+        // printer's last digit.
+        comb.scale = 12.5;
+        doc.curves.insert(curve.id, curve);
+        doc.combs = vec![comb.clone()];
+        let back = from_archive(&to_archive(&doc).expect("writes")).expect("reads");
+        assert_eq!(back.combs, vec![comb]);
+        let archive = to_archive(&Document::new()).expect("writes");
+        assert!(archive.get(COMBS_PATH).is_none());
+    }
+
     /// **An open surface survives a round trip, and comes back open.**
     ///
     /// The document's third geometry collection, added for item 46: a panel or a shell a
@@ -1028,6 +1124,26 @@ mod tests {
 
     fn round_trip(document: &Document) -> Document {
         from_archive(&to_archive(document).unwrap()).unwrap()
+    }
+
+    /// **A cage's creases come back from the file**, and the surface built from it is the creased
+    /// one: the fingerprint, which every cache keys on, matches what was saved.
+    #[test]
+    fn a_creased_cage_round_trips_with_its_creases() {
+        let mut cage = Cage::cube_of(40.0);
+        let edges: Vec<_> = cage.edges().take(3).collect();
+        for &(a, b) in &edges {
+            cage.set_creased(a, b, true);
+        }
+        let fingerprint = cage.geometry_fingerprint();
+        let doc = Document::with_cage(cage);
+        let back = round_trip(&doc);
+        let body = back.cages.values().next().expect("the cage came back");
+        assert_eq!(body.mesh().crease_count(), 3);
+        for (a, b) in edges {
+            assert!(body.mesh().is_creased(a, b));
+        }
+        assert_eq!(body.mesh().geometry_fingerprint(), fingerprint);
     }
 
     /// A degree-9 curve saved earlier still opens.
@@ -1826,6 +1942,44 @@ mod tests {
     }
 
     /// D3: a reference to nothing is refused and reported, never read as zero.
+    /// A written field goes to the file as its text and comes back parsed under the document's
+    /// names: the parameter it reads is the same id, so a rename after the fact still reaches
+    /// it. One naming a parameter the file does not have refuses the file by block (D3).
+    #[test]
+    fn a_written_field_round_trips_as_its_text_and_is_parsed_back_under_the_documents_names() {
+        let mut doc = populated();
+        let radius = doc.add_parameter("radius", 5.0);
+        let part = *doc.parts.keys().next().expect("a part");
+        let text = fieldform_scene::Written::parse("sqrt(x*x + y*y + z*z) - radius", &|n| (n == "radius").then_some(radius)).unwrap();
+        let node = doc.parts.get_mut(&part).unwrap().graph.add(fieldform_scene::Node::Expression {
+            text,
+            frame: fieldform_scene::Frame::default(),
+            size: [fieldform_scene::ParamRef::Literal(30.0); 3],
+            divisor: fieldform_scene::ParamRef::Literal(1.0),
+            claim: fieldform_scene::WrittenClaim::Distance,
+        });
+        let archive = to_archive(&doc).unwrap();
+        let json = std::str::from_utf8(archive.get(DOCUMENT_PATH).unwrap()).unwrap();
+        assert!(json.contains("\"expression\"") && json.contains("sqrt(x*x + y*y + z*z) - radius"), "{json}");
+
+        let back = from_archive(&archive).unwrap();
+        let Some(fieldform_scene::Node::Expression { text, claim, .. }) = back.parts[&part].graph.node(node) else {
+            panic!("the written field came back as something else")
+        };
+        assert_eq!(text.source(), "sqrt(x*x + y*y + z*z) - radius");
+        assert_eq!(text.references(), vec![radius], "parsed back under the document's names, to the same id");
+        assert_eq!(*claim, fieldform_scene::WrittenClaim::Distance);
+
+        let mut doc = back;
+        doc.parameters.remove(&radius);
+        let archive = to_archive(&doc).unwrap();
+        let err = from_archive(&archive).unwrap_err();
+        assert!(
+            matches!(&err, FormatError::Expression { reason, .. } if reason.contains("`radius` is not a parameter")),
+            "{err}"
+        );
+    }
+
     #[test]
     fn an_expression_naming_a_parameter_the_file_does_not_have_refuses_to_load() {
         let mut doc = populated();

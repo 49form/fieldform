@@ -148,7 +148,7 @@ pub fn thinness(
 /// The most grid corners an anchored measurement samples: the mesher holds a value for every
 /// one, so this is 320 MB of `f64`. A 40 mm body measures at h = 1/8 mm inside it; finer than
 /// that is [`Anchored::TooFine`] until a narrow-band sampler exists.
-pub(crate) const ANCHORED_CORNERS_MAX: usize = 40_000_000;
+pub const ANCHORED_CORNERS_MAX: usize = 40_000_000;
 
 /// The mesh of `field` on the grid anchored at the world origin, every cell `h` on a side, or
 /// how many corners a grid that fine would have needed.
@@ -161,12 +161,7 @@ fn anchored_mesh(
     bounds: (Point3<f64>, Point3<f64>),
     h: f64,
 ) -> Result<crate::FieldMesh, usize> {
-    let (lo, hi) = bounds;
-    let snap_down = |v: f64| (v / h).floor() * h - 2.0 * h;
-    let snap_up = |v: f64| (v / h).ceil() * h + 2.0 * h;
-    let lo = Point3::new(snap_down(lo.x), snap_down(lo.y), snap_down(lo.z));
-    let hi = Point3::new(snap_up(hi.x), snap_up(hi.y), snap_up(hi.z));
-    let cells = (hi - lo).map(|e| (e / h).round() as usize);
+    let (lo, hi, cells) = anchored_box(bounds, h);
     let corners = (cells.x + 1) * (cells.y + 1) * (cells.z + 1);
     if corners > ANCHORED_CORNERS_MAX {
         return Err(corners);
@@ -175,6 +170,26 @@ fn anchored_mesh(
     // out at exactly `h` too, because every extent is a whole number of cells.
     let resolution = cells.x.max(cells.y).max(cells.z);
     Ok(mesh_field(field, (lo, hi), resolution))
+}
+
+/// The anchored box around `bounds` at spacing `h`: grown by two cells, snapped outward to the
+/// lattice, and its size in cells.
+fn anchored_box(bounds: (Point3<f64>, Point3<f64>), h: f64) -> (Point3<f64>, Point3<f64>, nalgebra::Vector3<usize>) {
+    let (lo, hi) = bounds;
+    let snap_down = |v: f64| (v / h).floor() * h - 2.0 * h;
+    let snap_up = |v: f64| (v / h).ceil() * h + 2.0 * h;
+    let lo = Point3::new(snap_down(lo.x), snap_down(lo.y), snap_down(lo.z));
+    let hi = Point3::new(snap_up(hi.x), snap_up(hi.y), snap_up(hi.z));
+    let cells = (hi - lo).map(|e| (e / h).round() as usize);
+    (lo, hi, cells)
+}
+
+/// How many corners an anchored measurement of `bounds` at spacing `h` samples, so a caller can
+/// choose a grid that fits [`ANCHORED_CORNERS_MAX`] before meshing anything. The same arithmetic
+/// the measurement does, since a second copy would be a second grid.
+pub fn anchored_corners(bounds: (Point3<f64>, Point3<f64>), h: f64) -> usize {
+    let (_, _, cells) = anchored_box(bounds, h);
+    (cells.x + 1).saturating_mul(cells.y + 1).saturating_mul(cells.z + 1)
 }
 
 /// One anchored measurement: the mass properties and the bounds of the surface measured.

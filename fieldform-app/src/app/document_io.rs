@@ -26,6 +26,7 @@ impl App {
         // §4.1). An empty one has nothing to place, so this moves nothing and leaves nothing to
         // say, and it keeps the rule without an exception to remember.
         doc.settle_ownership();
+        crate::starting_look(&mut doc, active_part);
 
         self.note_document_replaced();
         self.active_cage = *doc.cages.keys().next().expect("with_cage inserts one");
@@ -204,6 +205,10 @@ impl App {
         if cfg!(test) {
             return;
         }
+        // Points a join's preview moved are not the document's; a crash now should not keep them.
+        if self.join_preview.is_some() {
+            return;
+        }
         if !autosave_due(
             self.revision,
             self.autosaved_revision,
@@ -346,6 +351,8 @@ impl App {
     /// Removes **this session's** autosave, which a clean exit does so that its presence means
     /// something — and only this session's, so no exit can take another session's work with it.
     pub(crate) fn forget_autosave(&mut self) {
+        // An agent host's unsaved-work file goes with it, for the same reason.
+        self.forget_agent_checkpoint();
         let path = autosave_path();
         if path.exists() {
             if let Err(e) = std::fs::remove_file(&path) {

@@ -303,6 +303,17 @@ fn extent_of(
             };
             framed_box(document, graph, frame, &numbers, thread.bounds())
         }
+        // The region's box about the frame's origin, placed: the one thing an expression's
+        // support can be known to lie within. A side that does not resolve bounds nothing.
+        Node::Expression { frame, size, .. } => {
+            let mut half = [0.0; 3];
+            for (slot, side) in half.iter_mut().zip(size) {
+                let Some(s) = numbers(side) else { return Extent::Empty };
+                *slot = s.abs() * 0.5;
+            }
+            let half = Vector3::new(half[0], half[1], half[2]);
+            framed_box(document, graph, frame, &numbers, (Point3::origin() - half, Point3::origin() + half))
+        }
         // From the entry to the bottom, as wide as its widest step: the cylinder that holds it. A
         // hole that goes through has no bottom, which is the one way it never falls short.
         Node::Hole { ends, kind, depth, tip } => {

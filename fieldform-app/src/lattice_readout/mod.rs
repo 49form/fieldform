@@ -1232,6 +1232,7 @@ pub(crate) fn changes_the_cells(consumer: &Node, from: NodeId) -> bool {
         Node::Cage(_)
         | Node::Mesh(_)
         | Node::Sphere { .. }
+        | Node::Expression { .. }
         | Node::Cuboid { .. }
         | Node::SkewedBox { .. }
         | Node::Cylinder { .. }

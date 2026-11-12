@@ -366,6 +366,7 @@ impl crate::App {
             }
         }
         self.agent.roots = roots;
+        self.recover_agent_checkpoint();
         self.agent.run_timeout = args
             .iter()
             .position(|a| a == "--agent-timeout")
@@ -418,6 +419,10 @@ impl crate::App {
                 return;
             }
             let Some((job, _)) = self.agent.held.pop_front() else { break };
+            if let Some(e) = tools::undeclared_argument(&job.tool, &job.args) {
+                let _ = job.reply.send(Answer { reply: Reply::err(&e), image: None });
+                continue;
+            }
             if job.tool == "snapshot" {
                 self.begin_snapshot(job);
                 break;

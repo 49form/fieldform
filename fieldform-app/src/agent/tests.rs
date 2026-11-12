@@ -13,6 +13,9 @@ fn run(app: &mut App, lines: &str) -> RunResponse {
 
 fn root_in_temp(app: &mut App, tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("fieldform-agent-{tag}-{}", std::process::id()));
+    // Emptied first: Windows hands process ids out again, and an earlier run's `kept.fform` under
+    // the same id made `saveas` refuse to overwrite it, failing five tests that had changed nothing.
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let dir = dir.canonicalize().unwrap();
     app.agent.roots = vec![dir.clone()];
@@ -464,13 +467,20 @@ fn job(tool: &str, args: serde_json::Value) -> (server::Job, tokio::sync::onesho
     (server::Job { tool: tool.into(), args: args.as_object().cloned().unwrap_or_default(), reply }, answer)
 }
 
+/// And **it is a checked item in the Edit menu** (the owner, 2026-11-11), not a row at the foot of
+/// the block list: turned off here through that command, `allowagent`. In this test rather than a
+/// second one, because two listeners started and stopped at once made this one's wait for the
+/// endpoint to close miss, one run in five.
 #[test]
 fn allow_agent_publishes_an_endpoint_and_turning_it_off_takes_it_away() {
     let Some((mut app, endpoint)) = attached("toggle") else { return };
     assert!(can_connect(&endpoint), "on: the endpoint exists");
     assert_eq!(app.agent_session_info()["host"], "attach");
-    app.set_allow_agent(false, &eframe::egui::Context::default());
-    assert!(app.agent_host.is_none());
+    let bar = crate::commands::menu_bar();
+    let (_, edit) = bar.iter().find(|(t, _)| *t == "Edit").expect("an Edit menu");
+    assert!(crate::commands::menu_commands(edit).iter().any(|c| c.id == "edit.allow_agent"));
+    app.run_command("allowagent");
+    assert!(!app.allow_agent && app.agent_host.is_none(), "the Edit menu's command turns it off");
     // The listener ends on its own thread; give it the moment it needs.
     let started = std::time::Instant::now();
     while can_connect(&endpoint) && started.elapsed() < std::time::Duration::from_secs(5) {
@@ -770,4 +780,88 @@ fn every_verb_that_would_open_a_file_dialog_is_refused_for_an_agent() {
         let error = out.lines[0].outcome.error.as_ref().unwrap_or_else(|| panic!("{verb} ran"));
         assert!(error.message.contains("file="), "{verb}: {}", error.message);
     }
+}
+
+fn block(app: &App, name: &str) -> NodeId {
+    app.part_graph().nodes().map(|(id, _)| id).find(|id| app.body_name(*id) == Some(name)).unwrap()
+}
+
+/// `hide` once passed every key through unread, so `hide target=a` hid whatever was selected.
+#[test]
+fn hide_and_show_act_on_the_block_they_name_and_not_on_the_selection() {
+    let Some(mut app) = headless_app() else { return };
+    assert!(run(&mut app, "sphere radius=5 'a'\nsphere radius=5 centre=20,0,0 'b'").ok);
+    let (a, b) = (block(&app, "a"), block(&app, "b"));
+    app.select_body(Some(b));
+    assert!(run(&mut app, "hide target=a").ok);
+    assert!(!app.is_visible(a) && app.is_visible(b), "the named block, not the selected one");
+    assert!(run(&mut app, "hide target=a").ok, "hiding a hidden block is said, not refused");
+    assert!(!app.is_visible(a), "and stated rather than turned over");
+    assert!(run(&mut app, "show target=a").ok);
+    assert!(app.is_visible(a));
+    assert!(!run(&mut app, "hide target=nothing").ok, "a name that names nothing is refused");
+    assert!(!run(&mut app, "hide colour=red").ok, "a key hide does not read is refused, not ignored");
+}
+
+/// Joined, a mirror holds its original as its first half, so the original drawn beside it as
+/// well was counted twice by every measure and sample.
+#[test]
+fn a_joined_mirror_draws_its_original_once_and_a_reflection_keeps_it_beside() {
+    let Some(mut app) = headless_app() else { return };
+    assert!(run(&mut app, "sphere radius=5 centre=10,0,0 'seed'\nmirror target=seed axis=x join=true 'both'").ok);
+    let seed = block(&app, "seed");
+    assert!(!app.drawn_bodies().contains(&seed), "inside the joined mirror, so not drawn beside it");
+    assert!(app.agent_check().json["ok"].as_bool().unwrap(), "{}", app.agent_check().json);
+    assert!(run(&mut app, "sphere radius=5 centre=0,30,0 'other'\nmirror target=other axis=y 'reflection'").ok);
+    assert!(app.drawn_bodies().contains(&block(&app, "other")), "a bare reflection keeps the original drawn");
+}
+
+/// `snapshot out=…` once answered with a picture and wrote no file, saying nothing.
+#[test]
+fn a_tool_argument_the_tool_does_not_take_is_refused_by_name() {
+    let args = |pairs: &[(&str, &str)]| -> serde_json::Map<String, serde_json::Value> {
+        pairs.iter().map(|(k, v)| (k.to_string(), serde_json::Value::from(*v))).collect()
+    };
+    let e = tools::undeclared_argument("snapshot", &args(&[("out", "a.png")])).expect("refused");
+    assert_eq!(e.code, "unknown_key");
+    assert_eq!(e.key.as_deref(), Some("out"));
+    assert!(e.accepted.iter().any(|k| k == "file"), "{:?}", e.accepted);
+    assert!(tools::undeclared_argument("snapshot", &args(&[("view", "iso"), ("file", "a.png")])).is_none());
+    assert!(tools::undeclared_argument("session_info", &args(&[("x", "1")])).is_some());
+    // Every tool takes what it declares.
+    for (name, _, schema, _) in tools::definitions() {
+        let declared: serde_json::Map<String, serde_json::Value> = schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| (k.clone(), serde_json::Value::Null))
+            .collect();
+        assert!(tools::undeclared_argument(name, &declared).is_none(), "{name}");
+    }
+}
+
+/// Two boxes side by side share their top face's plane, so a blend joining them stands proud of
+/// it along the seam -- 0.293 of the radius at G1 -- and nothing else says so.
+#[test]
+fn check_finds_a_blend_standing_proud_of_flush_faces_and_not_a_fillet_in_a_corner() {
+    let Some(mut app) = headless_app() else { return };
+    let side_by_side = "cube size=20,20,10 centre=0,0,5 'l'\n\
+                        cube size=20,20,10 centre=20,0,5 'r'\n\
+                        boolean -u in=l,r radius=2 'joined'";
+    assert!(run(&mut app, side_by_side).ok);
+    let found = app.flush_blend_faces(app.part_graph());
+    assert_eq!(found.len(), 1);
+    let proud = found[0].proud;
+    // At the seam itself the closed form is k(1 - 2^(-1/2)) = 0.586 mm; the grid point nearest the
+    // seam may sit a little off it, where the ridge is lower.
+    assert!((0.4..0.6).contains(&proud), "{proud}");
+    let report = app.agent_check().json;
+    assert!(report["problems"].as_array().unwrap().iter().any(|p| p["code"] == "blend_bulges_flush_faces"), "{report}");
+
+    let Some(mut app) = headless_app() else { return };
+    let boss_on_plate = "cube size=40,40,5 centre=0,0,2.5 'plate'\n\
+                         cube size=10,10,10 centre=0,0,10 'boss'\n\
+                         boolean -u in=plate,boss radius=2 'filleted'";
+    assert!(run(&mut app, boss_on_plate).ok);
+    assert!(app.flush_blend_faces(app.part_graph()).is_empty(), "a fillet in a corner is what a blend is for");
 }

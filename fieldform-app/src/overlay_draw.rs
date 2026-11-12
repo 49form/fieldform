@@ -238,6 +238,7 @@ pub(crate) fn draw_cage_edges(
     let open = mesh.is_open();
     let mut drawn: std::collections::HashSet<(VertexId, VertexId)> = std::collections::HashSet::new();
     let stroke = egui::Stroke::new(1.0_f32, CAGE_EDGE_COLOR);
+    let creased = egui::Stroke::new(CREASE_WIDTH, CREASE_COLOR);
     for face in mesh.face_ids() {
         let v = mesh.face_vertices(face);
         let p: [Point3<f32>; 4] = [
@@ -261,7 +262,7 @@ pub(crate) fn draw_cage_edges(
                 camera.project_to_screen(aspect, rect, p[i]),
                 camera.project_to_screen(aspect, rect, p[(i + 1) % 4]),
             ) {
-                painter.line_segment([pa, pb], stroke);
+                painter.line_segment([pa, pb], if mesh.is_creased(a, b) { creased } else { stroke });
             }
         }
     }
@@ -269,6 +270,12 @@ pub(crate) fn draw_cage_edges(
 
 /// The cage's edges: darker than its faces and faint enough to read as structure, not as marks.
 const CAGE_EDGE_COLOR: egui::Color32 = egui::Color32::from_rgba_premultiplied(40, 48, 64, 160);
+
+/// A creased edge: thicker than the rest, and in a colour no status uses -- red is a fault, amber a
+/// warning and yellow the selection -- so a crease reads as a property of the edge, not as
+/// something wrong with it. A selected creased edge draws in the selection's yellow over this.
+const CREASE_COLOR: egui::Color32 = egui::Color32::from_rgb(224, 96, 208);
+const CREASE_WIDTH: f32 = 2.5;
 
 /// **Dimmer than a curve.** A surface is a grid of dozens of quads where a curve is one line,
 /// so the same weight would make it the loudest thing on screen while being the thing least

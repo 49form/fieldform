@@ -257,6 +257,7 @@ impl SurfaceMap {
             triangle_faces,
             triangle_uvs,
             triangle_gradients,
+            ..
         } = surface.tessellate(levels);
         let bvh = Bvh::build(&positions, &triangles);
         // The worst anywhere, over every corner rather than every facet — the bound has to hold

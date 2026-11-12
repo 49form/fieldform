@@ -128,6 +128,27 @@ pub enum Node {
         /// number is in there rather than beside this field.
         phase: LatticePhase,
     },
+    /// A field written as arithmetic over `x`, `y`, `z` in its own frame, that *is* a body
+    /// (backlog item 40, `expression-field-spec.md`).
+    ///
+    /// Three things beside the text, because an arbitrary expression honours neither half of
+    /// `ScalarField`'s contract by construction: a **region** -- the box about the frame's origin,
+    /// along its axes, that the field is cut to and the trace is bounded by, since an
+    /// expression's support is not inspectable -- a **divisor** `k`, an upper bound on how fast
+    /// the value changes per millimetre, which the value is divided by so that it never claims
+    /// more room than there is; and a **claim**, distance or lower bound, that the verify action
+    /// checks. The text's references are parameters, slots as every number is; the text itself
+    /// is structure and recompiles.
+    Expression {
+        text: crate::Written,
+        /// Where the region sits and which way its axes point; the coordinates are read in it.
+        frame: Frame,
+        /// The region's full extents along the frame's axes.
+        size: [ParamRef; 3],
+        /// The Lipschitz divisor: one for a field written as a distance.
+        divisor: ParamRef,
+        claim: crate::WrittenClaim,
+    },
     /// A planar outline given thickness along its own normal.
     ///
     /// The first block that turns a *curve* into a solid rather than sweeping something along
@@ -944,6 +965,11 @@ impl Node {
                 out.extend(centre.refs());
                 out.push(radius);
             }
+            Node::Expression { frame, size, divisor, .. } => {
+                out.extend(frame.params());
+                out.extend(size.iter());
+                out.push(divisor);
+            }
             Node::Cuboid { centre, size, turn, edge } => {
                 out.extend(centre.refs());
                 out.extend(size);
@@ -1135,6 +1161,11 @@ impl Node {
             Node::Sphere { centre, radius } => {
                 out.extend(centre.refs_mut());
                 out.push(radius);
+            }
+            Node::Expression { frame, size, divisor, .. } => {
+                out.extend(frame.params_mut());
+                out.extend(size.iter_mut());
+                out.push(divisor);
             }
             Node::Cuboid { centre, size, turn, edge } => {
                 out.extend(centre.refs_mut());
@@ -1388,6 +1419,7 @@ impl Node {
             | Node::Loft { .. }
             | Node::Extrude { .. }
             | Node::Revolve { .. }
+            | Node::Expression { .. }
             | Node::Sphere { .. }
             | Node::Cuboid { .. }
             | Node::SkewedBox { .. }
@@ -1498,6 +1530,7 @@ impl Node {
             | Node::Loft { .. }
             | Node::Extrude { .. }
             | Node::Revolve { .. }
+            | Node::Expression { .. }
             | Node::Sphere { .. }
             | Node::Cuboid { .. }
             | Node::SkewedBox { .. }
@@ -1686,6 +1719,7 @@ impl Node {
             | Node::Twist { frame, .. }
             | Node::Coil { frame, .. }
             | Node::Thread { frame, .. }
+            | Node::Expression { frame, .. }
             | Node::Revolve { frame, .. } => visit(frame),
             Node::Pattern { kind: PatternKind::Radial { frame }, .. } => visit(frame),
             _ => {}
@@ -1720,6 +1754,7 @@ impl Node {
             | Node::Twist { frame, .. }
             | Node::Coil { frame, .. }
             | Node::Thread { frame, .. }
+            | Node::Expression { frame, .. }
             | Node::Revolve { frame, .. } => vec![frame],
             Node::Pattern { kind: PatternKind::Radial { frame }, .. } => vec![frame],
             _ => Vec::new(),

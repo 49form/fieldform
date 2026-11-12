@@ -20,17 +20,18 @@ move target=ball by=100,0,0 'moved'
 move target=ball by=0,100,0
 move target=ball by=0,0,100
 
-# --- a material edit, taken back, and another straight after it. Not clay: clay is the default,
-# so asking for it changes nothing and puts nothing on the history.
+# --- a material edit, taken back, and another straight after it. Neither is chrome, which a new
+# document starts in (2026-11-07): asking for it would change nothing and put nothing on the
+# history, so the undo after it would take off a move instead.
 material preset=rubber
 undo
-material preset=chrome
+material preset=glass
 undo
 
 # Both histories leave the same document here; only what an undo reaches from it differs.
 expect target=moved bbox=90,90,90,110,110,110 tol=0.5
 
-# The last move comes off and the two before it stay. Before the fix the chrome had replaced the
+# The last move comes off and the two before it stay. Before the fix the second edit had replaced the
 # last move's entry, so this undo took off the move before it and put the ball back at 100,0,0.
 # The tolerance is loose on purpose: the two answers are 100 mm apart, and what is checked is which
 # entry survived, not how closely a sphere meshes.

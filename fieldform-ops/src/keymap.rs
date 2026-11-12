@@ -145,7 +145,7 @@ mod tests {
         let mut km = Keymap::new();
         km.bind(Shortcut::new("Z", Modifiers::ctrl()), "edit.undo", Args::new());
         km.bind(Shortcut::new("Z", Modifiers::ctrl_shift()), "edit.redo", Args::new());
-        km.bind(Shortcut::new("X", Modifiers::shift()), "view.section_flip", Args::new());
+        km.bind(Shortcut::new("H", Modifiers::shift()), "view.show_all", Args::new());
         km.bind(Shortcut::plain("Tab"), "view.cycle_mode", Args::new());
         km
     }
