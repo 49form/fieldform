@@ -1,6 +1,6 @@
 [package]
 name = "fieldform-import"
-version = "0.4.0"
+version = "0.4.1"
 edition.workspace = true
 license = "GPL-3.0-only"
 authors = ["49form"]

@@ -162,8 +162,10 @@ impl MeshField {
         // each triangle came from is a different question, asked by the conformal cell map
         // through `SurfaceMap`.
         let shared = crate::shared_tessellation(cage, levels);
-        let mut field = Self::from_triangles(shared.positions.clone(), shared.normals.clone(), shared.triangles.clone());
-        field.crease_corners = shared.crease_corner_normals.iter().copied().collect();
+        let (triangles, crease_corners) =
+            weld_coincident(&shared.positions, &shared.normals, &shared.triangles, &shared.crease_corner_normals);
+        let mut field = Self::from_triangles(shared.positions.clone(), shared.normals.clone(), triangles);
+        field.crease_corners = crease_corners;
         Ok(field)
     }
 
@@ -505,6 +507,55 @@ impl MeshField {
     pub fn triangle_count(&self) -> usize {
         self.triangles.len()
     }
+}
+
+/// A tessellation's triangles with the samples that landed on one point made one vertex, and the
+/// triangles that collapse with them dropped; the crease corners re-keyed to match.
+///
+/// **Why the sign test needs it.** The descent stops a few levels down beside an irregular
+/// vertex and gives every sample still that close the vertex's exact limit position, so a block
+/// of samples -- eight by eight at level 6 -- sits on one point under as many indices, and the
+/// triangles between them have no area and no normal. On a smooth surface the triangles round
+/// the block agree with the ones missing and nothing shows. Along a crease they do not: a rim
+/// edge whose triangle on one side is one of those has only the other side's facet in its
+/// pseudonormal, and where the two sides meet at more than a right angle every point off that
+/// side of the corner reads as inside. A table leg's creased end cap drew surface in empty
+/// space, tens of metres from the leg (`fieldform-field/examples/crease_cap_probe.rs`).
+/// Welded, each such edge and the corner itself see their whole fan again.
+///
+/// The positions are bit-identical (all of them come from the same closed form), so the weld
+/// is exact. A triangle whose corner moved onto another sample keeps the normals it shaded with
+/// as crease corners, so welding changes the sign test and not the picture.
+fn weld_coincident(
+    positions: &[Point3<f64>],
+    normals: &[Vector3<f64>],
+    triangles: &[[u32; 3]],
+    crease_corner_normals: &[(u32, [Vector3<f64>; 3])],
+) -> (Vec<[u32; 3]>, HashMap<u32, [Vector3<f64>; 3]>) {
+    // `+ 0.0` so a negative zero and a positive one are one point.
+    let key = |p: &Point3<f64>| [(p.x + 0.0).to_bits(), (p.y + 0.0).to_bits(), (p.z + 0.0).to_bits()];
+    let mut first: HashMap<[u64; 3], u32> = HashMap::with_capacity(positions.len());
+    let canon: Vec<u32> = positions.iter().enumerate().map(|(i, p)| *first.entry(key(p)).or_insert(i as u32)).collect();
+    let given: HashMap<u32, [Vector3<f64>; 3]> = crease_corner_normals.iter().copied().collect();
+    if first.len() == positions.len() {
+        return (triangles.to_vec(), given);
+    }
+    let mut kept = Vec::with_capacity(triangles.len());
+    let mut corners = HashMap::new();
+    for (i, t) in triangles.iter().enumerate() {
+        let w = t.map(|v| canon[v as usize]);
+        if w[0] == w[1] || w[1] == w[2] || w[0] == w[2] {
+            continue;
+        }
+        let at = kept.len() as u32;
+        if let Some(n) = given.get(&(i as u32)) {
+            corners.insert(at, *n);
+        } else if (0..3).any(|k| t[k] != w[k] && normals[t[k] as usize] != normals[w[k] as usize]) {
+            corners.insert(at, t.map(|v| normals[v as usize]));
+        }
+        kept.push(w);
+    }
+    (kept, corners)
 }
 
 fn edge_key(a: u32, b: u32) -> (u32, u32) {
@@ -887,6 +938,119 @@ mod tests {
         let t = crate::shared_tessellation(&cage, 3);
         assert!(!t.crease_corner_normals.is_empty());
         MeshField::from_mesh(t.positions.clone(), t.triangles.clone()).expect("closed and manifold");
+    }
+
+    /// The owner's table-leg cage, in millimetres, as saved after the crease.
+    fn table_leg() -> (Vec<Point3<f64>>, Vec<Vec<u32>>, Vec<(u32, u32)>) {
+        let p = [
+            [54000.0, 0.0, 7000.0], [18350.412368774418, 8947.632789611816, -6523.301124572754],
+            [16629.104614257812, 8729.155540466309, -8779.63924407959], [54000.0, 0.0, -13000.0],
+            [16629.104614257812, 11270.844459533691, -8779.63924407959], [54000.0, 20000.0, -13000.0],
+            [18350.412368774418, 11052.367210388184, -6523.301124572754], [54000.0, 20000.0, 7000.0],
+            [-74591.23992919922, 8682.605743408203, -16185.945510864258],
+            [-73779.57153320312, 8677.207946777344, -22533.397674560547],
+            [-73779.57153320312, 11322.792053222656, -22533.397674560547],
+            [-74591.23992919922, 11317.394256591797, -16185.945510864258],
+            [-89691.64276123047, 4225.790977478027, -6887.783050537109],
+            [-85457.6416015625, 8463.43994140625, -21038.28811645508],
+            [-85457.6416015625, 11536.56005859375, -21038.28811645508],
+            [-89691.64276123047, 15774.209022521973, -6887.783050537109],
+            [-92280.60150146484, 6844.611167907715, -42753.787994384766],
+            [-92280.60150146484, 13155.389785766602, -42753.787994384766],
+            [-91224.38049316406, 11000.0, -36988.948822021484], [-91224.38049316406, 9000.0, -36988.948822021484],
+            [-100000.0, 0.0, 0.0], [-100000.0, 0.0, -20000.0], [-100000.0, 20000.0, -20000.0],
+            [-100000.0, 20000.0, 0.0], [-100000.0, 0.0, -40000.0], [-100000.0, 0.0, -60000.0],
+            [-100000.0, 20000.0, -60000.0], [-100000.0, 20000.0, -40000.0],
+        ];
+        let f: [[u32; 4]; 26] = [
+            [0, 1, 2, 3], [3, 2, 4, 5], [5, 4, 6, 7], [7, 6, 1, 0], [1, 8, 9, 2], [2, 9, 10, 4],
+            [4, 10, 11, 6], [6, 11, 8, 1], [8, 12, 13, 9], [10, 14, 15, 11], [11, 15, 12, 8],
+            [9, 16, 17, 10], [10, 17, 18, 14], [14, 18, 19, 13], [13, 19, 16, 9], [12, 20, 21, 13],
+            [13, 21, 22, 14], [14, 22, 23, 15], [15, 23, 20, 12], [19, 24, 25, 16], [16, 25, 26, 17],
+            [17, 26, 27, 18], [18, 27, 24, 19], [7, 0, 3, 5], [20, 23, 22, 21], [24, 27, 26, 25],
+        ];
+        let creases = vec![(20, 21), (20, 23), (21, 22), (22, 23)];
+        (p.iter().map(|q| Point3::new(q[0], q[1], q[2])).collect(), f.iter().map(|q| q.to_vec()).collect(), creases)
+    }
+
+    /// The table leg creased, and the same cage left smooth.
+    fn creased_table_leg() -> (Cage, Cage, f64) {
+        let (positions, faces, creases) = table_leg();
+        let smooth = Cage::from_faces(positions.clone(), &faces).expect("the table leg is a cage");
+        let mut mesh = smooth.mesh().clone();
+        let pairs: Vec<_> = creases
+            .iter()
+            .map(|&(a, b)| (fieldform_cage::VertexId::from_index(a as usize), fieldform_cage::VertexId::from_index(b as usize)))
+            .collect();
+        mesh.apply_creases(&pairs).expect("every crease is an edge");
+        let creased = Cage::try_from_mesh(mesh).map_err(|(_, e)| e).expect("still a cage");
+        let (lo, hi) = positions.iter().fold(
+            (Point3::from([f64::INFINITY; 3]), Point3::from([f64::NEG_INFINITY; 3])),
+            |(lo, hi), p| (lo.inf(p), hi.sup(p)),
+        );
+        (smooth, creased, (hi - lo).norm())
+    }
+
+    /// **Creasing a cap changes the sign nowhere away from it.** The descent gives a block of
+    /// samples an irregular vertex's limit position, and along the creased rim of a table leg's
+    /// end cap the triangles collapsed there took the side face out of a rim edge's pseudonormal:
+    /// points tens of metres off the cap's corners read as inside, and the viewport drew surface
+    /// in empty space. Welded, no point far from both surfaces disagrees with the smooth cage.
+    ///
+    /// The control is the same creased field built unwelded, which must disagree somewhere far
+    /// off, or this test could not see the fault it is here for.
+    #[test]
+    fn creasing_a_cap_changes_the_sign_nowhere_away_from_it() {
+        let (smooth, creased, size) = creased_table_leg();
+        let levels = 4;
+        let fs = MeshField::from_cage(&smooth, levels).unwrap();
+        let fc = MeshField::from_cage(&creased, levels).unwrap();
+        let shared = crate::shared_tessellation(&creased, levels);
+        let unwelded = MeshField::from_triangles(shared.positions.clone(), shared.normals.clone(), shared.triangles.clone());
+        let (lo, hi) = shared.positions.iter().fold(
+            (Point3::from([f64::INFINITY; 3]), Point3::from([f64::NEG_INFINITY; 3])),
+            |(lo, hi), p| (lo.inf(p), hi.sup(p)),
+        );
+        let pad = 0.1 * size;
+        let n = 32;
+        let far_flips = |f: &MeshField| {
+            let mut count = 0;
+            for i in 0..n {
+                for j in 0..n {
+                    for k in 0..n {
+                        let s = |a: f64, b: f64, t: usize| a - pad + (b - a + 2.0 * pad) * (t as f64 + 0.5) / n as f64;
+                        let p = Point3::new(s(lo.x, hi.x, i), s(lo.y, hi.y, j), s(lo.z, hi.z, k));
+                        let (a, b) = (fs.distance(p), f.distance(p));
+                        if a.signum() != b.signum() && a.abs().min(b.abs()) > 0.02 * size {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            count
+        };
+        assert!(far_flips(&unwelded) > 0, "the control: unwelded, the creased rim reads inside far off its corners");
+        assert_eq!(far_flips(&fc), 0, "welded, no sign far from both surfaces differs from the smooth cage's");
+    }
+
+    /// The weld leaves the field's mesh closed -- every edge two triangles -- and takes the
+    /// collapsed triangles out rather than leaving them.
+    #[test]
+    fn a_welded_cage_field_is_closed_and_has_no_collapsed_triangles() {
+        let (_, creased, _) = creased_table_leg();
+        let field = MeshField::from_cage(&creased, 4).unwrap();
+        let shared = crate::shared_tessellation(&creased, 4);
+        assert!(field.triangles.len() < shared.triangles.len(), "some triangles collapsed and went");
+        let mut uses: HashMap<(u32, u32), usize> = HashMap::new();
+        for t in &field.triangles {
+            assert!(t[0] != t[1] && t[1] != t[2] && t[0] != t[2], "no triangle names a vertex twice");
+            for k in 0..3 {
+                *uses.entry(edge_key(t[k], t[(k + 1) % 3])).or_insert(0) += 1;
+            }
+        }
+        assert!(uses.values().all(|&c| c == 2), "every edge is used by two triangles");
+        // Every crease corner the tessellation carried still names a triangle the field has.
+        assert!(field.crease_corners.keys().all(|&i| (i as usize) < field.triangles.len()));
     }
 
     /// D8's standing requirement for any new field source. A box is flat-sided, so the
