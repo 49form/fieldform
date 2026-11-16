@@ -178,19 +178,19 @@ fn curves_for(
                 let Some(Node::Sweep { outline, spine, .. }) = graph.node(node) else {
                     unreachable!("a frame belongs to a sweep");
                 };
-                let points = doc.curves[spine].tessellate_to_angle(SPINE_DEGREES, floor);
-                let frame = fieldform_field::sweep_frame(doc, outline, *spine, &points)
+                let points = doc.curves[&spine.source().expect("a block that names its curve")].tessellate_to_angle(SPINE_DEGREES, floor);
+                let frame = fieldform_field::sweep_frame(doc, outline, spine.source().expect("a block that names its curve"), &points)
                     .expect("a spine with a direction");
                 (frame, None)
             }
             fieldform_gpu::CurveUse::Profile(node) => {
                 let (curve, ignore) = match graph.node(node) {
                     Some(Node::Extrude { outline, sweep, .. }) => (outline.curve(), sweep.source()),
-                    Some(Node::Sweep { outline, spine, .. }) => (outline.curve(), Some(*spine)),
+                    Some(Node::Sweep { outline, spine, .. }) => (outline.curve(), spine.source()),
                     Some(Node::Revolve { outline, frame, .. }) => (outline.curve(), frame.curve_source()),
                     _ => unreachable!("a profile belongs to an extrude, a revolve or a sweep"),
                 };
-                let world = fieldform_field::profile_loop_turning(doc, curve, SPINE_DEGREES, ignore)
+                let world = fieldform_field::profile_loop_turning(doc, curve.expect("a block that names its curve"), SPINE_DEGREES, ignore)
                     .expect("a closed loop")
                     .points;
                 let (origin, normal) = fieldform_field::plane_of(&world).expect("planar");

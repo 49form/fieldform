@@ -29,13 +29,13 @@ impl App {
     /// **Joints wait for the hand to come off.** A loop that closes mid-drag under Ctrl would
     /// otherwise be joined on that frame and then dragged off its own joint, which is exactly
     /// the snap-back §4.3 forbids. So a closure found while a drag or a placement is in
-    /// flight is reported at once and queued in `pending_joins`, and held on the first call
+    /// flight is reported at once and queued in `curve_ui.pending_joins`, and held on the first call
     /// after the gesture ends — if it is still a loop by then.
     pub(crate) fn refresh_profiles_with(&mut self, join: bool) {
-        if self.profiles.at != Some(self.curve_revision) {
+        if self.curve_ui.profiles.at != Some(self.curve_ui.revision) {
             let loops = fieldform_field::profile_partition(&self.doc);
             // First sight of this document: found, not announced, not joined.
-            let previous = self.profiles.at.map(|_| std::mem::take(&mut self.profiles.loops));
+            let previous = self.curve_ui.profiles.at.map(|_| std::mem::take(&mut self.curve_ui.profiles.loops));
             let mut said = Vec::new();
             if let Some(before) = &previous {
                 for i in rows_not_in(before, &loops) {
@@ -60,11 +60,11 @@ impl App {
             }
             let closed = newly_closed_rows(previous.as_deref(), &loops);
             let chains = crate::blocks::list::open_chains(&self.doc, &loops);
-            self.profiles = ProfileRows { at: Some(self.curve_revision), loops, chains };
-            let can_join = join && self.point_drag.is_none() && self.pending_curve.is_none();
+            self.curve_ui.profiles = ProfileRows { at: Some(self.curve_ui.revision), loops, chains };
+            let can_join = join && self.curve_ui.point_drag.is_none() && self.curve_ui.pending.is_none();
             for i in closed {
-                let key = self.profiles.loops[i][0];
-                let n = self.profiles.loops[i].len();
+                let key = self.curve_ui.profiles.loops[i][0];
+                let n = self.curve_ui.profiles.loops[i].len();
                 let mut line =
                     format!("profile: {n} curves closed a loop ({})", self.profile_label(key));
                 if can_join {
@@ -73,24 +73,24 @@ impl App {
                         line.push_str(&format!(", {made} joints"));
                     }
                 } else if join {
-                    self.pending_joins.push(key);
+                    self.curve_ui.pending_joins.push(key);
                 }
                 said.push(line);
             }
             // Holding a loop rebuilt the curve display, which moved the counter; the loops are
             // the same, since a joint moves nothing.
-            self.profiles.at = Some(self.curve_revision);
+            self.curve_ui.profiles.at = Some(self.curve_ui.revision);
             for line in said {
                 self.say(line);
             }
         }
-        if self.point_drag.is_some() || self.pending_curve.is_some() || self.pending_joins.is_empty() {
+        if self.curve_ui.point_drag.is_some() || self.curve_ui.pending.is_some() || self.curve_ui.pending_joins.is_empty() {
             return;
         }
-        let keys = std::mem::take(&mut self.pending_joins);
+        let keys = std::mem::take(&mut self.curve_ui.pending_joins);
         for key in keys {
             // Opened again before the hand came off: nothing to hold.
-            if self.profiles.members(key).is_none() {
+            if self.curve_ui.profiles.members(key).is_none() {
                 continue;
             }
             let label = self.profile_label(key);
@@ -99,12 +99,12 @@ impl App {
                 self.say(format!("profile: {label} held with {made} joints"));
             }
         }
-        self.profiles.at = Some(self.curve_revision);
+        self.curve_ui.profiles.at = Some(self.curve_ui.revision);
     }
 
     /// Holds a loop together with joints, as one entry. How many meetings gained one.
     fn join_profile(&mut self, key: CurveId) -> usize {
-        let Some(members) = self.profiles.members(key).map(|m| m.to_vec()) else { return 0 };
+        let Some(members) = self.curve_ui.profiles.members(key).map(|m| m.to_vec()) else { return 0 };
         let (commands, joints, loose) =
             join_loop_commands(&self.doc, self.active_part, &members);
         // **Said, because a corner left loose is the one thing a silent join cannot report.** A
@@ -134,7 +134,7 @@ impl App {
 
     /// Takes a loop's joints out, as one entry, moving nothing. How many points were removed.
     fn ungroup_profile(&mut self, key: CurveId) -> usize {
-        let Some(members) = self.profiles.members(key).map(|m| m.to_vec()) else { return 0 };
+        let Some(members) = self.curve_ui.profiles.members(key).map(|m| m.to_vec()) else { return 0 };
         let (commands, removed) = ungroup_commands(&self.doc, self.active_part, &members);
         if commands.is_empty() {
             return 0;
@@ -175,7 +175,7 @@ impl App {
         let curve = self.curve_in_hand()?;
         // A closed loop's: joining and ungrouping are about a loop's corners, and an open
         // profile is held by the continuity set at each of its joins.
-        self.profiles.key_of(curve).filter(|key| !self.profiles.is_open(*key))
+        self.curve_ui.profiles.key_of(curve).filter(|key| !self.curve_ui.profiles.is_open(*key))
     }
 
     pub(crate) fn join_selected(&mut self) {
@@ -198,8 +198,8 @@ impl App {
     /// the list -- "Open profile N" for an open one, counted on its own.
     pub(crate) fn profile_label(&self, key: CurveId) -> String {
         self.doc.profile_names.get(&key).cloned().unwrap_or_else(|| {
-            let kind = if self.profiles.is_open(key) { "Open profile" } else { "Profile" };
-            format!("{kind} {}", self.profiles.number(key).unwrap_or(0))
+            let kind = if self.curve_ui.profiles.is_open(key) { "Open profile" } else { "Profile" };
+            format!("{kind} {}", self.curve_ui.profiles.number(key).unwrap_or(0))
         })
     }
 
@@ -218,7 +218,7 @@ impl App {
     /// (`profile-group-spec.md` §3.3).
     pub(crate) fn prune_profile_names(&mut self) {
         self.refresh_profiles();
-        let keys: std::collections::HashSet<CurveId> = self.profiles.keys().into_iter().collect();
+        let keys: std::collections::HashSet<CurveId> = self.curve_ui.profiles.keys().into_iter().collect();
         self.doc.profile_names.retain(|key, _| keys.contains(key));
     }
 
@@ -633,7 +633,7 @@ impl App {
         const REACH: f32 = 10.0;
         joins_in(&self.doc)
             .into_iter()
-            .filter(|j| j.ends.iter().all(|e| !self.hidden_curves.contains(&e.curve)))
+            .filter(|j| j.ends.iter().all(|e| !self.curve_ui.hidden.contains(&e.curve)))
             .filter_map(|j| {
                 self.camera
                     .project_to_screen(aspect, rect, j.at.cast::<f32>())
@@ -1255,7 +1255,7 @@ impl App {
         id: CurveId,
         nesting: &fieldform_scene::Nesting,
     ) -> Option<Block> {
-        folded_curve_row_in(&self.profiles, &self.doc, &|c| nesting.readers_of_curve(c), id)
+        folded_curve_row_in(&self.curve_ui.profiles, &self.doc, &|c| nesting.readers_of_curve(c), id)
     }
 
     /// The curve a tool that wants one should start from: the selected curve, or the first
@@ -1271,7 +1271,7 @@ impl App {
         }
         self.refresh_profiles();
         match self.selected_block {
-            Some(outputs::BlockRef::Profile(key)) => self.profiles.members(key).map(|m| m[0]),
+            Some(outputs::BlockRef::Profile(key)) => self.curve_ui.profiles.members(key).map(|m| m[0]),
             _ => None,
         }
     }
@@ -1284,14 +1284,14 @@ impl App {
         }
         match self.selected_block {
             Some(outputs::BlockRef::Profile(key)) => {
-                self.profiles.members(key).map(|m| m.to_vec()).unwrap_or_default()
+                self.curve_ui.profiles.members(key).map(|m| m.to_vec()).unwrap_or_default()
             }
             // A comb's row says which curve it reads by lighting it.
             // A comb on a whole profile lights all of it.
             Some(outputs::BlockRef::Comb(id)) => {
                 let Some(curve) = self.comb_curve(id) else { return Vec::new() };
                 let whole = self.doc.combs.iter().any(|c| c.id == id && c.whole_loop);
-                match self.profiles.key_of(curve).and_then(|key| self.profiles.members(key)) {
+                match self.curve_ui.profiles.key_of(curve).and_then(|key| self.curve_ui.profiles.members(key)) {
                     Some(members) if whole => members.to_vec(),
                     _ => vec![curve],
                 }
@@ -1353,7 +1353,7 @@ impl App {
     /// inside; one only another part reads is refused, naming the block and its part.
     pub(crate) fn delete_profile(&mut self, key: CurveId) {
         self.refresh_profiles();
-        let Some(members) = self.profiles.members(key).map(|m| m.to_vec()) else { return };
+        let Some(members) = self.curve_ui.profiles.members(key).map(|m| m.to_vec()) else { return };
         let label = self.profile_label(key);
         let mut users: Vec<String> = self
             .part_graph()
@@ -1692,7 +1692,7 @@ impl App {
     /// twice means one curve, not an error about the first.
     pub(crate) fn begin_curve_placement(&mut self, degree: usize) {
         let degree = degree.clamp(1, 24);
-        self.pending_curve =
+        self.curve_ui.pending =
             Some(PendingCurve {
                 degree,
                 first: None,
@@ -1709,7 +1709,7 @@ impl App {
 
     /// Forgets a placement in progress. Nothing was drawn, so there is nothing to undo.
     pub(crate) fn cancel_curve_placement(&mut self) {
-        if let Some(pending) = self.pending_curve.take() {
+        if let Some(pending) = self.curve_ui.pending.take() {
             self.say(crate::curve_tool_ended(&pending, "Curve tool off"));
         }
     }
@@ -1769,7 +1769,7 @@ impl App {
         snapping: bool,
         grid: bool,
     ) {
-        let Some(pending) = self.pending_curve.as_ref() else { return };
+        let Some(pending) = self.curve_ui.pending.as_ref() else { return };
         let (degree, first, axis, placed) =
             (pending.degree, pending.first, pending.axis, pending.placed);
 
@@ -1812,7 +1812,7 @@ impl App {
         };
 
         let Some(first) = first else {
-            if let Some(pending) = self.pending_curve.as_mut() {
+            if let Some(pending) = self.curve_ui.pending.as_mut() {
                 pending.first = Some(at);
                 pending.preview = None;
             }
@@ -1836,7 +1836,7 @@ impl App {
         let mut curve = match bezier_between(id, degree, first, at) {
             Ok(curve) => curve,
             Err(e) => {
-                self.pending_curve = None;
+                self.curve_ui.pending = None;
                 self.warn(format!("could not make a degree {degree} curve: {e}"));
                 return;
             }
@@ -1856,7 +1856,7 @@ impl App {
         let on = if axis.is_some() { None } else { self.sketching_on() };
         let insert = self.insert_curve_command(curve, on);
         if let Err(e) = self.stack.execute(&mut self.doc, insert) {
-            self.pending_curve = None;
+            self.curve_ui.pending = None;
             self.warn(e.to_string());
             return;
         }
@@ -1869,7 +1869,7 @@ impl App {
         // An axis stays one-shot: it is one object at a time, and re-pointing one is a single
         // gesture by nature. A console line never reaches here (this has one caller, the viewport's
         // click), so a script cannot end with the tool armed.
-        self.pending_curve = axis.is_none().then_some(PendingCurve {
+        self.curve_ui.pending = axis.is_none().then_some(PendingCurve {
             degree,
             first: None,
             preview: None,
@@ -1912,13 +1912,13 @@ impl App {
         grid: bool,
     ) {
         let Some(cursor) = hover.filter(|p| rect.contains(*p)) else {
-            if let Some(pending) = self.pending_curve.as_mut() {
+            if let Some(pending) = self.curve_ui.pending.as_mut() {
                 pending.preview = None;
             }
             return;
         };
         let eye = self.camera.eye;
-        let fresh = self.pending_curve.as_ref().is_some_and(|p| {
+        let fresh = self.curve_ui.pending.as_ref().is_some_and(|p| {
             p.preview.as_ref().is_some_and(|l| {
                 l.cursor == cursor && l.eye == eye && l.snapping == snapping && l.grid == grid
             })
@@ -1929,7 +1929,7 @@ impl App {
         // An axis that stands on a surface is shown where the *surface* is, not where a curve
         // point would land (the drawing plane, a curve end): the marker is the click's answer.
         let normal_axis = self
-            .pending_curve
+            .curve_ui.pending
             .as_ref()
             .is_some_and(|p| {
                 matches!(
@@ -1950,7 +1950,7 @@ impl App {
                 Some(if grid { self.grid_snap(aspect, rect, at).unwrap_or(at) } else { at })
             })
         };
-        if let Some(pending) = self.pending_curve.as_mut() {
+        if let Some(pending) = self.curve_ui.pending.as_mut() {
             pending.preview = at.map(|at| Landing { cursor, eye, snapping, grid, at });
         }
     }
@@ -1963,7 +1963,7 @@ impl App {
     /// only legible when the marker is drawn there. A hollow square for what is not yet a point,
     /// a filled one for the start, which is a control point in all but name.
     pub(crate) fn draw_placement(&self, painter: &egui::Painter, aspect: f32, rect: egui::Rect) {
-        let Some(pending) = &self.pending_curve else { return };
+        let Some(pending) = &self.curve_ui.pending else { return };
         let stroke = egui::Stroke::new(1.5_f32, CURVE_SELECTED_COLOR);
         let start = pending
             .first
@@ -2042,7 +2042,7 @@ impl App {
             .map(|p| p - anchor)
             .unwrap_or_else(Vector3::zeros);
 
-        self.point_drag = Some(PointDrag {
+        self.curve_ui.point_drag = Some(PointDrag {
             curve,
             indices,
             start_positions,
@@ -2068,7 +2068,7 @@ impl App {
         snapping: bool,
         grid: bool,
     ) {
-        let mut state = match self.point_drag.take() {
+        let mut state = match self.curve_ui.point_drag.take() {
             Some(state) => state,
             None => return,
         };
@@ -2136,7 +2136,7 @@ impl App {
                 self.move_curve_points_live(m.curve, &to, &m.gesture);
             }
         }
-        self.point_drag = Some(state);
+        self.curve_ui.point_drag = Some(state);
     }
 
     /// Finishes a control-point drag, snapping onto another curve's end when `snapping` is set.
@@ -2145,7 +2145,7 @@ impl App {
     /// the gesture goes on the history once, as the value it settled at, rather than sixty times
     /// a second.
     pub(crate) fn end_point_drag(&mut self) {
-        let Some(state) = self.point_drag.take() else { return };
+        let Some(state) = self.curve_ui.point_drag.take() else { return };
         let PointDrag { curve, indices, start_positions, snapped_to: snapped, gesture, others, .. } =
             state;
         let shapes_field = gesture.shapes_field || others.iter().any(|m| m.gesture.shapes_field);

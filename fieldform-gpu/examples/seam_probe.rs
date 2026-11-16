@@ -74,8 +74,10 @@ fn main() {
         fieldform_field::GraphField::compile_graph(&doc, &g, 1e-4).expect("compiles")
     };
     for id in &wanted {
-        if let Some(fieldform_scene::Node::Sweep { outline, spine, law, .. }) = part.graph.node(*id) {
-            println!("{:x}: divided by {:.3}", id.raw(), fieldform_field::sweep_stretch(&doc, outline, *spine, law));
+        if let Some(fieldform_scene::Node::Sweep { outline, spine, law, .. }) = part.graph.node(*id)
+            && let Some(spine) = spine.source()
+        {
+            println!("{:x}: divided by {:.3}", id.raw(), fieldform_field::sweep_stretch(&doc, outline, spine, law));
         }
     }
     println!("whole graph's value scale: {:.3}", fieldform_field::value_scale_with(&doc, &part.graph, &[]));

@@ -131,7 +131,7 @@ impl App {
         }
         self.select_body(Some(block));
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         self.say(if target.is_empty() {
             "An infill with an empty slot \u{2014} put a block in it".to_string()
@@ -467,7 +467,7 @@ impl App {
         ctx: &egui::Context,
         id: NodeId,
     ) -> Option<fieldform_field::InfillCavity> {
-        let revision = self.revision;
+        let revision = self.saving.revision;
         let run = self.infill_cavities.entry(id).or_insert_with(|| CavityRun {
             revision,
             seen: std::time::Instant::now(),

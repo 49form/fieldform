@@ -48,7 +48,7 @@ fn main() {
         end_radius: lit(10.0),
     });
     // What the ramp reads: distance to the line, which is what a pipe's field is.
-    let pipe = graph.add(Node::Pipe { curve, radius: lit(1.0) });
+    let pipe = graph.add(Node::Pipe { curve: curve.into(), radius: lit(1.0) });
     let ramp = graph.add(Node::Ramp {
         input: pipe.into(),
         in_min: lit(0.0),

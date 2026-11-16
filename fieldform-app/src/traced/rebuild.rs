@@ -255,6 +255,9 @@ impl TracedView {
             f64,
         );
         let mut later: Vec<Queued> = Vec::new();
+        // And the half-way bands that go ahead of them, every body's before any settled one --
+        // see `stand_in_cells`.
+        let mut sooner: Vec<Queued> = Vec::new();
         // Every resolution this rebuild asked for, since a mesh's is not a cage's.
         let mut asked_cells: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for leaf in &program.baked {
@@ -306,17 +309,24 @@ impl TracedView {
                 bake_key(scene.document, *leaf, scene.tolerance_mm, resolution, bounds, band);
             asked.insert(*leaf);
             identities.insert(shape_of(&key));
-            // **Already being made.** Stand in with the draft band and leave the worker alone:
-            // rebuilding this leaf's field to queue a bake that is already running is the work
-            // that made a settle of several bodies quadratic.
+            // The two bands that can stand in for this one while it is made: the draft, and the
+            // half-way band a settled bake is preceded by.
+            let coarse = BakeKey { resolution: DRAFT_BAKE_RESOLUTION, ..key };
+            let between = stand_in_cells(resolution).map(|cells| BakeKey { resolution: cells, ..key });
+            // **Already being made.** Stand in with the finest band in hand and leave the worker
+            // alone: rebuilding this leaf's field to queue a bake that is already running is the
+            // work that made a settle of several bodies quadratic.
             let in_flight = self
                 .baking
                 .as_ref()
                 .is_some_and(|baking| baking.pending.contains(&key));
             if in_flight {
-                let coarse = BakeKey { resolution: DRAFT_BAKE_RESOLUTION, ..key };
-                if let Some(standing_in) = self.bakes.get(&coarse) {
+                let standing = between
+                    .and_then(|half| self.bakes.get(&half))
+                    .or_else(|| self.bakes.get(&coarse));
+                if let Some(standing_in) = standing {
                     keep.insert(coarse);
+                    keep.extend(between);
                     keep.insert(key);
                     bakes.push(std::sync::Arc::clone(standing_in));
                     continue;
@@ -394,21 +404,32 @@ impl TracedView {
             let field_ms = making.elapsed().as_secs_f32() * 1e3;
             let baking_started = Instant::now();
             if quality == Quality::Final && resolution > DRAFT_BAKE_RESOLUTION {
-                let coarse = BakeKey { resolution: DRAFT_BAKE_RESOLUTION, ..key };
-                let standing_in = match self.bakes.get(&coarse) {
-                    Some(band) => std::sync::Arc::clone(band),
-                    None => {
-                        let band = bake_of(&*field, bounds, DRAFT_BAKE_RESOLUTION, band);
-                        self.bakes.insert(coarse, std::sync::Arc::clone(&band));
-                        band
-                    }
+                // What is drawn meanwhile: the half-way band if an earlier settle left one, else
+                // the draft, made now if a drag did not leave that either.
+                let half_way = between.and_then(|half| self.bakes.get(&half).map(|band| (half.resolution, band)));
+                let (standing_cells, standing_in) = match half_way {
+                    Some((cells, band)) => (cells, std::sync::Arc::clone(band)),
+                    None => match self.bakes.get(&coarse) {
+                        Some(band) => (DRAFT_BAKE_RESOLUTION, std::sync::Arc::clone(band)),
+                        None => {
+                            let band = bake_of(&*field, bounds, DRAFT_BAKE_RESOLUTION, band);
+                            self.bakes.insert(coarse, std::sync::Arc::clone(&band));
+                            (DRAFT_BAKE_RESOLUTION, band)
+                        }
+                    },
                 };
                 keep.insert(coarse);
+                keep.extend(between);
                 keep.insert(key);
+                if let Some(half) = between
+                    && !self.bakes.contains_key(&half)
+                {
+                    sooner.push((half, std::sync::Arc::clone(&field), bounds, half.resolution, band));
+                }
                 later.push((key, field, bounds, resolution, band));
                 bakes.push(standing_in);
                 self.last_bakes.push((
-                    format!("at {DRAFT_BAKE_RESOLUTION} while {resolution} is made [{detail}]"),
+                    format!("at {standing_cells} while {resolution} is made [{detail}]"),
                     field_ms,
                     baking_started.elapsed().as_secs_f32() * 1e3,
                 ));
@@ -437,10 +458,17 @@ impl TracedView {
             self.stop_baking();
         }
 
-        // Off to a worker, one band at a time so a scene of several bodies sharpens as each
-        // arrives.
-        if !later.is_empty() {
-            let queued: Vec<BakeKey> = later.iter().map(|(key, ..)| *key).collect();
+        // Off to a worker, one band at a time. **Every body's half-way band before any settled
+        // one**: together they cost an eighth of what follows, and until they are in the scene is
+        // drawn from 32 cells a body, which cannot hold a member thinner than a cell -- a frame
+        // of 12 mm bones in a 600 mm box came out as loose slices for the minute its settled
+        // bands took (`fieldform-gpu/examples/cage_bake_cost.rs`). The view is redrawn at the
+        // end of each of the two stages, which `Baking::stages` counts down.
+        if !sooner.is_empty() || !later.is_empty() {
+            let stages: Vec<usize> =
+                [sooner.len(), later.len()].into_iter().filter(|bands| *bands > 0).collect();
+            let work: Vec<Queued> = sooner.into_iter().chain(later).collect();
+            let queued: Vec<BakeKey> = work.iter().map(|(key, ..)| *key).collect();
             let outstanding = queued.len();
             let (tx, arrivals) = std::sync::mpsc::channel();
             // One worker at a time: whatever is still in flight is for a shape this rebuild no
@@ -474,7 +502,7 @@ impl TracedView {
                 .name("settle bake".to_string())
                 .spawn(move || {
                     let run = move || {
-                        for (key, field, bounds, resolution, band) in later {
+                        for (key, field, bounds, resolution, band) in work {
                             let stopped =
                                 || worker_stop.load(std::sync::atomic::Ordering::Relaxed);
                             let Some(baked) = fieldform_gpu::BakedField::new_cancellable(
@@ -499,6 +527,7 @@ impl TracedView {
                         pending: queued,
                         arrivals,
                         outstanding,
+                        stages,
                     })
                 }
                 // A machine that cannot spawn a thread still gets a picture, coarse and honest,
@@ -573,9 +602,9 @@ impl TracedView {
                     Some(fieldform_scene::Node::Sweep { outline, spine, .. }) => scene
                         .curves
                         .iter()
-                        .find(|(curve, _)| curve == spine)
+                        .find(|(curve, _)| Some(*curve) == spine.source())
                         .and_then(|(_, points)| {
-                            fieldform_field::sweep_frame(scene.document, outline, *spine, points)
+                            fieldform_field::sweep_frame(scene.document, outline, spine.source()?, points)
                         })
                         .map(|normals| (normals, None)),
                     // A loft's frame rides the centerline its own build flattened, below, and
@@ -764,7 +793,8 @@ impl TracedView {
                     let _ = tx.send(built);
                 });
             match spawned {
-                Ok(_) => {
+                Ok(worker) => {
+                    keep_shader_worker(worker);
                     // The old renderer keeps drawing: put it back, and with it the program it
                     // belongs to, which `rebuild` has not replaced yet.
                     self.renderer = previous;
@@ -909,15 +939,15 @@ fn profile_points(
         // A profile's curve. A block built on a wall is not asked for one of these: its three
         // polylines come from the wall itself, through `CurveUse::Wall`.
         fieldform_scene::Node::Extrude { outline, sweep, .. } => {
-            (outline.curve(), sweep.source(), false)
+            (outline.curve()?, sweep.source(), false)
         }
         // Read in its own fitted plane exactly as an extrude's is, with the spine left out of
         // the loop walk -- the same reading the compile makes.
         fieldform_scene::Node::Sweep { outline, spine, .. } => {
-            (outline.curve(), Some(*spine), false)
+            (outline.curve()?, spine.source(), false)
         }
         fieldform_scene::Node::Revolve { outline, frame, .. } => {
-            (outline.curve(), frame.curve_source(), true)
+            (outline.curve()?, frame.curve_source(), true)
         }
         _ => return None,
     };
@@ -935,7 +965,7 @@ fn profile_points(
         // profile flattened about one point and ridden by another is the solid in two places.
         fieldform_scene::Node::Sweep { outline, spine, .. } => {
             let laid =
-                fieldform_field::sweep_outline_section(document, outline, *spine, turn_degrees)
+                fieldform_field::sweep_outline_section(document, outline, spine.source()?, turn_degrees)
                     .ok()?;
             (laid.origin.coords, fieldform_field::rotation_from_z(laid.normal))
         }

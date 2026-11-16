@@ -1,0 +1,118 @@
+# Closed-form accuracy (backlog item 140): shapes whose volume and area are known on paper.
+#
+#   fieldform.exe --run benchmarks/smoke/closed-form.ffc --keep-going --report closed-form.json --exit
+#
+# Exit code 0 when every expect passed. Every line here is meant to succeed. Each number is
+# derived in the comment above it, so a pass means the kernel and the measurement agree with
+# arithmetic rather than with another program's export, whose own chord sag would set a floor.
+# Each document is saved before the next `new`, as the other smoke scripts do.
+
+# --- A G1 fillet along a straight concave edge. The rolling ball leaves (1 - pi/4)k^2 of section
+# behind it and replaces 2k of flat face with a quarter arc of (pi/2)k, so against its sharp twin
+# the difference is exact. A wall standing on a slab gives two such edges, k = 4, trimmed to
+# 50 mm so the flush end faces, where a union blend bulges, are cut away. The sharp part is the
+# slab 40 x 50 x 10 and the wall's 10 x 50 x 20 above it, 30000. The trim's two cut faces each
+# carry both fillets' section, so they gain 4 * (1 - pi/4)k^2 of area between them:
+#   volume 2 * (1 - pi/4) * 16 * 50 = 343.363,
+#   area 2 * (pi/2 - 2) * 4 * 50 + 4 * (1 - pi/4) * 16 = -171.681 + 13.735 = -157.946
+new
+cube 'slab_r' size=40,60,10 centre=0,0,-5
+cube 'wall_r' size=10,60,25 centre=-10,0,7.5
+boolean -u in=slab_r,wall_r radius=4 'joined_r'
+cube 'trim_r' size=80,50,80 centre=0,0,0
+boolean -i in=joined_r,trim_r 'filleted'
+cube 'slab_s' size=40,60,10 centre=0,0,-5
+cube 'wall_s' size=10,60,25 centre=-10,0,7.5
+boolean -u in=slab_s,wall_s 'joined_s'
+cube 'trim_s' size=80,50,80 centre=0,0,0
+boolean -i in=joined_s,trim_s 'sharp'
+expect target=sharp volume=30000 tol=0.1%
+expect diff=filleted,sharp volume=343.363 tol=1
+expect diff=filleted,sharp area=-157.946 tol=2
+saveas file=target/closed-form-fillet.fform
+
+# --- Two spheres of radius 10 whose centres are 10 apart. The lens they share is
+# pi(4R + d)(2R - d)^2 / 12 = 1308.997, bounded by two caps of height 5, 2 * 2piRh = 628.319;
+# their union is 2 * 4/3 pi R^3 less the lens, 7068.583, and its skin 2 * (4piR^2 - 2piRh) = 1884.956.
+new
+sphere 'a' radius=10 centre=-5,0,0
+sphere 'b' radius=10 centre=5,0,0
+boolean -i in=a,b 'lens'
+expect target=lens volume=1308.997 tol=0.1%
+expect target=lens area=628.319 tol=0.2%
+sphere 'c' radius=10 centre=-5,0,40
+sphere 'd' radius=10 centre=5,0,40
+boolean -u in=c,d 'pair'
+expect target=pair volume=7068.583 tol=0.1%
+expect target=pair area=1884.956 tol=0.2%
+saveas file=target/closed-form-spheres.fform
+
+# --- Steinmetz solids. Two bars of radius 10 crossing at right angles share 16r^3/3 = 5333.333,
+# bounded by 16r^2 = 1600; three share 8(2 - sqrt 2)r^3 = 4686.292, bounded by 24(2 - sqrt 2)r^2
+# = 1405.887. Every edge of either is a crease, which is what a marching mesh finds hardest.
+new
+cylinder 'x2' radius=10 from=-30,0,0 to=30,0,0
+cylinder 'y2' radius=10 from=0,-30,0 to=0,30,0
+boolean -i in=x2,y2 'bicylinder'
+expect target=bicylinder volume=5333.333 tol=0.2%
+expect target=bicylinder area=1600 tol=0.5%
+cylinder 'x3' radius=10 from=-30,0,60 to=30,0,60
+cylinder 'y3' radius=10 from=0,-30,60 to=0,30,60
+cylinder 'z3' radius=10 from=0,0,30 to=0,0,90
+boolean -i in=x3,y3,z3 'tricylinder'
+expect target=tricylinder volume=4686.292 tol=0.2%
+expect target=tricylinder area=1405.887 tol=0.5%
+saveas file=target/closed-form-steinmetz.fform
+
+# --- A torus of radii 30 and 5 is 2 pi^2 R r^2 = 14804.407 and 4 pi^2 R r = 5921.763 of skin.
+# Cut by its own equator it is half of each, closed by an annulus of 4 pi R r = 1884.956:
+#   7402.203 and 2960.881 + 1884.956 = 4845.837.
+new
+torus 'ring' major_radius=30 minor_radius=5 centre=0,0,0
+expect target=ring volume=14804.407 tol=0.1%
+expect target=ring area=5921.763 tol=0.2%
+torus 'cut_ring' major_radius=30 minor_radius=5 centre=0,0,40
+plane 'equator' origin=0,0,40
+boolean -i in=cut_ring,equator 'half_ring'
+expect target=half_ring volume=7402.203 tol=0.1%
+expect target=half_ring area=4845.837 tol=0.2%
+saveas file=target/closed-form-torus.fform
+
+# --- Offsets of a 20 x 30 x 40 box. Outward by 3 it is the box, a slab on every face, a quarter
+# cylinder on every edge and an eighth of a ball at every corner:
+#   abc + 2d(ab + bc + ca) + pi d^2 (a + b + c) + 4/3 pi d^3 = 42257.787,
+#   skin 2(ab + bc + ca) + 2 pi d (a + b + c) + 4 pi d^2 = 7009.557.
+# Inward by 3 its corners stay sharp: 14 x 24 x 34 = 11424, skin 3256.
+new
+cube 'box_out' size=20,30,40 centre=0,0,0
+offset target=box_out distance=3 'grown'
+expect target=grown volume=42257.787 tol=0.1%
+expect target=grown area=7009.557 tol=0.2%
+expect target=grown bbox=-13,-18,-23,13,18,23 tol=0.05
+cube 'box_in' size=20,30,40 centre=100,0,0
+offset target=box_in distance=-3 'shrunk'
+expect target=shrunk volume=11424 tol=0.1%
+expect target=shrunk area=3256 tol=0.2%
+saveas file=target/closed-form-offset.fform
+
+# --- A shell of a ball, 2 mm thick inside radius 20: 4/3 pi (20^3 - 18^3) = 9081.297, skin
+# 4 pi (20^2 + 18^2) = 9098.052. A ball has no edge, so its thinnest place is the wall itself.
+new
+sphere 'ball' radius=20 centre=0,0,0
+shell target=ball thickness=2 'hollow'
+expect target=hollow volume=9081.297 tol=0.1%
+expect target=hollow area=9098.052 tol=0.2%
+expect target=hollow thickness_min=1.9
+saveas file=target/closed-form-shell.fform
+
+# --- A cubic beam lattice, cells of 10 with struts of radius 1, cut at the half-cells so that the
+# 30 mm box holds 27 whole cells. Each cell is three struts' worth of bar, 3 pi r^2 L, less what
+# three crossing bars share: each pair a Steinmetz solid of 16r^3/3, all three 8(2 - sqrt 2)r^3
+# added back once.
+#   27 * (30 pi - 16 + 8(2 - sqrt 2)) = 2239.220
+new
+tpms 'beams' cell=cubic cell_size=10 radius=1 origin=0,0,0
+cube 'cells' size=30,30,30 centre=0,0,0
+boolean -i in=beams,cells 'lattice'
+expect target=lattice volume=2239.220 tol=0.5%
+saveas file=target/closed-form-beams.fform

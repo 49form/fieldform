@@ -48,7 +48,7 @@ impl App {
         // -- and so is being in the middle of cage work at all: a cage tool armed, an extrude or
         // inset pending, or the view in Cage mode, where the cage is the thing being edited (the
         // owner, 2026-10-24: a right-click while inserting an edge opened the field's menu).
-        let cage_work = self.cage_tool.is_some() || self.cage_session.is_some() || self.view_mode == ViewMode::Polygon;
+        let cage_work = self.cage_tool.is_some() || self.cage_session.is_some() || self.view.mode == ViewMode::Polygon;
         if self.control == ControlMesh::Cage && (!self.selection.is_empty() || cage_work) {
             return Subject::CageElements;
         }
@@ -72,7 +72,7 @@ impl App {
         // selected: the cage is drawn there to be worked on (the owner, 2026-10-24).
         if subject != Subject::CageElements
             && self.control == ControlMesh::Cage
-            && self.view_mode.cage_is_editable()
+            && self.view.mode.cage_is_editable()
             && let Some(rect) = self.viewport_rect
             && rect.contains(at)
         {
@@ -82,12 +82,12 @@ impl App {
                 subject = Subject::CageElements;
             }
         }
-        self.marking = Some(MarkingMenu { at, subject, dragging: false, join: None, lead_for: None });
+        self.tools.marking = Some(MarkingMenu { at, subject, dragging: false, join: None, lead_for: None });
     }
 
     /// The ring a right-click on a join opens: G0, G1 and G2 for those two ends.
     pub(crate) fn open_join_menu(&mut self, at: egui::Pos2, join: [fieldform_scene::CurveEnd; 2]) {
-        self.marking = Some(MarkingMenu { at, subject: Subject::Joint, dragging: false, join: Some(join), lead_for: None });
+        self.tools.marking = Some(MarkingMenu { at, subject: Subject::Joint, dragging: false, join: Some(join), lead_for: None });
     }
 
     /// Shows `relation` at the join, or puts back what was there with `None`. A no-op when it is
@@ -97,7 +97,7 @@ impl App {
         relation: Option<fieldform_scene::Relation>,
         replace: Option<fieldform_scene::RelationId>,
     ) {
-        if self.join_preview.as_ref().map(|p| &p.relation) == relation.as_ref() {
+        if self.tools.join_preview.as_ref().map(|p| &p.relation) == relation.as_ref() {
             return;
         }
         self.put_back_join_preview();
@@ -118,7 +118,7 @@ impl App {
                 c.set_control_point(index, to);
                 saved.push((curve, index, was));
             }
-            self.join_preview = Some(JoinPreview { relation, saved });
+            self.tools.join_preview = Some(JoinPreview { relation, saved });
         }
         self.rebuild_curve_display();
         self.rebuild_render_resources();
@@ -126,7 +126,7 @@ impl App {
 
     /// Puts the points a preview moved back where they were, without redrawing.
     fn put_back_join_preview(&mut self) -> bool {
-        let Some(preview) = self.join_preview.take() else { return false };
+        let Some(preview) = self.tools.join_preview.take() else { return false };
         // In reverse, so a point moved twice ends where it started.
         for (curve, index, was) in preview.saved.into_iter().rev() {
             if let Some(c) = self.doc.curve_mut(curve) {
@@ -142,8 +142,8 @@ impl App {
             self.rebuild_curve_display();
             self.rebuild_render_resources();
         }
-        if self.marking.as_ref().is_some_and(|m| m.lead_for.is_some()) {
-            self.marking = None;
+        if self.tools.marking.as_ref().is_some_and(|m| m.lead_for.is_some()) {
+            self.tools.marking = None;
         }
     }
 
@@ -214,10 +214,10 @@ impl App {
         let close = ctx.input(|i| i.key_pressed(egui::Key::Escape)) || away;
         if let Some(fieldform_scene::Relation::Joint { master, .. }) = picked {
             self.put_back_join_preview();
-            let warned = self.console_warnings;
+            let warned = self.console.warnings;
             self.run_join_line(join, g, Some(master.curve));
             // Kept, it was redrawn by the edit; refused, nothing redrew the points put back.
-            if self.console_warnings > warned {
+            if self.console.warnings > warned {
                 self.rebuild_curve_display();
                 self.rebuild_render_resources();
             }
@@ -228,7 +228,7 @@ impl App {
             return;
         }
         self.preview_join(hovered, replace);
-        self.marking = Some(menu);
+        self.tools.marking = Some(menu);
     }
 
     /// A G picked on a join's ring, run as the line that says it, so the console echoes a line
@@ -269,9 +269,9 @@ impl App {
     fn run_echoed(&mut self, line: String) {
         self.commit_session();
         self.echo_settle();
-        let (moves, warned) = (self.document_moves, self.console_warnings);
+        let (moves, warned) = (self.document_moves, self.console.warnings);
         self.run_command_unechoed(&line);
-        if self.document_moves != moves && self.console_warnings == warned {
+        if self.document_moves != moves && self.console.warnings == warned {
             self.echo_line(line);
         }
         self.echo_rebase();
@@ -306,7 +306,7 @@ impl App {
     /// opens at the middle of the viewport, where a menu with no click to anchor it goes.
     pub(crate) fn open_degree_menu(&mut self) {
         let at = self.viewport_rect.map_or(egui::pos2(300.0, 300.0), |r| r.center());
-        self.marking = Some(MarkingMenu { at, subject: Subject::Degree, dragging: false, join: None, lead_for: None });
+        self.tools.marking = Some(MarkingMenu { at, subject: Subject::Degree, dragging: false, join: None, lead_for: None });
     }
 
     /// Draws the marking menu, if it is open, and runs what is picked.
@@ -314,7 +314,7 @@ impl App {
     /// **One foreground widget over the whole menu**, so egui gives the menu its own clicks and
     /// the viewport underneath sees none of them.
     pub(crate) fn marking_ui(&mut self, ctx: &egui::Context) {
-        let Some(mut menu) = self.marking.take() else { return };
+        let Some(mut menu) = self.tools.marking.take() else { return };
         if menu.lead_for.is_some() {
             self.lead_list_ui(ctx, menu);
             return;
@@ -420,7 +420,7 @@ impl App {
             Some(i) => match entry(i) {
                 // Degree… opens its ring where this one was, rather than running anything.
                 Some((c, Ok(()))) if c.id == "curve.degree_menu" => {
-                    self.marking = Some(MarkingMenu { at: menu.at, subject: Subject::Degree, dragging: false, join: None, lead_for: None });
+                    self.tools.marking = Some(MarkingMenu { at: menu.at, subject: Subject::Degree, dragging: false, join: None, lead_for: None });
                 }
                 // G1 or G2 on a join asks which curve leads next, in a list that shows each.
                 Some((c, Ok(()))) if menu.join.is_some() && matches!(c.id, "curve.continuity.1" | "curve.continuity.2") => {
@@ -429,15 +429,15 @@ impl App {
                     } else {
                         fieldform_scene::JointContinuity::G2
                     };
-                    self.marking = Some(MarkingMenu { lead_for: Some(continuity), ..menu });
+                    self.tools.marking = Some(MarkingMenu { lead_for: Some(continuity), ..menu });
                 }
                 Some((c, Ok(()))) if menu.join.is_some() => self.pick_join_continuity(menu.join.expect("checked"), c),
                 Some((c, Ok(()))) => self.invoke_command(c),
                 // A dimmed slot does nothing, and the menu stays open on it.
-                _ => self.marking = Some(menu),
+                _ => self.tools.marking = Some(menu),
             },
             None if close => {}
-            None => self.marking = Some(menu),
+            None => self.tools.marking = Some(menu),
         }
     }
 }

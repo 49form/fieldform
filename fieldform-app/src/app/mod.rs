@@ -2,7 +2,7 @@
 // Copyright (c) 2026 49form
 //! App's methods, by what they serve: each module adds an `impl App` of its own to `main.rs`'s.
 
-mod document_io;
+pub(crate) mod document_io;
 mod import;
 mod console;
 mod menu;
@@ -39,3 +39,27 @@ mod measure;
 pub(crate) use measure::no_statement_while_a_slot_is_empty;
 pub(crate) mod inspector;
 pub(crate) mod written_panel;
+mod startup;
+mod scene_resources;
+mod dispatch;
+mod document_state;
+mod controls;
+mod display;
+mod placements;
+mod overlay_state;
+mod curve_handles;
+mod selecting;
+mod part_graph;
+mod verifying;
+mod look;
+mod stamps;
+mod naming;
+mod compile_words;
+mod deleting;
+mod clipboard;
+mod pivot;
+mod traced_view;
+mod grid_view;
+mod display_console;
+mod keys;
+mod viewport;

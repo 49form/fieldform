@@ -33,7 +33,7 @@
     }
 
     fn wall(curve: CurveId, thickness: f64, side: WallSide, ends: WallEnds) -> Outline {
-        Outline::Wall { curve, thickness: lit(thickness), side, ends }
+        Outline::Wall { curve: curve.into(), thickness: lit(thickness), side, ends }
     }
 
     const HOOK: [(f64, f64); 4] = [(0.0, 0.0), (40.0, 0.0), (50.0, 25.0), (20.0, 20.0)];

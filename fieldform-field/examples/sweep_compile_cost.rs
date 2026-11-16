@@ -304,12 +304,12 @@ fn wing_like_with(keep: usize) -> (Document, Graph) {
     });
     let mut inputs = vec![body];
     if keep >= 2 {
-        inputs.push(graph.add(Node::Pipe { curve: spine, radius: lit(12.0) }));
+        inputs.push(graph.add(Node::Pipe { curve: spine.into(), radius: lit(12.0) }));
     }
     if keep >= 3 {
         inputs.push(graph.add(Node::Sweep { rims: Default::default(),
             outline: fieldform_scene::Outline::closed(section),
-            spine,
+            spine: spine.into(),
             section: Default::default(),
             law: Default::default(),
         }));

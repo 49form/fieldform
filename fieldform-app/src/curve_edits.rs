@@ -419,12 +419,15 @@ fn section_curves(doc: &Document, node: &Node) -> Vec<CurveId> {
     };
     sections
         .into_iter()
-        .flat_map(|section| match section {
-            Outline::Closed { profile } => fieldform_field::loop_from(doc, *profile, ignore)
-                .unwrap_or_else(|_| vec![*profile]),
-            Outline::Wall { curve, .. } => fieldform_field::outline_chain(doc, *curve, ignore)
+        // A section waiting for its curve is made of none.
+        .flat_map(|section| match (section, section.curve()) {
+            (_, None) => Vec::new(),
+            (Outline::Closed { .. }, Some(profile)) => {
+                fieldform_field::loop_from(doc, profile, ignore).unwrap_or_else(|_| vec![profile])
+            }
+            (Outline::Wall { .. }, Some(curve)) => fieldform_field::outline_chain(doc, curve, ignore)
                 .map(|chain| chain.curves)
-                .unwrap_or_else(|_| vec![*curve]),
+                .unwrap_or_else(|_| vec![curve]),
         })
         .collect()
 }
@@ -646,6 +649,82 @@ pub(crate) struct LoopMemberDeleted {
     pub(crate) walled: Vec<NodeId>,
     /// The joints at the deleted curve's two ends that went with it.
     pub(crate) joints: usize,
+    /// The blocks that were built from the deleted curve itself -- a pipe along it, a sweep
+    /// carried along it, a loft through the loop it closed -- and let go of it, so they wait.
+    pub(crate) let_go: Vec<NodeId>,
+}
+
+/// Every block of `graph` built from `curve` lets go of it ([`Node::stop_building_on`]), in id
+/// order so the line that names them names them the same way each time. The blocks that did.
+fn let_go_of(graph: &mut Graph, curve: CurveId) -> Vec<NodeId> {
+    let mut ids: Vec<NodeId> = graph.nodes().map(|(id, _)| id).collect();
+    ids.sort_by_key(|id| id.raw());
+    ids.into_iter()
+        .filter(|id| graph.node_mut(*id).is_some_and(|node| node.stop_building_on(curve)))
+        .collect()
+}
+
+/// Deleting a curve that blocks are built from: the curve and its relations go, the points only
+/// it sat on go with it, and every block that was built from it **lets go and waits**.
+///
+/// **This was a refusal** -- "Line is used by Sweep — delete that first" -- because a block
+/// naming a curve that is not there does not evaluate, and a curve slot had no way of naming
+/// none. So the curve was stuck inside the block: it could not be deleted while the block read
+/// it, and it could not be taken out of the block either. A slot can be empty now
+/// ([`fieldform_scene::CurveSlot`]), so the delete does what was asked and the block is left
+/// where it is, with its numbers, waiting to be told which curve to build from instead.
+///
+/// `None` when something reads the curve in a way that has no empty state to go to -- a frame
+/// aimed along it, an end standing on it, an attractor drawn toward it -- or a block in another
+/// part reads it ([`readers_in_other_parts`] says why that one is refused rather than followed).
+/// The caller names what holds it.
+///
+/// Free of the app, as [`delete_row_commands`] is, and with the graph edit last for its reason.
+pub(crate) fn delete_held_curve_commands(
+    doc: &Document,
+    part: PartId,
+    id: CurveId,
+) -> Option<(Vec<Box<dyn fieldform_ops::Command>>, Graph, Vec<NodeId>)> {
+    if !readers_outside(doc, part, &[id]).is_empty() {
+        return None;
+    }
+    let before = doc.parts.get(&part)?.graph.clone();
+    let mut graph = before.clone();
+    // **A wall along an open chain follows what is left of it**, rather than letting go: the
+    // block names one curve of the chain and is built on the whole run, so when the one it names
+    // is the one deleted it is pointed at a neighbour -- the rule a loop's reader already has
+    // (`delete_loop_member_commands`). Only where there is a neighbour; a wall along this curve
+    // alone has nothing left to run along, and waits.
+    let chained: Vec<(NodeId, CurveId)> = graph
+        .nodes()
+        .filter(|(_, n)| n.outline().is_some_and(|o| o.is_wall() && o.curve() == Some(id)))
+        .filter_map(|(node, n)| {
+            let chain = fieldform_field::outline_chain(doc, id, n.aimed_by()).ok()?;
+            let next = chain.curves.iter().copied().find(|c| *c != id)?;
+            Some((node, next))
+        })
+        .collect();
+    for (node, next) in chained {
+        if let Some(outline) = graph.node_mut(node).and_then(Node::outline_mut) {
+            outline.slot_mut().fill(next);
+        }
+    }
+    let let_go = let_go_of(&mut graph, id);
+    if graph.nodes().any(|(_, n)| n.curves().contains(&id)) {
+        return None;
+    }
+    let mut commands = delete_curves_commands(doc, &[id]);
+    // The points it alone sat on, by the rule `delete_row_commands` gives.
+    let held: Vec<NodeId> = doc.curve(id).map(|c| c.sits_on().collect()).unwrap_or_default();
+    for node in held {
+        let read = graph.is_consumed(node);
+        let sat_on = doc.curves.iter().any(|(other, c)| *other != id && c.sits_on().any(|n| n == node));
+        if !read && !sat_on {
+            graph.remove(node);
+        }
+    }
+    commands.push(Box::new(SetPartGraph::new(part, before, graph.clone())));
+    Some((commands, graph, let_go))
 }
 
 /// Deleting one curve out of a loop that a block is built on: the curve and its relations go,
@@ -724,13 +803,13 @@ pub(crate) fn delete_loop_member_commands(
     let mut walled = Vec::new();
     let readers: Vec<NodeId> = graph
         .nodes()
-        .filter(|(_, n)| n.outline().is_some_and(|o| mates.contains(&o.curve())))
+        .filter(|(_, n)| n.outline().and_then(|o| o.curve()).is_some_and(|c| mates.contains(&c)))
         .map(|(node, _)| node)
         .collect();
     for node in readers {
         let Some(outline) = graph.node_mut(node).and_then(Node::outline_mut) else { continue };
-        if outline.curve() == id {
-            *outline.curve_mut() = next?;
+        if outline.curve() == Some(id) {
+            outline.slot_mut().fill(next?);
         }
         if let Outline::Closed { profile } = *outline {
             *outline = Outline::Wall {
@@ -742,8 +821,34 @@ pub(crate) fn delete_loop_member_commands(
             walled.push(node);
         }
     }
+    // **A loft through the loop lets go of it**: a loft's section has to close, and this loop no
+    // longer does, so the section leaves the list rather than staying to be refused -- which is
+    // what made a line of a lofted profile impossible to delete.
+    let mut let_go: Vec<NodeId> = Vec::new();
+    let lofts: Vec<NodeId> = graph
+        .nodes()
+        .filter(|(_, n)| matches!(n, Node::Loft { .. }))
+        .map(|(node, _)| node)
+        .collect();
+    for node in lofts {
+        if let Some(Node::Loft { sections, .. }) = graph.node_mut(node) {
+            let before = sections.len();
+            sections.retain(|s| !s.curve().is_some_and(|c| mates.contains(&c)));
+            if sections.len() != before {
+                let_go.push(node);
+            }
+        }
+    }
+    // And whatever was built from the deleted curve itself -- a pipe along it, a sweep carried
+    // along it -- lets go of it and waits (`delete_held_curve_commands` says why this is no
+    // longer a refusal).
+    for node in let_go_of(&mut graph, id) {
+        if !let_go.contains(&node) {
+            let_go.push(node);
+        }
+    }
     commands.push(Box::new(SetPartGraph::new(part, before, graph.clone())));
-    Some((commands, graph, LoopMemberDeleted { walled, joints }))
+    Some((commands, graph, LoopMemberDeleted { walled, joints, let_go }))
 }
 
 /// The commands that take a loop apart: every member's ends off their points, and the points

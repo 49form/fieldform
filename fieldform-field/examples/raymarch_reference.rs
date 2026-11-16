@@ -82,7 +82,7 @@ fn main() {
 
         let cage_node = graph.roots()[0];
         let pipe_node = graph.add(Node::Pipe {
-            curve: curve_id,
+            curve: curve_id.into(),
             radius: ParamRef::Literal(PIPE_RADIUS_MM),
         });
         graph.add(Node::Boolean {

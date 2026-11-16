@@ -785,10 +785,10 @@ mod tests {
                     corners: Default::default(),
                     rims: Default::default(),
                 },
-                8 if !needs_curve => Node::Pipe { curve: curve(&mut rng), radius: lit(1.0) },
+                8 if !needs_curve => Node::Pipe { curve: curve(&mut rng).into(), radius: lit(1.0) },
                 9 if !needs_curve => Node::Sweep {
                     outline: Outline::closed(curve(&mut rng)),
-                    spine: curve(&mut rng),
+                    spine: curve(&mut rng).into(),
                     section: crate::Section::Square,
                     law: Default::default(),
                     rims: Default::default(),
@@ -1156,7 +1156,7 @@ mod tests {
         let mut pipes = Vec::new();
         for name in ["Left", "Right"] {
             let mut graph = Graph::empty();
-            pipes.push(graph.add(Node::Pipe { curve: spine_id, radius: ParamRef::Literal(2.0) }));
+            pipes.push(graph.add(Node::Pipe { curve: spine_id.into(), radius: ParamRef::Literal(2.0) }));
             doc.add_part(Part {
                 id: PartId::new(),
                 name: name.into(),
@@ -1542,9 +1542,9 @@ mod tests {
         let line_id = line.id;
         doc.curves.insert(line_id, line);
         let here = graph_of(&mut doc, part)
-            .add(Node::Pipe { curve: line_id, radius: ParamRef::Literal(1.0) });
+            .add(Node::Pipe { curve: line_id.into(), radius: ParamRef::Literal(1.0) });
         let mut there = Graph::empty();
-        let elsewhere = there.add(Node::Pipe { curve: line_id, radius: ParamRef::Literal(1.0) });
+        let elsewhere = there.add(Node::Pipe { curve: line_id.into(), radius: ParamRef::Literal(1.0) });
         doc.add_part(Part {
             id: PartId::new(),
             name: "Other".into(),

@@ -124,7 +124,7 @@ impl App {
             (None, Some(name)) => {
                 let found = self.curve_or_profile_named(&name);
                 self.refresh_profiles();
-                match found.and_then(|id| self.profiles.key_of(id)) {
+                match found.and_then(|id| self.curve_ui.profiles.key_of(id)) {
                     Some(key) => Some((key, true)),
                     None => {
                         self.warn(format!(
@@ -258,11 +258,11 @@ impl App {
         }
         self.refresh_profiles();
         let row = self
-            .profiles
+            .curve_ui.profiles
             .key_of(comb.curve)
-            .and_then(|key| self.profiles.members(key).map(|m| (key, m.to_vec())));
+            .and_then(|key| self.curve_ui.profiles.members(key).map(|m| (key, m.to_vec())));
         match row {
-            Some((key, members)) => (members, !self.profiles.is_open(key), false),
+            Some((key, members)) => (members, !self.curve_ui.profiles.is_open(key), false),
             None => (vec![comb.curve], false, true),
         }
     }
@@ -287,7 +287,7 @@ impl App {
     fn comb_reads(&mut self, comb: &CurvatureComb) -> String {
         if comb.whole_loop {
             self.refresh_profiles();
-            if let Some(key) = self.profiles.key_of(comb.curve) {
+            if let Some(key) = self.curve_ui.profiles.key_of(comb.curve) {
                 return self.profile_label(key);
             }
         }
@@ -301,7 +301,7 @@ impl App {
             .comb_runs
             .drawn
             .as_ref()
-            .is_some_and(|(revision, combs, _)| *revision == self.curve_revision && *combs == self.doc.combs);
+            .is_some_and(|(revision, combs, _)| *revision == self.curve_ui.revision && *combs == self.doc.combs);
         if !fresh {
             let combs = self.doc.combs.clone();
             let mut readings = Vec::new();
@@ -311,7 +311,7 @@ impl App {
                 }
             }
             // The revision as it stands after the profiles were refreshed for the reading.
-            self.comb_runs.drawn = Some((self.curve_revision, combs, readings));
+            self.comb_runs.drawn = Some((self.curve_ui.revision, combs, readings));
         }
         let Some((_, _, readings)) = &self.comb_runs.drawn else { return Vec::new() };
         readings
@@ -320,7 +320,7 @@ impl App {
                 self.comb(*id).is_some_and(|c| {
                     c.part == self.active_part
                         && !c.hidden
-                        && !members.iter().all(|m| self.hidden_curves.contains(m))
+                        && !members.iter().all(|m| self.curve_ui.hidden.contains(m))
                 })
             })
             .map(|(id, _, reading)| (*id, reading.clone()))
@@ -342,7 +342,7 @@ impl App {
         // The dropdown's choices: every profile, then every curve.
         self.refresh_profiles();
         let mut choices: Vec<(String, fieldform_scene::CurveId, bool)> =
-            self.profiles.keys().into_iter().map(|key| (self.profile_label(key), key, true)).collect();
+            self.curve_ui.profiles.keys().into_iter().map(|key| (self.profile_label(key), key, true)).collect();
         let mut curves: Vec<(String, fieldform_scene::CurveId, bool)> =
             self.doc.curves.values().map(|k| (k.name.clone(), k.id, false)).collect();
         curves.sort_by(|a, b| a.0.cmp(&b.0));
@@ -360,7 +360,7 @@ impl App {
             .show_header(ui, |ui| {
                 // Hidden curves hide the comb too, and the eye says so rather than offering to
                 // show what cannot be shown.
-                let curve_hidden = !members.is_empty() && members.iter().all(|m| self.hidden_curves.contains(m));
+                let curve_hidden = !members.is_empty() && members.iter().all(|m| self.curve_ui.hidden.contains(m));
                 let showing = !before.hidden && !curve_hidden;
                 let icon = egui::RichText::new("\u{1f441}").color(if showing {
                     ui.visuals().strong_text_color()

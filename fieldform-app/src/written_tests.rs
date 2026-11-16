@@ -10,10 +10,10 @@ use crate::app_tests::{frame, headless_app};
 
 /// Types `line` and runs a frame, answering what the console said after it.
 fn run(app: &mut App, line: &str) -> Vec<(bool, String)> {
-    let before = app.console_log.len();
+    let before = app.console.log.len();
     app.run_command(line);
     frame(app, Vec::new());
-    app.console_log.iter().skip(before).map(|l| (l.ok, l.text.clone())).collect()
+    app.console.log.iter().skip(before).map(|l| (l.ok, l.text.clone())).collect()
 }
 
 /// Frames until the traced view has nothing stale and nothing compiling, or a bounded wait
@@ -37,7 +37,7 @@ fn settle(app: &mut App) -> bool {
 
 /// Whether the last `expect` passed, and what it said.
 fn last_expect(app: &App) -> (bool, String) {
-    let record = app.expect_results.last().expect("an expect ran");
+    let record = app.scripting.expect_results.last().expect("an expect ran");
     (record.verdict == expect::Verdict::Pass, record.said.clone())
 }
 
@@ -100,7 +100,7 @@ fn verify_measures_a_written_sphere_as_exact_and_a_raw_gyroid_as_overstating() {
     run(&mut app, "expression text=\"sqrt(x*x + y*y + z*z) - 10\" size=30,30,30 claim=distance 'ball'");
     let ball = app.part_graph().nodes().find_map(|(id, n)| matches!(n, Node::Expression { .. }).then_some(id)).unwrap();
     app.verify_written(ball);
-    let v = app.written_verdicts.get(&ball).cloned().expect("verified");
+    let v = app.written.verdicts.get(&ball).cloned().expect("verified");
     assert!(v.overstatement < 1e-6, "a written sphere never overstates: {v:?}");
     assert!(v.deviation < 1e-3, "a written sphere is a distance: {v:?}");
     assert_eq!(v.missing, 0);
@@ -109,7 +109,7 @@ fn verify_measures_a_written_sphere_as_exact_and_a_raw_gyroid_as_overstating() {
     run(&mut app, "expression text=\"sin(x * 36) * cos(y * 36) + sin(y * 36) * cos(z * 36) + sin(z * 36) * cos(x * 36) + 0.3\" size=30,30,30 'raw'");
     let raw = app.part_graph().nodes().filter_map(|(id, n)| matches!(n, Node::Expression { .. }).then_some(id)).find(|id| *id != ball).unwrap();
     app.verify_written(raw);
-    let v = app.written_verdicts.get(&raw).cloned().expect("verified");
+    let v = app.written.verdicts.get(&raw).cloned().expect("verified");
     assert!(v.overstatement > 1e-3, "a raw gyroid at k = 1 overstates: {v:?}");
     assert!(v.suggested.is_some_and(|k| k > 1.0), "and a divisor is suggested: {v:?}");
 }

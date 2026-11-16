@@ -93,7 +93,7 @@ pub(crate) fn field_id(command: &str) -> egui::Id {
 impl App {
     /// The rows the pending session's panel shows, in registry order, with what its block holds.
     pub(crate) fn panel_rows(&self) -> Vec<Row> {
-        let Some(session) = &self.session else { return Vec::new() };
+        let Some(session) = &self.tools.session else { return Vec::new() };
         let Some(node) = self.part_graph().node(session.block) else { return Vec::new() };
         let Ok(written) = echo::keys_of(node, &echo::Names { doc: &self.doc }) else { return Vec::new() };
         let held: Vec<(&'static str, String)> = written.keys.iter().chain(&written.after).cloned().collect();
@@ -115,7 +115,7 @@ impl App {
     /// expression (item 81 A9) and the echo must say what was typed: its source text, never the
     /// number it came to (§6.3).
     pub(crate) fn panel_confirm(&mut self, row: &Row, text: &str) -> Result<(), String> {
-        let Some(block) = self.session.as_ref().map(|s| s.block) else { return Ok(()) };
+        let Some(block) = self.tools.session.as_ref().map(|s| s.block) else { return Ok(()) };
         let text = text.trim();
         if text.is_empty() || text == row.text || text == row.shown() {
             return Ok(());
@@ -140,10 +140,10 @@ impl App {
     /// the plain keys this frame are not also taken as bindings -- `h` starting `height` must not
     /// hide the selection as well.
     pub(crate) fn panel_typed(&mut self, ctx: &egui::Context) -> bool {
-        if !self.floating_panel || self.session.is_none() || ctx.egui_wants_keyboard_input() {
+        if !self.tools.floating_panel || self.tools.session.is_none() || ctx.egui_wants_keyboard_input() {
             return false;
         }
-        if self.session.as_ref().is_some_and(|s| s.panel.typing.is_some()) {
+        if self.tools.session.as_ref().is_some_and(|s| s.panel.typing.is_some()) {
             return false;
         }
         let text: String = ctx.input(|i| {
@@ -161,7 +161,7 @@ impl App {
         if self.panel_rows().is_empty() {
             return false;
         }
-        let Some(session) = self.session.as_mut() else { return false };
+        let Some(session) = self.tools.session.as_mut() else { return false };
         session.panel.typing = Some(text);
         session.panel.begun = true;
         session.panel.error = None;
@@ -176,19 +176,19 @@ impl App {
         if rows.is_empty() {
             return;
         }
-        let Some(session) = self.session.as_mut() else { return };
+        let Some(session) = self.tools.session.as_mut() else { return };
         let typed = session.panel.typing.take();
         let at = session.panel.focus.min(rows.len() - 1);
         if let Some(text) = typed {
             let result = self.panel_confirm(&rows[at], &text);
-            if let Some(session) = self.session.as_mut() {
+            if let Some(session) = self.tools.session.as_mut() {
                 session.panel.error = result.err();
             }
         }
-        if let Some(session) = self.session.as_mut() {
+        if let Some(session) = self.tools.session.as_mut() {
             session.panel.focus = if back { (at + rows.len() - 1) % rows.len() } else { (at + 1) % rows.len() };
         }
-        let id = self.session.as_ref().map(|s| field_id(s.command.id));
+        let id = self.tools.session.as_ref().map(|s| field_id(s.command.id));
         if let Some(id) = id {
             self.egui_ctx.memory_mut(|m| m.surrender_focus(id));
         }
@@ -197,16 +197,16 @@ impl App {
     /// Draws the panel of the pending session, if there is one.
     pub(crate) fn tool_panel(&mut self, ctx: &egui::Context) {
         // Off, the block's own rows in the list are where its numbers are typed.
-        if !self.floating_panel {
+        if !self.tools.floating_panel {
             return;
         }
-        let Some(session) = self.session.as_mut() else { return };
+        let Some(session) = self.tools.session.as_mut() else { return };
         let mut panel = std::mem::take(&mut session.panel);
         let command = session.command;
         let block = session.block;
         let rows = self.panel_rows();
         if rows.is_empty() && panel.error.is_none() {
-            if let Some(session) = self.session.as_mut() {
+            if let Some(session) = self.tools.session.as_mut() {
                 session.panel = panel;
             }
             return;
@@ -314,18 +314,18 @@ impl App {
         if !middle_down {
             panel.scrub = None;
         }
-        if let Some(session) = self.session.as_mut() {
+        if let Some(session) = self.tools.session.as_mut() {
             session.panel = panel;
         }
         if let Some((row, value)) = scrubbed {
-            let result = self.set_block_keys(self.session.as_ref().map_or(NodeId::new(), |s| s.block), &Args::new().with(row.key, Value::Float(value)));
-            if let Some(session) = self.session.as_mut() {
+            let result = self.set_block_keys(self.tools.session.as_ref().map_or(NodeId::new(), |s| s.block), &Args::new().with(row.key, Value::Float(value)));
+            if let Some(session) = self.tools.session.as_mut() {
                 session.panel.error = result.err();
             }
         }
         if let Some((row, text)) = confirm {
             let result = self.panel_confirm(&row, &text);
-            if let Some(session) = self.session.as_mut() {
+            if let Some(session) = self.tools.session.as_mut() {
                 session.panel.error = result.err();
             }
         }

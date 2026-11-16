@@ -59,6 +59,11 @@ pub(crate) fn operand_refusal(
 ) -> Option<&'static str> {
     let taker = graph.node(consumer)?;
     let given = graph.node(candidate)?;
+    // A locked block goes nowhere new. One this block already reads is not new, so its own slot
+    // still shows it and can be handed it back.
+    if document.is_locked(candidate) && !graph.consumers_of(candidate).any(|reader| reader == consumer) {
+        return Some("it is locked, so no other block can use it; unlock it first");
+    }
     let is_point = matches!(given, Node::Point { .. });
     // By extent, not by kind: a lattice trimmed to a shell is bounded and a bare one is not, and
     // the compile asks the same question of a twist.
@@ -224,15 +229,15 @@ pub(crate) fn pair_candidates_in(graph: &Graph, made_at: &impl Fn(NodeId) -> u64
 /// that cycles is refused elsewhere rather than here.
 ///
 /// **Every remembered operand is lifted, and the first version of this lifted only the
-/// selection.** The distinction that matters is not `selected_body` against `boolean_a`: it is a
-/// tool's *memory* against a block's *own operand fields*. `boolean_a` and `boolean_b` are only
+/// selection.** The distinction that matters is not `selected_body` against `next.boolean_a`: it is a
+/// tool's *memory* against a block's *own operand fields*. `next.boolean_a` and `next.boolean_b` are only
 /// ever set as a seed — "point the boolean tool at what was just made", "the result becomes the
 /// next pair's first operand" — and never by the panel, which edits the `Node::Boolean`'s inputs
 /// directly. A seed is a guess about what somebody will reach for next, so it has to follow what
 /// they did to it; an operand field is a statement, and nothing here touches one.
 ///
 /// What leaving the seeds unlifted cost, reported with two screenshots: a pipe, then a pattern of
-/// it, then `boolean -u`. The pipe tool had pointed `boolean_b` at the raw `Pipe` node, the
+/// it, then `boolean -u`. The pipe tool had pointed `next.boolean_b` at the raw `Pipe` node, the
 /// pattern was built over it afterwards, and the union took the pipe the seed still named — so
 /// the pipe gained a second reader, left the pattern it was drawn inside, and the list came apart
 /// into a pipe, an empty pattern, a union and the sweep. Nothing had gone wrong with the nesting;

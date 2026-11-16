@@ -75,7 +75,7 @@ fn main() {
                 let Some(Node::Sweep { outline, spine, .. }) = graph.node(*node) else {
                     panic!("only sweeps are bound here")
                 };
-                let laid = fieldform_field::sweep_outline_section(&doc, outline, *spine, fieldform_field::PROFILE_TURN_DEGREES)
+                let laid = fieldform_field::sweep_outline_section(&doc, outline, spine.source().expect("a block that names its curve"), fieldform_field::PROFILE_TURN_DEGREES)
                     .expect("a section");
                 let rotation = fieldform_field::rotation_from_z(laid.normal);
                 let origin = laid.origin;
@@ -106,8 +106,8 @@ fn main() {
                 let Some(Node::Sweep { outline, spine, .. }) = graph.node(*node) else {
                     panic!("only sweeps' frames are bound here")
                 };
-                let path = doc.curves[spine].tessellate(TOLERANCE_MM);
-                (fieldform_field::sweep_frame(&doc, outline, *spine, &path).expect("a frame"), None)
+                let path = doc.curves[&spine.source().expect("a block that names its curve")].tessellate(TOLERANCE_MM);
+                (fieldform_field::sweep_frame(&doc, outline, spine.source().expect("a block that names its curve"), &path).expect("a frame"), None)
             }
             other => panic!("{other:?} is not bound by this example"),
         })

@@ -27,6 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::curve_slot::CurveSlot;
 use crate::graph::ParamRef;
 use crate::id::CurveId;
 
@@ -78,11 +79,15 @@ pub enum Outline {
     ///
     /// Names *one* curve of the loop, any of them; the loop is walked from it rather than
     /// stored. See `fieldform_field::profile_loop` for why.
-    Closed { profile: CurveId },
+    ///
+    /// A [`CurveSlot`], so the block can be there before its profile is: empty is the section
+    /// waiting to be told which curve, and what a block made with nothing to build on holds.
+    Closed { profile: CurveSlot },
     /// A curve given a thickness: the band of material along it.
     Wall {
-        /// Any curve of an open chain or of a closed loop, walked the same way.
-        curve: CurveId,
+        /// Any curve of an open chain or of a closed loop, walked the same way. Emptied, the
+        /// wall keeps its thickness, its side and its ends for the curve it is given next.
+        curve: CurveSlot,
         /// The whole thickness, in millimetres — not half of it, whichever side it is on.
         thickness: ParamRef,
         side: WallSide,
@@ -96,27 +101,53 @@ impl Outline {
     ///
     /// Offered so migrating a block that held a bare curve is a substitution.
     pub fn closed(profile: CurveId) -> Self {
-        Self::Closed { profile }
+        Self::Closed { profile: CurveSlot::filled(profile) }
     }
 
-    /// The curve this section is read from, whichever kind it is.
+    /// A section waiting to be told which curve it is: what a block made before its curves holds.
+    pub fn empty() -> Self {
+        Self::Closed { profile: CurveSlot::empty() }
+    }
+
+    /// The curve this section is read from, whichever kind it is -- `None` while the slot is
+    /// empty, which every reader has to answer for.
     ///
-    /// The whole of the reference an `Outline` creates. `Node::curves` is to go through this
-    /// once a block holds one, so that nothing else has to know a section can be a wall at all;
-    /// until then no block does, and the three that will still name their curve directly.
-    pub fn curve(&self) -> CurveId {
-        match self {
-            Outline::Closed { profile } => *profile,
-            Outline::Wall { curve, .. } => *curve,
-        }
+    /// The whole of the reference an `Outline` creates: `Node::curves` goes through this, so
+    /// nothing else has to know a section can be a wall at all.
+    pub fn curve(&self) -> Option<CurveId> {
+        self.slot().source()
     }
 
     /// The same, to be redirected when curves are renumbered — as a paste does.
-    pub fn curve_mut(&mut self) -> &mut CurveId {
+    pub fn curve_mut(&mut self) -> Option<&mut CurveId> {
+        self.slot_mut().source_mut()
+    }
+
+    /// The slot itself, whichever kind of section holds it.
+    pub fn slot(&self) -> &CurveSlot {
         match self {
             Outline::Closed { profile } => profile,
             Outline::Wall { curve, .. } => curve,
         }
+    }
+
+    /// The same, to be filled or emptied. The kind of section, and a wall's numbers, stay.
+    pub fn slot_mut(&mut self) -> &mut CurveSlot {
+        match self {
+            Outline::Closed { profile } => profile,
+            Outline::Wall { curve, .. } => curve,
+        }
+    }
+
+    /// This section reading `curve` instead, the same kind of section it was.
+    pub fn reading(mut self, curve: CurveId) -> Self {
+        self.slot_mut().fill(curve);
+        self
+    }
+
+    /// Whether the section is waiting to be told which curve it is.
+    pub fn is_empty(&self) -> bool {
+        self.slot().is_empty()
     }
 
     /// The numbers it carries, so they take part in parameter resolution like any other.
@@ -151,7 +182,7 @@ mod tests {
 
     fn wall(curve: CurveId) -> Outline {
         Outline::Wall {
-            curve,
+            curve: curve.into(),
             thickness: ParamRef::Literal(2.0),
             side: WallSide::Left,
             ends: WallEnds::Round,
@@ -164,9 +195,14 @@ mod tests {
     fn an_outline_names_its_curve_whichever_kind_it_is() {
         let (a, b) = (CurveId::new(), CurveId::new());
         for mut outline in [Outline::closed(a), wall(a)] {
-            assert_eq!(outline.curve(), a);
-            *outline.curve_mut() = b;
-            assert_eq!(outline.curve(), b, "a paste must be able to redirect it");
+            assert_eq!(outline.curve(), Some(a));
+            *outline.curve_mut().expect("filled") = b;
+            assert_eq!(outline.curve(), Some(b), "a paste must be able to redirect it");
+            // And emptied it names nothing, the same kind of section it was.
+            let was_wall = outline.is_wall();
+            outline.slot_mut().clear();
+            assert_eq!(outline.curve(), None);
+            assert!(outline.is_empty() && outline.is_wall() == was_wall);
         }
     }
 

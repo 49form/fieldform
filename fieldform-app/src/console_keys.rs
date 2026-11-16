@@ -593,6 +593,9 @@ pub const VERBS: &[Verb] = &[
     // passed every key through unread, so `hide target=x` hid whatever was selected instead.
     Verb { op: "view.toggle_visibility", keys: Keys::Declared { reads: &[switch("target")], not_read: &[] } },
     Verb { op: "view.show", keys: Keys::Declared { reads: &[switch("target")], not_read: &[] } },
+    // `lock target=Sphere_0` and `unlock target=Sphere_0`: the block by name, as `hide` takes it.
+    Verb { op: "block.lock", keys: Keys::Declared { reads: &[switch("target")], not_read: &[] } },
+    Verb { op: "block.unlock", keys: Keys::Declared { reads: &[switch("target")], not_read: &[] } },
     // `split body=Sphere by=Plane`: the body cut and what cuts it, both by name. Its halves are
     // blocks of kinds other verbs make, so it covers no field of its own; declared so a stray key
     // is refused like any other verb's, which until the registry's test found it it was not.
@@ -3036,7 +3039,7 @@ pub(crate) mod tests {
                 corners: fieldform_scene::Corners::Sharp,
             },
             Node::Extrude { rims: Default::default(),
-                outline: Outline::Wall { curve, thickness: lit(2.0), side: WallSide::Left, ends: WallEnds::Round },
+                outline: Outline::Wall { curve: curve.into(), thickness: lit(2.0), side: WallSide::Left, ends: WallEnds::Round },
                 sweep: fieldform_scene::Sweep::Normal,
                 start: lit(0.0),
                 height: lit(30.0),
@@ -3052,7 +3055,7 @@ pub(crate) mod tests {
                 rims: fieldform_scene::Rims { radius: lit(1.5), continuity: fieldform_scene::Continuity::Chamfer, at: fieldform_scene::RimEnds::End, second: Some(lit(0.5)) },
             },
             Node::Revolve {
-                outline: Outline::Wall { curve, thickness: lit(2.0), side: WallSide::Right, ends: WallEnds::Round },
+                outline: Outline::Wall { curve: curve.into(), thickness: lit(2.0), side: WallSide::Right, ends: WallEnds::Round },
                 frame: Frame::Along { curve },
                 angle: lit(360.0),
                 sides: AngleSides::Symmetric,
@@ -3060,7 +3063,7 @@ pub(crate) mod tests {
             },
             Node::Sweep { rims: fieldform_scene::Rims { radius: lit(1.5), continuity: fieldform_scene::Continuity::Chamfer, at: fieldform_scene::RimEnds::End, second: Some(lit(0.5)) },
                 outline: Outline::closed(curve),
-                spine: curve,
+                spine: curve.into(),
                 section: fieldform_scene::Section::Skewed,
                 // Every number of the law, off its default so the serializer writes it.
                 law: fieldform_scene::SweepLaw {
@@ -3073,7 +3076,7 @@ pub(crate) mod tests {
             },
             Node::Sweep { rims: Default::default(),
                 outline: Outline::closed(curve),
-                spine: curve,
+                spine: curve.into(),
                 section: fieldform_scene::Section::Square,
                 // The other taper, which writes `taper_draft` where the one above writes
                 // `taper_scale`: one field, two spellings on disk.
@@ -3083,12 +3086,12 @@ pub(crate) mod tests {
                 },
             },
             Node::Sweep { rims: Default::default(),
-                outline: Outline::Wall { curve, thickness: lit(1.0), side: WallSide::Left, ends: WallEnds::Round },
-                spine: curve,
+                outline: Outline::Wall { curve: curve.into(), thickness: lit(1.0), side: WallSide::Left, ends: WallEnds::Round },
+                spine: curve.into(),
                 section: fieldform_scene::Section::Parallel,
                 law: fieldform_scene::SweepLaw::default(),
             },
-            Node::Pipe { curve, radius: lit(3.0) },
+            Node::Pipe { curve: curve.into(), radius: lit(3.0) },
             Node::Loft { rims: fieldform_scene::Rims { radius: lit(1.5), continuity: fieldform_scene::Continuity::Chamfer, at: fieldform_scene::RimEnds::End, second: Some(lit(0.5)) },
                 sections: vec![Outline::closed(curve), Outline::closed(curve)],
                 spine: Some(curve),

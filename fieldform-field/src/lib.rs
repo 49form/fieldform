@@ -346,6 +346,22 @@ pub trait ScalarField: Send + Sync {
         None
     }
 
+    /// The value and the normal at `p` together, for a caller that wants both.
+    ///
+    /// The default asks twice, which is right for a field whose two answers share no work. A
+    /// field built on a search does not: a [`CageField`] reads its distance and its normal off
+    /// the one closest point, so asking separately walks the hierarchy twice for the same
+    /// place. A bake wants both at every sample, and the second walk was half of what it cost
+    /// (`fieldform-gpu/examples/cage_bake_cost.rs`).
+    ///
+    /// Must return exactly what [`distance`] and [`normal`] return.
+    ///
+    /// [`distance`]: ScalarField::distance
+    /// [`normal`]: ScalarField::normal
+    fn distance_and_normal(&self, p: Point3<f64>) -> (f64, Option<Vector3<f64>>) {
+        (self.distance(p), self.normal(p))
+    }
+
     /// Whether this field's magnitude is a distance or merely a bound on one.
     ///
     /// The default claims [`Normalization::Distance`], matching the default of `1.0` from
@@ -451,6 +467,11 @@ impl ScalarField for CageField {
 
     fn normal(&self, p: Point3<f64>) -> Option<Vector3<f64>> {
         Some(self.closest(p).normal)
+    }
+
+    fn distance_and_normal(&self, p: Point3<f64>) -> (f64, Option<Vector3<f64>>) {
+        let closest = self.closest(p);
+        (closest.signed_distance, Some(closest.normal))
     }
 
     // `interval` is deliberately left as the trait's default. A tighter bound is available

@@ -53,7 +53,7 @@ impl App {
             let _ = job.reply.send(fail(e));
             return;
         }
-        if self.agent_host.as_ref().is_some_and(|h| h.mode == super::server::HostMode::Attach) {
+        if self.agent_link.host.as_ref().is_some_and(|h| h.mode == super::server::HostMode::Attach) {
             let e = tool_error(
                 "not_available",
                 "a snapshot would move the camera of the person at this session; it is offered only to a session the agent started",
@@ -63,7 +63,7 @@ impl App {
         }
         // **A window nobody can see draws no frames**, and a still is a frame: waiting for one
         // would hold every call behind it until the window came back. Said instead.
-        if self.window_hidden {
+        if self.agent_link.window_hidden {
             let e = tool_error(
                 "not_available",
                 "the host's window is minimised, so it draws no frames to take a picture from; restore it and ask again",
@@ -82,10 +82,10 @@ impl App {
                 let _ = job.reply.send(fail(e));
                 return;
             }
-            Some(given) => match paths::resolve(given, &self.agent.roots, true, allow_overwrite) {
+            Some(given) => match paths::resolve(given, &self.agent_link.state.roots, true, allow_overwrite) {
                 Ok(real) => Some(real),
                 Err(paths::PathRefusal::Outside) => {
-                    let roots: Vec<String> = self.agent.roots.iter().map(|r| r.display().to_string()).collect();
+                    let roots: Vec<String> = self.agent_link.state.roots.iter().map(|r| r.display().to_string()).collect();
                     let mut e = tool_error(
                         "path_outside_root",
                         format!("`file={given}` is outside the folders an agent may use: {}", roots.join(", ")),
@@ -104,9 +104,9 @@ impl App {
             },
         };
         let keep = kept.is_some();
-        let dir = self.agent.roots.first().cloned().unwrap_or_else(std::env::temp_dir);
-        self.agent.snapshots += 1;
-        let path = kept.unwrap_or_else(|| dir.join(format!("snapshot-{}-{}.png", std::process::id(), self.agent.snapshots)));
+        let dir = self.agent_link.state.roots.first().cloned().unwrap_or_else(std::env::temp_dir);
+        self.agent_link.state.snapshots += 1;
+        let path = kept.unwrap_or_else(|| dir.join(format!("snapshot-{}-{}.png", std::process::id(), self.agent_link.state.snapshots)));
         // A kept file named twice would otherwise read back the last picture if this one failed.
         if keep {
             let _ = std::fs::remove_file(&path);
@@ -118,9 +118,9 @@ impl App {
             format!("snap file=\"{file}\" view={view}")
         };
         self.commit_session();
-        let was_running = std::mem::replace(&mut self.script_running, true);
+        let was_running = std::mem::replace(&mut self.scripting.running, true);
         let outcome = self.run_line(&line);
-        self.script_running = was_running;
+        self.scripting.running = was_running;
         if !outcome.ok || self.pending_snap.is_none() {
             let e = outcome.error.unwrap_or_else(|| {
                 tool_error("refused", outcome.said.unwrap_or_else(|| "the snapshot could not start".into()))
@@ -128,14 +128,14 @@ impl App {
             let _ = job.reply.send(fail(e));
             return;
         }
-        self.agent.snapshot = Some(SnapshotWait { job: job.reply, path, view, keep });
+        self.agent_link.state.snapshot = Some(SnapshotWait { job: job.reply, path, view, keep });
     }
 
     /// Answers the snapshot in flight once the verb has finished with it.
     pub(crate) fn finish_snapshot(&mut self) {
         // Minimised while a picture was in flight: the frame it waits for will not come.
-        if self.window_hidden
-            && let Some(wait) = self.agent.snapshot.take()
+        if self.agent_link.window_hidden
+            && let Some(wait) = self.agent_link.state.snapshot.take()
         {
             self.pending_snap = None;
             let e = tool_error("not_available", "the host's window was minimised before the picture was drawn; restore it and ask again");
@@ -145,10 +145,10 @@ impl App {
             }
             return;
         }
-        if self.agent.snapshot.is_none() || self.pending_snap.is_some() {
+        if self.agent_link.state.snapshot.is_none() || self.pending_snap.is_some() {
             return;
         }
-        let Some(wait) = self.agent.snapshot.take() else { return };
+        let Some(wait) = self.agent_link.state.snapshot.take() else { return };
         let bytes = std::fs::read(&wait.path).ok();
         if !wait.keep {
             let _ = std::fs::remove_file(&wait.path);

@@ -68,9 +68,11 @@ fn main() {
         let (profile, ignore) = match node {
             Node::Extrude { outline, sweep, .. } => (outline.curve(), sweep.source()),
             Node::Revolve { outline, frame, .. } => (outline.curve(), frame.curve_source()),
-            Node::Sweep { outline, spine, .. } => (outline.curve(), Some(*spine)),
+            Node::Sweep { outline, spine, .. } => (outline.curve(), spine.source()),
             _ => continue,
         };
+        // A block still waiting for its section has no loop to walk.
+        let Some(profile) = profile else { continue };
         let _ = fieldform_field::profile_loop(&doc, profile, ignore);
         walks += 1;
     }

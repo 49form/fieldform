@@ -150,10 +150,10 @@ fn ball_box(doc: &Document, graph: &Graph) -> (Point3<f64>, Point3<f64>) {
         .expect("a sweep");
     let _ = id;
     let Node::Sweep { outline, spine, .. } = node else { unreachable!() };
-    let curve = &doc.curves[spine];
+    let curve = &doc.curves[&spine.source().expect("a block that names its curve")];
     let offset =
-        fieldform_field::sweep_offset(doc, outline, *spine).unwrap_or_else(Vector3::zeros);
-    let world = fieldform_field::profile_loop_turning(doc, outline.curve(), 1.0, Some(*spine))
+        fieldform_field::sweep_offset(doc, outline, spine.source().expect("a block that names its curve")).unwrap_or_else(Vector3::zeros);
+    let world = fieldform_field::profile_loop_turning(doc, outline.curve().expect("a block that names its curve"), 1.0, Some(spine.source().expect("a block that names its curve")))
         .expect("a closed loop")
         .points;
     let (origin, _) = fieldform_field::plane_of(&world).expect("planar");
@@ -178,8 +178,8 @@ fn spine_of(doc: &Document, graph: &Graph) -> (Vec<Point3<f64>>, Vector3<f64>) {
         .expect("a sweep");
     let Node::Sweep { outline, spine, .. } = node else { unreachable!() };
     let offset =
-        fieldform_field::sweep_offset(doc, outline, *spine).unwrap_or_else(Vector3::zeros);
-    (doc.curves[spine].tessellate(0.02), offset)
+        fieldform_field::sweep_offset(doc, outline, spine.source().expect("a block that names its curve")).unwrap_or_else(Vector3::zeros);
+    (doc.curves[&spine.source().expect("a block that names its curve")].tessellate(0.02), offset)
 }
 
 /// The profile's reach, which is the padding the ball bound has to hide the mismatch behind.
@@ -189,7 +189,7 @@ fn section_reach(doc: &Document, graph: &Graph) -> f64 {
         .find(|(_, n)| matches!(n, Node::Sweep { .. }))
         .expect("a sweep");
     let Node::Sweep { outline, spine, .. } = node else { unreachable!() };
-    let world = fieldform_field::profile_loop_turning(doc, outline.curve(), 1.0, Some(*spine))
+    let world = fieldform_field::profile_loop_turning(doc, outline.curve().expect("a block that names its curve"), 1.0, Some(spine.source().expect("a block that names its curve")))
         .expect("a closed loop")
         .points;
     let (origin, _) = fieldform_field::plane_of(&world).expect("planar");
@@ -306,6 +306,6 @@ fn swept(
         .expect("a cubic"),
     );
     let mut graph = Graph::empty();
-    graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine, section, law: Default::default() });
+    graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine: spine.into(), section, law: Default::default() });
     (label, doc, graph, tolerance)
 }

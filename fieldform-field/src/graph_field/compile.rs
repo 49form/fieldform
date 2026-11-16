@@ -214,6 +214,25 @@ pub enum CompileError {
          so there is nothing to evaluate. Put a block in it, or take out what reads it."
     )]
     EmptySlot { node: fieldform_scene::NodeId, slot: usize },
+    /// A block made before the curve it is built from, or one whose curve was taken out.
+    ///
+    /// **An empty [`fieldform_scene::CurveSlot`], the refusal an empty operand gets one kind
+    /// over.** A pipe with no curve, a sweep short of its section or its path, an extrude or a
+    /// revolve with no profile, a loft still short of two sections: a block in the making.
+    /// `Graph::incomplete` names these beside the holed blocks, so the fold passes over them and
+    /// this is what a body that reads one is refused with.
+    #[error(
+        "a block is waiting for a curve \u{2014} node {node:?} has not been told which curve \
+         to build from, so there is nothing to evaluate. Pick one in the block."
+    )]
+    WaitsForCurve { node: fieldform_scene::NodeId },
+    /// A section asked for where it lies before it has been told which curve it is.
+    ///
+    /// The nodeless form of [`CompileError::WaitsForCurve`], for the readings that are handed an
+    /// outline and no block -- where a section lies, a loft's parts. The same hole, met by a
+    /// reader that cannot say whose it is.
+    #[error("a section has not been told which curve it is, so there is nothing to lay out")]
+    EmptySection,
     #[error(
         "a transform's scale resolved to {0}, but a scale must be positive: zero collapses          the body to nothing and a negative one turns it inside out"
     )]
@@ -443,8 +462,28 @@ impl std::ops::Index<&fieldform_scene::Operand> for Slots {
 /// block each time it is asked is a message nobody can act on. `met` stands in only if the hole
 /// has closed between the walk and the refusal, which nothing does.
 fn empty_slot(graph: &Graph, met: NodeId) -> CompileError {
-    let (node, slot) = graph.first_empty_operand().unwrap_or((met, 0));
-    CompileError::EmptySlot { node, slot }
+    if let Some((node, slot)) = graph.first_empty_operand() {
+        return CompileError::EmptySlot { node, slot };
+    }
+    // No operand is empty, so what made the body incomplete is a block waiting for a curve --
+    // the other hole `Graph::incomplete` reads. Named in id order for the reason above.
+    match graph.first_waiting_for_a_curve() {
+        Some(node) => CompileError::WaitsForCurve { node },
+        None => CompileError::EmptySlot { node: met, slot: 0 },
+    }
+}
+
+/// The curve a slot names, or the refusal a block waiting for one gets.
+///
+/// **A backstop, not the gate**: `Graph::incomplete` passes over a block with an empty slot
+/// before any arm below is reached, so this answers only if that walk and an arm ever disagree
+/// about what a block is built from -- with a refusal, which is the one thing a wrong assumption
+/// here can safely become.
+fn curve_in(
+    slot: &fieldform_scene::CurveSlot,
+    node: NodeId,
+) -> Result<fieldform_scene::CurveId, CompileError> {
+    slot.source().ok_or(CompileError::WaitsForCurve { node })
 }
 
 /// The open cage a body is, or reads, if any — so the refusal names the cage rather than a hole
@@ -1607,6 +1646,7 @@ impl GraphField {
                     }
                 }
                 Node::Pipe { curve, radius } => {
+                    let curve = &curve_in(curve, *id)?;
                     let c = document
                         .curves
                         .get(curve)
@@ -1675,6 +1715,7 @@ impl GraphField {
                     }
                 }
                 Node::Sweep { outline, spine, section, law, rims } => {
+                    let spine = &curve_in(spine, *id)?;
                     // The section is read exactly as an extrude reads its own -- the same walk,
                     // the same plane, the same bake -- with the spine left out of the walk,
                     // since a path that happens to touch the section is not part of it. From
@@ -1693,6 +1734,7 @@ impl GraphField {
                     };
                     let built: crate::Footprint = match outline {
                         fieldform_scene::Outline::Closed { profile } => {
+                            let profile = &curve_in(profile, *id)?;
                             let built =
                                 crate::Profile::in_plane(&laid.points, into, tolerance_mm.max(1e-6))
                                     .map_err(|e| CompileError::BadProfile(*profile, e))?;
@@ -1708,6 +1750,7 @@ impl GraphField {
                         // a thickness, carried the way a profile is, and baked by its rule --
                         // unless a law moves it, for the reason `wall_bakes_under` gives.
                         fieldform_scene::Outline::Wall { curve, thickness, side, ends } => {
+                            let curve = &curve_in(curve, *id)?;
                             let thickness =
                                 resolve(thickness).ok_or(CompileError::UnresolvedRadius)?;
                             let wall = wall_in_plane(
@@ -1823,6 +1866,7 @@ impl GraphField {
                     };
                     let built: crate::Footprint = match outline {
                         fieldform_scene::Outline::Closed { profile } => {
+                            let profile = &curve_in(profile, *id)?;
                             // Flat to within the tolerance the whole compile is working at,
                             // rather than a number of its own: a profile is as planar as
                             // anything else here is accurate, and a second tolerance would be a
@@ -1851,6 +1895,7 @@ impl GraphField {
                         // short into long -- see `Wall::baked`. Ruled 2026-10-02, on what
                         // walking a long chain at every reading was measured to cost.
                         fieldform_scene::Outline::Wall { curve, thickness, side, ends } => {
+                            let curve = &curve_in(curve, *id)?;
                             let thickness =
                                 resolve(thickness).ok_or(CompileError::UnresolvedRadius)?;
                             let wall = wall_in_plane(
@@ -2026,6 +2071,7 @@ impl GraphField {
                     let starts_at;
                     let built: crate::Footprint = match outline {
                         fieldform_scene::Outline::Closed { profile } => {
+                            let profile = &curve_in(profile, *id)?;
                             // The loop this curve is part of, exactly as an extrude reads it.
                             let world =
                                 crate::profile_loop(document, *profile, frame.curve_source())
@@ -2049,6 +2095,7 @@ impl GraphField {
                         // A thin revolve: the chain laid in the half-plane by the map a
                         // profile is laid by, and given its thickness there.
                         fieldform_scene::Outline::Wall { curve, thickness, side, ends } => {
+                            let curve = &curve_in(curve, *id)?;
                             let chain =
                                 crate::outline_chain(document, *curve, frame.curve_source())
                                     .map_err(|e| CompileError::BadLoop(*curve, e))?;

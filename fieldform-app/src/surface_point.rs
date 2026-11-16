@@ -454,7 +454,7 @@ impl App {
     /// cannot loop, and the solve compiles each body on its own.
     pub(crate) fn refresh_surface_points(&mut self) -> bool {
         if self.doc.surface_points.is_empty() {
-            self.surface_point_states.clear();
+            self.surface_points.states.clear();
             return false;
         }
         let mut moved = false;
@@ -462,11 +462,11 @@ impl App {
             let Some(record) = self.doc.surface_points.get(&id).copied() else { continue };
             let Some(graph) = self.graph_holding(id).cloned() else {
                 // The block is gone and the record waits for an undo to bring it back.
-                self.surface_point_states.remove(&id);
+                self.surface_points.states.remove(&id);
                 continue;
             };
             if !record.live {
-                self.surface_point_states.remove(&id);
+                self.surface_points.states.remove(&id);
                 continue;
             }
             if reads_itself(&self.doc, &graph, id) {
@@ -484,7 +484,7 @@ impl App {
             let stored = record.solved.and(at);
             match solve_surface_point(&self.doc, &graph, &record, stored, &mut self.leaves) {
                 Ok(found) => {
-                    self.surface_point_states.insert(
+                    self.surface_points.states.insert(
                         id,
                         PointState { error: None, warning: found.warning.clone(), crossing: found.crossing },
                     );
@@ -494,7 +494,7 @@ impl App {
                     }
                 }
                 Err(why) => {
-                    let state = self.surface_point_states.entry(id).or_default();
+                    let state = self.surface_points.states.entry(id).or_default();
                     state.error = Some(format!("{why} — it stays where it last stood"));
                     state.warning = None;
                 }
@@ -524,7 +524,7 @@ impl App {
         if let Some(record) = self.doc.surface_points.get_mut(&id) {
             record.live = false;
         }
-        self.surface_point_states.remove(&id);
+        self.surface_points.states.remove(&id);
         let name = self.body_label_in(graph, id);
         self.say(format!("{name} is now fixed — the body it stood on is placed on it"));
     }
@@ -631,7 +631,7 @@ impl App {
                 return;
             }
         };
-        self.pending_curve = None;
+        self.curve_ui.pending = None;
         let graph = self.part_graph().clone();
         // A point made by a click stands where it was clicked from the start, so the first solve
         // takes the wall there and not the first one along the line.
@@ -936,25 +936,25 @@ impl App {
     /// The body of `id` made ready to be asked, kept for the length of a gesture. `None` when `id`
     /// is not a live point on a surface, or its body cannot be asked.
     fn slide_for(&mut self, id: NodeId, grabbed: Option<Graph>) -> Option<&mut Slide> {
-        if self.slide.as_ref().is_none_or(|s| s.point != id) {
+        if self.surface_points.slide.as_ref().is_none_or(|s| s.point != id) {
             let record = self.doc.surface_points.get(&id).copied().filter(|r| r.live)?;
             let graph = self.part_graph().clone();
             let asked = ask(&self.doc, &graph, &record, &mut self.leaves).ok()?;
-            self.slide = Some(Slide { point: id, before: record, asked, grabbed, moved: false });
+            self.surface_points.slide = Some(Slide { point: id, before: record, asked, grabbed, moved: false });
         }
-        self.slide.as_mut()
+        self.surface_points.slide.as_mut()
     }
 
     /// Forgets the body a gesture was asking. Called when the gesture ends, however it ends.
     pub(crate) fn end_slide(&mut self) {
-        self.slide = None;
+        self.surface_points.slide = None;
     }
 
     /// Forgets the body a gesture on `id` was asking, and puts back the record as the gesture
     /// found it: the answer the instants wrote goes back with the graph, or a plane on the point
     /// would stay turned the way the abandoned drag left it until the next solve.
     pub(crate) fn cancel_slide(&mut self, id: NodeId) {
-        if let Some(slide) = self.slide.take_if(|s| s.point == id)
+        if let Some(slide) = self.surface_points.slide.take_if(|s| s.point == id)
             && let Some(record) = self.doc.surface_points.get_mut(&id)
         {
             *record = slide.before;
@@ -978,7 +978,7 @@ impl App {
     /// Shows a point slid to `at`, facing `normal`, before anything is committed: its record's answer
     /// is written so a plane on it turns with the surface this instant.
     fn show_slid(&mut self, id: NodeId, at: Point3<f64>, normal: Vector3<f64>) {
-        let Some(slide) = self.slide.as_mut().filter(|s| s.point == id) else { return };
+        let Some(slide) = self.surface_points.slide.as_mut().filter(|s| s.point == id) else { return };
         slide.moved = true;
         let first_across = match slide.before.guide {
             Guide::Ray { along, .. } => across(along),
@@ -1002,13 +1002,13 @@ impl App {
     /// The dot's drag, continued: the surface of its own body under the cursor, when there is one.
     /// Over another body, or over nothing, the point waits where it is.
     pub(crate) fn continue_surface_point_grab(&mut self, aspect: f32, rect: egui::Rect, pos: egui::Pos2) {
-        let Some(id) = self.slide.as_ref().filter(|s| s.grabbed.is_some()).map(|s| s.point) else { return };
+        let Some(id) = self.surface_points.slide.as_ref().filter(|s| s.grabbed.is_some()).map(|s| s.point) else { return };
         let Some(hit) = self.normal_axis_landing(aspect, rect, pos) else { return };
-        let on_body = self.slide.as_ref().is_some_and(|s| s.asked.holds(hit));
+        let on_body = self.surface_points.slide.as_ref().is_some_and(|s| s.asked.holds(hit));
         if !on_body {
             return;
         }
-        let Some((at, normal)) = self.slide.as_ref().and_then(|s| s.asked.nearest(hit)) else { return };
+        let Some((at, normal)) = self.surface_points.slide.as_ref().and_then(|s| s.asked.nearest(hit)) else { return };
         self.show_slid(id, at, normal);
         let mut graph = self.part_graph().clone();
         if let Some(Node::Point { at: slot }) = graph.node_mut(id) {
@@ -1024,7 +1024,7 @@ impl App {
     /// The dot's drag, ended: where it was left becomes the question, as one undo entry. A press
     /// that never moved it commits nothing.
     pub(crate) fn end_surface_point_grab(&mut self) {
-        let Some(slide) = self.slide.as_ref().filter(|s| s.grabbed.is_some()) else { return };
+        let Some(slide) = self.surface_points.slide.as_ref().filter(|s| s.grabbed.is_some()) else { return };
         let (id, moved) = (slide.point, slide.moved);
         let Some(before_graph) = slide.grabbed.clone() else { return };
         if !moved {
@@ -1043,7 +1043,7 @@ impl App {
 
     /// The dot's drag, abandoned: everything back where the press found it.
     pub(crate) fn cancel_surface_point_grab(&mut self) {
-        let Some(slide) = self.slide.take().filter(|s| s.grabbed.is_some()) else { return };
+        let Some(slide) = self.surface_points.slide.take().filter(|s| s.grabbed.is_some()) else { return };
         if let Some(record) = self.doc.surface_points.get_mut(&slide.point) {
             *record = slide.before;
         }
@@ -1062,7 +1062,7 @@ impl App {
     pub(crate) fn surface_point_dragged(&mut self, id: NodeId, moved: Point3<f64>, before_graph: Graph) -> bool {
         let Some(now) = self.doc.surface_points.get(&id).copied().filter(|r| r.live) else { return false };
         // The record as the gesture found it, since the instants in between wrote its answer.
-        let record = match self.slide.as_ref().filter(|s| s.point == id) {
+        let record = match self.surface_points.slide.as_ref().filter(|s| s.point == id) {
             Some(slide) => slide.before,
             None => now,
         };
@@ -1202,7 +1202,7 @@ impl App {
             }
         }
 
-        let state = self.surface_point_states.get(&id).cloned().unwrap_or_default();
+        let state = self.surface_points.states.get(&id).cloned().unwrap_or_default();
         let mut step_to: Option<isize> = None;
         if record.live
             && let Some((which, of)) = state.crossing
@@ -1279,8 +1279,8 @@ impl App {
         // **One history entry per gesture**, as an axis's numbers are: the record before the first
         // change is kept, and the entry is written when a frame passes with no change and no button
         // held.
-        if touched && self.surface_point_edit_before.is_none() {
-            self.surface_point_edit_before = Some((id, record));
+        if touched && self.surface_points.edit_before.is_none() {
+            self.surface_points.edit_before = Some((id, record));
         }
         let settled = !touched && !ui.input(|i| i.pointer.any_down());
         if edited != record {
@@ -1291,7 +1291,7 @@ impl App {
         let commit = if stepped && edited != record {
             Some(record)
         } else if settled {
-            self.surface_point_edit_before.take().filter(|(p, _)| *p == id).map(|(_, before)| before)
+            self.surface_points.edit_before.take().filter(|(p, _)| *p == id).map(|(_, before)| before)
         } else {
             None
         };
@@ -1312,7 +1312,7 @@ impl App {
             if !self.is_visible(*id) {
                 continue;
             }
-            let state = self.surface_point_states.get(id);
+            let state = self.surface_points.states.get(id);
             let visuals = painter.ctx().global_style().visuals.clone();
             let selected = self.selected_body == Some(*id);
             let colour = match state {
@@ -1870,14 +1870,14 @@ mod tests {
         app.run_command("set spot.u=500");
         crate::app_tests::frame(&mut app, Vec::new());
         assert_eq!(position(&app, spot), before, "an error never moves a point");
-        let why = app.surface_point_states.get(&spot).and_then(|s| s.error.clone()).expect("it says why");
+        let why = app.surface_points.states.get(&spot).and_then(|s| s.error.clone()).expect("it says why");
         assert!(why.contains("U 500"), "{why}");
 
         app.run_command("param name=across value=7");
         app.run_command("set spot.u=across");
         crate::app_tests::frame(&mut app, Vec::new());
         assert!((position(&app, spot).x - 7.0).abs() < 1e-3, "{}", position(&app, spot));
-        assert!(app.surface_point_states.get(&spot).is_some_and(|s| s.error.is_none()), "the error clears");
+        assert!(app.surface_points.states.get(&spot).is_some_and(|s| s.error.is_none()), "the error clears");
         app.run_command("param name=across value=11");
         crate::app_tests::frame(&mut app, Vec::new());
         assert!((position(&app, spot).x - 11.0).abs() < 1e-3, "{}", position(&app, spot));
@@ -1907,7 +1907,7 @@ mod tests {
         crate::app_tests::frame(&mut app, Vec::new());
         let record = app.doc.surface_points.get(&spot).copied().expect("a record");
         assert!(!record.live, "fixed where it stands");
-        assert!(app.console_log.iter().any(|l| l.text.contains("is now fixed")), "and it says why");
+        assert!(app.console.log.iter().any(|l| l.text.contains("is now fixed")), "and it says why");
         let before = position(&app, spot);
         app.run_command("live target=spot");
         crate::app_tests::frame(&mut app, Vec::new());
@@ -1935,7 +1935,7 @@ mod tests {
         crate::app_tests::frame(&mut app, Vec::new());
         assert!((position(&app, spot) - Point3::new(8.0, 2.0, 5.0)).norm() < 1e-3, "{}", position(&app, spot));
         assert!(matches!(app.doc.surface_points[&spot].guide, Guide::Ray { .. }), "a ray stays a ray");
-        assert!(app.slide.is_none(), "the gesture's body is let go");
+        assert!(app.surface_points.slide.is_none(), "the gesture's body is let go");
         app.run_command("undo");
         crate::app_tests::frame(&mut app, Vec::new());
         assert!((position(&app, spot) - Point3::new(5.0, -3.0, 5.0)).norm() < 1e-3, "{}", position(&app, spot));
@@ -1952,11 +1952,11 @@ mod tests {
         app.grab_surface_point(dot);
         app.end_surface_point_grab();
         assert_eq!(app.stack.history().0.len(), entries, "a click is not an edit");
-        assert!(app.slide.is_none());
+        assert!(app.surface_points.slide.is_none());
 
         app.grab_surface_point(dot);
         for x in [2.0, 4.0, 6.0] {
-            let Some(slide) = app.slide.as_ref() else { panic!("a gesture") };
+            let Some(slide) = app.surface_points.slide.as_ref() else { panic!("a gesture") };
             let (at, normal) = slide.asked.nearest(Point3::new(x, 1.0, 9.0)).expect("on the body");
             app.show_slid(dot, at, normal);
             let mut graph = app.part_graph().clone();

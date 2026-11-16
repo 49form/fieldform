@@ -771,7 +771,7 @@ impl App {
         ui: &mut egui::Ui,
         id: NodeId,
         outline: fieldform_scene::Outline,
-        spine: CurveId,
+        spine: fieldform_scene::CurveSlot,
         section: fieldform_scene::Section,
         law: fieldform_scene::SweepLaw,
         rims: fieldform_scene::Rims,
@@ -800,29 +800,15 @@ impl App {
             .doc
             .curves
             .iter()
-            .filter(|(cid, _)| **cid != section_curve)
+            .filter(|(cid, _)| Some(**cid) != section_curve)
             .map(|(cid, c)| (*cid, c.name.clone()))
             .collect();
         curves.sort_by_key(|(cid, _)| cid.raw());
         let mut chosen = spine;
         let offered = self.curve_choices(&curves);
-        let shown = self.shown_label(&offered, spine, "missing");
-        ui.horizontal(|ui| {
-            row_label(ui, "Spine:");
-            if let Some(picked) = self.reference_field(
-                ui,
-                (id, "sweep_spine"),
-                chosen,
-                &shown,
-                &offered,
-                RefKind::Curve,
-                DropsFrom::curve(|c| c),
-            ) {
-                chosen = picked;
-            }
-        });
-        // The spine itself, under the row that names it (`notebook-spec.md` §7.1, §17).
-        self.host_nested_curve(ui, chosen);
+        // The one curve row every block has: the path may be emptied as the section may, and the
+        // spine itself is drawn under the row that names it (`notebook-spec.md` §7.1, §17).
+        self.curve_slot_row(ui, "Spine:", (id, "sweep_spine"), &mut chosen, &offered, "missing");
         // **The cost, said where the curve is chosen.** A sweep divides its value by
         // `1 / (1 - k r)` to stay a lower bound, and the tracer takes that many times
         // the steps. Measured by `fieldform-gpu/examples/sweep_cost.rs`: a 270 mm glyph
@@ -835,9 +821,14 @@ impl App {
         // **Not where the section reads in its tube** (`sweep-spec.md` §4): a square section
         // under the plain law, round a path in one plane, reads its walls truly however the
         // path bends, so there is no factor to state and no crawl to explain.
-        let stretch = fieldform_field::sweep_stretch(&self.doc, &new_outline, chosen, &law);
-        let in_its_tube =
-            fieldform_field::sweep_reads_true(&self.doc, &new_outline, chosen, &section, &law);
+        // Nothing to state while the sweep waits for its path: there is no bend to read short on.
+        let (stretch, in_its_tube) = match chosen.source() {
+            Some(path) => (
+                fieldform_field::sweep_stretch(&self.doc, &new_outline, path, &law),
+                fieldform_field::sweep_reads_true(&self.doc, &new_outline, path, &section, &law),
+            ),
+            None => (1.0, true),
+        };
         if stretch > 1.05 && !in_its_tube {
             ui.horizontal(|ui| {
                 row_label(ui, "");
@@ -2318,7 +2309,13 @@ impl App {
     }
 
     /// The Pipe block: the curve it sweeps, and a radius that is one number or a ramp.
-    fn pipe_controls(&mut self, ui: &mut egui::Ui, id: NodeId, curve: CurveId, radius: ParamRef) {
+    fn pipe_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: NodeId,
+        curve: fieldform_scene::CurveSlot,
+        radius: ParamRef,
+    ) {
         // Which curve it sweeps is an input of the pipe, editable here — the same
         // shape a boolean's two operands take. Sweeping a different curve is a change
         // to this block, not a reason to delete it and make another.
@@ -2331,23 +2328,9 @@ impl App {
         curves.sort_by_key(|(id, _)| id.raw());
         let mut chosen = curve;
         let offered = self.curve_choices(&curves);
-        let shown = self.shown_label(&offered, curve, "missing");
-        ui.horizontal(|ui| {
-            row_label(ui, "Curve:");
-            if let Some(picked) = self.reference_field(
-                ui,
-                (id, "pipe_curve"),
-                chosen,
-                &shown,
-                &offered,
-                RefKind::Curve,
-                DropsFrom::curve(|c| c),
-            ) {
-                chosen = picked;
-            }
-        });
-        // The curve itself, under the row that names it (`notebook-spec.md` §7.1, §17).
-        self.host_nested_curve(ui, chosen);
+        // The one curve row every block has, with the curve itself drawn under it
+        // (`notebook-spec.md` §7.1, §17).
+        self.curve_slot_row(ui, "Curve:", (id, "pipe_curve"), &mut chosen, &offered, "missing");
         // **The same switch an offset's distance has**, because it is the same
         // question: one number, or a number that varies through space. Backlog item 2,
         // and the third socket `ramp-decision.md` said each further consumer would have
@@ -2371,7 +2354,11 @@ impl App {
                 .clicked()
                 && driver.is_none()
             {
-                self.drive_pipe(id, curve);
+                // A ramp is laid along the curve, so a pipe waiting for one has nowhere to lay it.
+                match curve.source() {
+                    Some(curve) => self.drive_pipe(id, curve),
+                    None => self.warn("That pipe has no curve to vary along"),
+                }
             }
         });
         if let Some(choice) = self.pick_driver(ui, "pipe_driver", driver) {

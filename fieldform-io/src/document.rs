@@ -1096,7 +1096,7 @@ mod tests {
         let cage_node = part.graph.roots()[0];
         let other = part.graph.add(Node::Cage(second));
         let pipe = part.graph.add(Node::Pipe {
-            curve: curve_id,
+            curve: curve_id.into(),
             radius: ParamRef::Literal(2.0),
         });
         let cut = part.graph.add(Node::Boolean {
@@ -1592,7 +1592,7 @@ mod tests {
             fieldform_scene::NodeMeta {
                 name: Some("left bracket".into()),
                 hidden: true,
-                shown: false,
+                ..Default::default()
             },
         );
         let back = round_trip(&doc);
@@ -2060,7 +2060,7 @@ mod tests {
     }
 
     fn pipe(graph: &mut fieldform_scene::Graph, curve: CurveId) -> NodeId {
-        graph.add(Node::Pipe { curve, radius: ParamRef::Literal(1.0) })
+        graph.add(Node::Pipe { curve: curve.into(), radius: ParamRef::Literal(1.0) })
     }
 
     /// A two-point line, put in `doc`.

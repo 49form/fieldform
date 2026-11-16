@@ -284,6 +284,32 @@
         );
     }
 
+    /// Half the cells is an eighth of the samples, which is what makes a band worth making on
+    /// the way to the settled one; where half is the draft's own 32 cells there is nothing to gain.
+    #[test]
+    fn a_settled_bake_is_preceded_by_one_at_half_its_cells_unless_that_is_the_draft_again() {
+        assert_eq!(stand_in_cells(192), Some(96), "the top two rungs");
+        assert_eq!(stand_in_cells(128), Some(64), "Balanced");
+        assert_eq!(stand_in_cells(256), Some(128), "a settled mesh");
+        assert_eq!(stand_in_cells(64), None, "Fast: half is the draft");
+        assert_eq!(stand_in_cells(DRAFT_BAKE_RESOLUTION), None, "a draft has nothing before it");
+    }
+
+    /// Five bodies: five half-way bands, then five settled ones. The view is drawn again when
+    /// the fifth and the tenth arrive, however they are grouped by the frames that find them.
+    #[test]
+    fn the_view_is_drawn_again_as_each_stage_of_bands_is_all_in_and_not_between() {
+        assert_eq!(stages_after(&[5, 5], 3), (vec![2, 5], false));
+        assert_eq!(stages_after(&[2, 5], 2), (vec![5], true));
+        assert_eq!(stages_after(&[5], 4), (vec![1], false));
+        assert_eq!(stages_after(&[1], 1), (vec![], true));
+        // Two frames' worth found at once: the first stage ended among them.
+        assert_eq!(stages_after(&[5, 5], 7), (vec![3], true));
+        // Nothing new, nothing to draw; and a worker that sent more than it owed is not a panic.
+        assert_eq!(stages_after(&[5, 5], 0), (vec![5, 5], false));
+        assert_eq!(stages_after(&[2], 3), (vec![], true));
+    }
+
     /// **A band in flight is stopped only when its geometry has moved.** Two rounds of this cost
     /// the owner an afternoon: first the settled bake blocked the interface, then stopping it on
     /// every invalidation meant a scene touched every few seconds never sharpened at all. The

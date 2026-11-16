@@ -45,6 +45,11 @@ repository = "https://github.com/49form/fieldform"
 
 [profile.release]
 debug = true
+# The debug info goes in a file beside the executable rather than inside it. Windows always did
+# this (the `.pdb` the release never ships), so the setting changes nothing there; on Linux the
+# default is to embed it, and the application came out at 740 MB, of which 48 MB was program.
+# Kept rather than stripped, so a crash still names its file and line on the machine that built it.
+split-debuginfo = "packed"
 overflow-checks = true
 # Do not add `trim-paths` here: it is still unstable in this cargo (1.97.1) and the manifest is
 # rejected outright, so adding it breaks every build rather than only the release. A dependency's
@@ -120,6 +125,9 @@ serde_json = "1.0"
 static_assertions = "1"
 strum = { version = "0.28", features = ["derive"] }
 rfd = "0.15"
+# Linux only: asks the session bus whether a file chooser is there before one is opened. Already
+# in the tree under rfd, at the same major version; this adds only its blocking interface.
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 thiserror = "2"
 tobj = "4.0"
 # OpenCASCADE, for STEP import. LGPL-2.1 with a header exception — see the import design note

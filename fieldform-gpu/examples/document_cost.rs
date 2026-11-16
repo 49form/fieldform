@@ -66,7 +66,7 @@ fn main() {
                 let timing = std::time::Instant::now();
                 let found = fieldform_field::profile_loop_turning(
                     &doc,
-                    section.curve(),
+                    section.curve().expect("a section that names its curve"),
                     fieldform_field::PROFILE_TURN_DEGREES,
                     *spine,
                 );
@@ -112,7 +112,7 @@ fn main() {
                         .map(|o| {
                             fieldform_field::profile_loop_turning(
                                 &doc,
-                                o.curve(),
+                                o.curve().expect("a section that names its curve"),
                                 fieldform_field::PROFILE_TURN_DEGREES,
                                 *spine,
                             )
@@ -180,6 +180,7 @@ fn main() {
                 }
                 fieldform_gpu::CurveUse::Frame(node) => match graph.node(node) {
                     Some(Node::Sweep { outline, spine, .. }) => {
+                        let spine = &spine.source().expect("a sweep that names its path");
                         let path = doc.curves[spine].tessellate(fieldform_field::DEFAULT_TOLERANCE_MM);
                         (
                             fieldform_field::sweep_frame(&doc, outline, *spine, &path)
@@ -210,18 +211,20 @@ fn main() {
                 fieldform_gpu::CurveUse::Profile(node) => {
                     let (curve, ignore) = match graph.node(node) {
                         Some(Node::Extrude { outline, sweep, .. }) => (outline.curve(), sweep.source()),
-                        Some(Node::Sweep { outline, spine, .. }) => (outline.curve(), Some(*spine)),
+                        Some(Node::Sweep { outline, spine, .. }) => (outline.curve(), spine.source()),
                         Some(Node::Revolve { outline, frame, .. }) => (outline.curve(), frame.curve_source()),
                         _ => unimplemented!("this example reads the profiles of extrudes, sweeps and revolves"),
                     };
                     let turn = fieldform_field::PROFILE_TURN_DEGREES;
+                    let curve = curve.expect("a section that names its curve");
                     let world = fieldform_field::profile_loop_turning(&doc, curve, turn, ignore)
                         .expect("a closed loop")
                         .points;
                     let numbers = |r: &ParamRef| r.resolve(&|id| doc.parameter_value(id));
                     let (origin, rotation) = match graph.node(node) {
                         Some(Node::Sweep { outline, spine, .. }) => {
-                            let laid = fieldform_field::sweep_outline_section(&doc, outline, *spine, turn)
+                            let spine = spine.source().expect("a sweep that names its path");
+                            let laid = fieldform_field::sweep_outline_section(&doc, outline, spine, turn)
                                 .expect("the section lays out");
                             (laid.origin.coords, fieldform_field::rotation_from_z(laid.normal))
                         }

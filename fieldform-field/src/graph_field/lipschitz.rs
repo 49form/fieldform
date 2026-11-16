@@ -693,15 +693,20 @@ pub fn value_scale_with(
         // A rim's bound moves no faster than the readings it joins (`Rim::join`), so it costs
         // no steps the sweep did not.
         Node::Sweep { outline, spine, section, law, rims: _ }
-            if super::sweep_reads_true(document, outline, *spine, section, law) =>
+            if spine
+                .source()
+                .is_some_and(|spine| super::sweep_reads_true(document, outline, spine, section, law)) =>
         {
             1.0
         }
         // A held section's reading is shortened by its lean as well as divided by its stretch
         // (`Swept::distance`), and the shading puts both back: see `sweep_lean`.
         Node::Sweep { outline, spine, section, .. } => {
+            // A sweep still waiting for its path leans by nothing: there is no reading to shorten.
             own_divisor(document, graph, id, node, morph_divisors)
-                / super::sweep_lean(document, outline, *spine, section)
+                / spine
+                    .source()
+                    .map_or(1.0, |spine| super::sweep_lean(document, outline, spine, section))
         }
         _ => own_divisor(document, graph, id, node, morph_divisors),
     })
@@ -793,7 +798,9 @@ pub(crate) fn own_divisor(
             Node::Lattice { .. } => driven_lattice_divisor(document, graph, id),
             // A sweep divides by the convergence of its section planes on the inside of its
             // tightest bend, so it costs steps the way the attractor below does.
-            Node::Sweep { outline, spine, law, .. } => sweep_stretch(document, outline, *spine, law),
+            Node::Sweep { outline, spine, law, .. } => {
+                spine.source().map_or(1.0, |spine| sweep_stretch(document, outline, spine, law))
+            }
             // A loft divides by its interpolation's rate and its centerline's bend together,
             // so it costs steps the way a sweep does. One for a loft that cannot be built,
             // which the compile refuses by name.

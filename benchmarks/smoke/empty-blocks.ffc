@@ -1,0 +1,78 @@
+# Blocks made before what they are built from, and curves taken back out of blocks.
+#
+# Run with:
+#   fieldform --run benchmarks/smoke/empty-blocks.ffc --keep-going --report empty-blocks.json --exit
+# (keep-going, because the refusals are part of the test.) Exit code 0 when every expect passed.
+#
+# A block that needs something which is not there yet is made with its slot empty: it is in the
+# list, it is not drawn, and it is drawn once the slot is filled. A curve a block is built from
+# can be deleted, or taken out, and the block is left waiting rather than refusing the delete.
+
+# --- an empty document: the blocks that read bodies are made with no body to read. First, so
+# that what they wait for is a body and not one of the waiting blocks below.
+boolean -u 'joined'
+morph 'between'
+shell 'hollow'
+# --- and every curve-built block is made, waiting. None of these is a refusal.
+loft 'skin'
+sweep 'rail'
+extrude 'slab'
+revolve 'ring'
+pipe curve=none 'tube'
+saveas file=target/empty-01-waiting.fform
+
+# --- a 40 x 20 rectangle, and the extrude is told to build on it: 40 * 20 * 10 = 8000
+line p0=0,0,0 p1=40,0,0 'a'
+line p0=40,0,0 p1=40,20,0 'b'
+line p0=40,20,0 p1=0,20,0 'c'
+line p0=0,20,0 p1=0,0,0 'd'
+set slab.profile=a
+set slab.height=10
+expect target=slab volume=8000 tol=0.1%
+
+# --- the pipe is told its curve: a capsule, pi*9*50 + 4/3*pi*27 = 1526.81
+line p0=0,-100,0 p1=0,-100,50 'path'
+set tube.curve=path
+set tube.radius=3
+expect target=tube volume=1526.81 tol=1%
+
+# --- the sweep is told its section and then its path: a 4 x 4 x 30 bar
+line p0=298,-2,0 p1=302,-2,0 's1'
+line p0=302,-2,0 p1=302,2,0 's2'
+line p0=302,2,0 p1=298,2,0 's3'
+line p0=298,2,0 p1=298,-2,0 's4'
+line p0=300,0,0 p1=300,0,30 'up'
+set rail.profile=s1
+set rail.spine=up
+expect target=rail volume=480 tol=1%
+
+# --- the loft is told one section, which is still waiting, and then its second: a square
+# lofted to the same square 30 up is a 10 x 10 x 30 prism.
+line p0=495,-5,0 p1=505,-5,0 'k1'
+line p0=505,-5,0 p1=505,5,0 'k2'
+line p0=505,5,0 p1=495,5,0 'k3'
+line p0=495,5,0 p1=495,-5,0 'k4'
+line p0=495,-5,30 p1=505,-5,30 'm1'
+line p0=505,-5,30 p1=505,5,30 'm2'
+line p0=505,5,30 p1=495,5,30 'm3'
+line p0=495,5,30 p1=495,-5,30 'm4'
+set skin.sections=k1
+set skin.sections=k1,m1
+expect target=skin volume=3000 tol=1%
+saveas file=target/empty-02-filled.fform
+
+# --- the stuck curves. Deleting the pipe's curve used to be refused ("delete that first");
+# now the curve goes and the pipe waits. Undo puts both back as they were.
+delete target=path
+undo
+expect target=tube volume=1526.81 tol=1%
+
+# --- a slot emptied by name leaves the curve in the document and the block waiting.
+set rail.spine=none
+set rail.spine=up
+expect target=rail volume=480 tol=1%
+delete target=up
+saveas file=target/empty-03-let-go.fform
+
+# --- and what was drawn beside them is untouched throughout.
+expect target=slab volume=8000 tol=0.1%

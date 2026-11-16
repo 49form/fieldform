@@ -12,6 +12,7 @@
 
 /// `(operation, key, default as JSON)`.
 pub const DEFAULTS: &[(&str, &str, &str)] = &[
+    ("create.boolean", "op", "\"difference\""),
     ("create.capsule", "end_radius", "25.0"),
     ("create.capsule", "start_radius", "25.0"),
     ("create.coil", "diameter", "80.0"),
@@ -23,6 +24,10 @@ pub const DEFAULTS: &[(&str, &str, &str)] = &[
     ("create.cube", "centre", "[0.0,0.0,0.0]"),
     ("create.cube", "size", "[100.0,100.0,100.0]"),
     ("create.cylinder", "radius", "50.0"),
+    ("create.extrude", "depth", "25.0"),
+    ("create.extrude", "draft", "0.0"),
+    ("create.extrude", "height", "25.0"),
+    ("create.loft", "sections", "[]"),
     ("create.pipe", "radius", "4.3"),
     ("create.plane", "flipped", "false"),
     ("create.plane", "origin", "[0.0,0.0,0.0]"),
@@ -37,6 +42,7 @@ pub const DEFAULTS: &[(&str, &str, &str)] = &[
     ("create.expression", "text", "\"sqrt(x*x + y*y + z*z) - 50\""),
     ("create.sphere", "centre", "[0.0,0.0,0.0]"),
     ("create.sphere", "radius", "50.0"),
+    ("create.sweep", "section", "\"square\""),
     ("create.thread", "clearance", "0.0"),
     ("create.thread", "hand", "\"right\""),
     ("create.thread", "length", "100.0"),

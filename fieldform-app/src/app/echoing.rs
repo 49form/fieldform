@@ -23,7 +23,7 @@ impl App {
             .filter(|(id, _)| !snapshot.names.contains_key(id))
             .map(|(id, _)| (id, self.derived_label(id)))
             .collect();
-        snapshot.profile_labels = self.profiles.keys().into_iter().map(|k| (k, self.profile_label(k))).collect();
+        snapshot.profile_labels = self.curve_ui.profiles.keys().into_iter().map(|k| (k, self.profile_label(k))).collect();
         EchoBase { snapshot, part: self.active_part, moves: self.document_moves }
     }
 
@@ -31,17 +31,17 @@ impl App {
     /// record, and after a document is opened or begun.
     pub(crate) fn echo_rebase(&mut self) {
         // Never past a pending session's block: its making is written when it is kept.
-        if self.session.is_some() || self.cage_session.is_some() {
+        if self.tools.session.is_some() || self.cage_session.is_some() {
             return;
         }
-        self.echo_base = self.echo_snapshot();
+        self.console.echo_base = self.echo_snapshot();
     }
 
     /// One echoed line, into the console as if typed, the history and the record a test reads.
     pub(crate) fn echo_line(&mut self, line: String) {
         self.say(format!("> {line}"));
-        self.console_history.push(line.clone());
-        self.echo_log.push(line);
+        self.console.history.push(line.clone());
+        self.console.echo_log.push(line);
     }
 
     /// Writes what changed since the last echo, if anything did: the GUI's edits as the lines
@@ -52,15 +52,15 @@ impl App {
     /// pending session's block go unnamed until it is kept (§3.5). Shallowest first and never by
     /// id ([`echo::new_blocks`]), so the same edits name the same blocks in every run.
     pub(crate) fn echo_settle(&mut self) {
-        if self.document_moves == self.echo_base.moves || self.session.is_some() || self.cage_session.is_some() {
+        if self.document_moves == self.console.echo_base.moves || self.tools.session.is_some() || self.cage_session.is_some() {
             return;
         }
-        if self.echo_base.part != self.active_part {
+        if self.console.echo_base.part != self.active_part {
             // Another part is on screen: what changed belongs to a different graph. Said from here.
             self.echo_rebase();
             return;
         }
-        let before = self.echo_base.snapshot.graph.clone();
+        let before = self.console.echo_base.snapshot.graph.clone();
         // Named one at a time, shallowest first: a block's place in the order reads its inputs'
         // names, and those are always shallower, so each is named before it is needed.
         let order = loop {
@@ -71,8 +71,8 @@ impl App {
             self.doc.node_meta.entry(id).or_default().name = Some(name);
         };
         // Renames first: every line after them calls a row by its new name.
-        let mut lines = echo::rename_lines(&self.echo_base.snapshot, &self.echo_snapshot().snapshot);
-        lines.extend(echo::lines(&self.echo_base.snapshot, &self.doc, self.part_graph(), &order));
+        let mut lines = echo::rename_lines(&self.console.echo_base.snapshot, &self.echo_snapshot().snapshot);
+        lines.extend(echo::lines(&self.console.echo_base.snapshot, &self.doc, self.part_graph(), &order));
         for line in lines {
             self.echo_line(line);
         }
@@ -83,19 +83,19 @@ impl App {
     /// drag or placement mid-way. A drag is one edit and is written once, when the hand comes off.
     pub(crate) fn echo_when_quiet(&mut self, ctx: &egui::Context) {
         // A pending session is written when it is kept, with the values it was kept with.
-        if self.document_moves == self.echo_base.moves || self.script_running || self.session.is_some() || self.cage_session.is_some() {
+        if self.document_moves == self.console.echo_base.moves || self.scripting.running || self.tools.session.is_some() || self.cage_session.is_some() {
             return;
         }
         let busy = ctx.input(|i| i.pointer.any_down())
             || ctx.egui_wants_keyboard_input()
             || self.move_state.is_some()
             || self.gizmo_drag.is_some()
-            || self.point_drag.is_some()
-            || self.marquee.is_some()
-            || self.curve_edit_before.is_some()
-            || self.weight_edit_before.is_some()
+            || self.curve_ui.point_drag.is_some()
+            || self.curve_ui.marquee.is_some()
+            || self.curve_ui.edit_before.is_some()
+            || self.curve_ui.weight_edit_before.is_some()
             // A preview is not an edit: it is put back before anything is kept.
-            || self.join_preview.is_some();
+            || self.tools.join_preview.is_some();
         if !busy {
             self.echo_settle();
         }
@@ -118,7 +118,7 @@ impl App {
             let curve = |t: &str| self.curve_named(t);
             let profile = |t: &str| {
                 self.curve_named(t).or_else(|| {
-                    self.profiles.keys().into_iter().find(|key| self.profile_label(*key).eq_ignore_ascii_case(t.trim()))
+                    self.curve_ui.profiles.keys().into_iter().find(|key| self.profile_label(*key).eq_ignore_ascii_case(t.trim()))
                 })
             };
             let inside = |n: &Node, c: CurveId| self.inside_of(n, c);

@@ -148,7 +148,7 @@ fn wall(curve: CurveId, thickness: f64) -> Outline {
 }
 
 fn wall_to(curve: CurveId, thickness: f64, side: WallSide) -> Outline {
-    Outline::Wall { curve, thickness: lit(thickness), side, ends: WallEnds::Square }
+    Outline::Wall { curve: curve.into(), thickness: lit(thickness), side, ends: WallEnds::Square }
 }
 
 fn on_circle(radius: f64, degrees: f64) -> Point3<f64> {
@@ -404,7 +404,7 @@ fn block(kind: Block, thin: bool) -> Scene {
                 })
                 .collect();
             let spine = polyline(&mut doc, path, false);
-            ("sweep", Node::Sweep { rims: Default::default(), outline, spine, section: Section::Square, law: Default::default() })
+            ("sweep", Node::Sweep { rims: Default::default(), outline, spine: spine.into(), section: Section::Square, law: Default::default() })
         }
     };
     let solid = graph.add(node);
@@ -656,7 +656,7 @@ fn curves_for(
                         (outline.curve(), sweep.source(), false)
                     }
                     Some(Node::Sweep { outline, spine, .. }) => {
-                        (outline.curve(), Some(*spine), false)
+                        (outline.curve(), spine.source(), false)
                     }
                     Some(Node::Revolve { outline, frame, .. }) => {
                         (outline.curve(), frame.curve_source(), true)
@@ -664,7 +664,7 @@ fn curves_for(
                     _ => unreachable!("a profile belongs to an extrude, a revolve or a sweep"),
                 };
                 let world =
-                    fieldform_field::profile_loop_turning(doc, curve, SPINE_DEGREES, ignore)
+                    fieldform_field::profile_loop_turning(doc, curve.expect("a block that names its curve"), SPINE_DEGREES, ignore)
                         .expect("a closed loop")
                         .points;
                 let built = if about_axis {
@@ -719,7 +719,7 @@ fn curves_for(
                 let Some(Node::Sweep { outline, spine, .. }) = graph.node(node) else {
                     unreachable!("a frame belongs to a sweep");
                 };
-                let frame = fieldform_field::sweep_frame(doc, outline, *spine, &spine_points(doc, *spine))
+                let frame = fieldform_field::sweep_frame(doc, outline, spine.source().expect("a block that names its curve"), &spine_points(doc, spine.source().expect("a block that names its curve")))
                     .expect("a spine with a direction");
                 (frame, None)
             }

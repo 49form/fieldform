@@ -320,6 +320,18 @@ async fn listen(endpoint: String, handler: Handler, ready: mpsc::Sender<Result<(
 #[cfg(not(windows))]
 async fn listen(endpoint: String, handler: Handler, ready: mpsc::Sender<Result<(), String>>) {
     use std::os::unix::fs::PermissionsExt;
+    // **A name somebody is listening on is theirs.** Binding needs the path gone, and removing
+    // it unasked took a running instance's endpoint from under it: both then said they were
+    // listening, a relay reached only the newer, and whichever closed first deleted the path
+    // the other was bound to. So the name is tried first, and only one nobody answers on, which
+    // is what a crashed instance leaves behind, is cleared. The named-pipe arm refuses a second
+    // owner the same way.
+    if std::os::unix::net::UnixStream::connect(&endpoint).is_ok() {
+        let _ = ready.send(Err(format!(
+            "cannot bind {endpoint}: another instance is already listening there"
+        )));
+        return;
+    }
     let _ = std::fs::remove_file(&endpoint);
     let listener = match tokio::net::UnixListener::bind(&endpoint) {
         Ok(l) => l,
@@ -358,16 +370,16 @@ impl crate::App {
             .filter_map(|w| std::fs::create_dir_all(&w[1]).ok().and_then(|_| std::path::Path::new(&w[1]).canonicalize().ok()))
             .collect();
         if roots.is_empty() {
-            let fresh = std::env::temp_dir().join(format!("fieldform-agent-{}", std::process::id()));
+            let fresh = crate::recovery_dir().join(format!("fieldform-agent-{}", std::process::id()));
             if std::fs::create_dir_all(&fresh).is_ok()
                 && let Ok(real) = fresh.canonicalize()
             {
                 roots.push(real);
             }
         }
-        self.agent.roots = roots;
+        self.agent_link.state.roots = roots;
         self.recover_agent_checkpoint();
-        self.agent.run_timeout = args
+        self.agent_link.state.run_timeout = args
             .iter()
             .position(|a| a == "--agent-timeout")
             .and_then(|i| args.get(i + 1))
@@ -376,10 +388,10 @@ impl crate::App {
             .map(std::time::Duration::from_secs_f64);
         let ctx = ctx.clone();
         let wake: Waker = Arc::new(move || ctx.request_repaint());
-        match start(endpoint, self.agent.cancel.clone(), wake, HostMode::Launch) {
+        match start(endpoint, self.agent_link.state.cancel.clone(), wake, HostMode::Launch) {
             Ok(host) => {
                 self.say(format!("Agent host listening on {}", host.endpoint));
-                self.agent_host = Some(host);
+                self.agent_link.host = Some(host);
             }
             Err(why) => self.warn(why),
         }
@@ -387,27 +399,27 @@ impl crate::App {
 
     /// Answers every job that has arrived, between frames. The document is only touched here.
     pub(crate) fn drive_agent(&mut self) {
-        let Some(mode) = self.agent_host.as_ref().map(|h| h.mode) else { return };
+        let Some(mode) = self.agent_link.host.as_ref().map(|h| h.mode) else { return };
         self.finish_snapshot();
         // A picture in flight holds everything else: the next call could aim the camera elsewhere.
-        if self.agent.snapshot.is_some() {
+        if self.agent_link.state.snapshot.is_some() {
             self.wake_agent();
             return;
         }
         if mode == HostMode::Attach {
             // A person's session reaches only the folder their document is in.
-            self.agent.roots = self.attach_roots();
+            self.agent_link.state.roots = self.attach_roots();
         }
-        while let Some(job) = self.agent_host.as_ref().and_then(|h| h.jobs.try_recv().ok()) {
-            self.agent.held.push_back((job, std::time::Instant::now()));
+        while let Some(job) = self.agent_link.host.as_ref().and_then(|h| h.jobs.try_recv().ok()) {
+            self.agent_link.state.held.push_back((job, std::time::Instant::now()));
         }
-        while let Some((_, since)) = self.agent.held.front() {
+        while let Some((_, since)) = self.agent_link.state.held.front() {
             let since = *since;
             // **The person's input wins** (D5): a call that arrives mid-gesture waits, in order, and
             // never runs in the middle of it. After the allowance it is told so rather than left.
-            if mode == HostMode::Attach && self.person_is_busy() && self.agent.held.front().is_some_and(|(j, _)| j.tool != "session_info") {
+            if mode == HostMode::Attach && self.person_is_busy() && self.agent_link.state.held.front().is_some_and(|(j, _)| j.tool != "session_info") {
                 if since.elapsed() >= BUSY_ALLOWANCE {
-                    let Some((job, _)) = self.agent.held.pop_front() else { break };
+                    let Some((job, _)) = self.agent_link.state.held.pop_front() else { break };
                     let mut e = tool_error("busy", "the person at this session is in the middle of something");
                     e.verb = Some(job.tool.clone());
                     let mut reply = Reply::err(&e);
@@ -418,7 +430,7 @@ impl crate::App {
                 self.wake_agent();
                 return;
             }
-            let Some((job, _)) = self.agent.held.pop_front() else { break };
+            let Some((job, _)) = self.agent_link.state.held.pop_front() else { break };
             if let Some(e) = tools::undeclared_argument(&job.tool, &job.args) {
                 let _ = job.reply.send(Answer { reply: Reply::err(&e), image: None });
                 continue;
@@ -433,7 +445,7 @@ impl crate::App {
     }
 
     fn wake_agent(&self) {
-        if let Some(host) = &self.agent_host {
+        if let Some(host) = &self.agent_link.host {
             (host.wake)();
         }
     }
@@ -441,13 +453,13 @@ impl crate::App {
     /// Whether a gesture or a tool session of the person's is open.
     pub(crate) fn person_is_busy(&self) -> bool {
         #[cfg(test)]
-        if self.agent.pretend_busy {
+        if self.agent_link.state.pretend_busy {
             return true;
         }
-        self.session.is_some()
+        self.tools.session.is_some()
             || self.cage_session.is_some()
             || self.cage_tool.is_some()
-            || self.point_drag.is_some()
+            || self.curve_ui.point_drag.is_some()
             || self.gizmo_drag.is_some()
             || self.material_gesture.is_some()
             || self.gesture.is_some()
@@ -455,7 +467,7 @@ impl crate::App {
 
     /// The one folder an attached agent may use: the one the open document is in.
     fn attach_roots(&self) -> Vec<std::path::PathBuf> {
-        self.file
+        self.saving.file
             .as_ref()
             .and_then(|(path, _)| path.parent())
             .and_then(|dir| dir.canonicalize().ok())
@@ -467,29 +479,29 @@ impl crate::App {
     /// drops whoever is connected. Does nothing when the host was started by `--agent-host`,
     /// which is a session the agent owns.
     pub(crate) fn set_allow_agent(&mut self, allow: bool, ctx: &eframe::egui::Context) {
-        if self.agent_host.as_ref().is_some_and(|h| h.mode == HostMode::Launch) {
+        if self.agent_link.host.as_ref().is_some_and(|h| h.mode == HostMode::Launch) {
             return;
         }
-        self.allow_agent = allow;
+        self.agent_link.allowed = allow;
         if !allow {
-            if self.agent_host.take().is_some() {
+            if self.agent_link.host.take().is_some() {
                 self.say("Agent access is off: the endpoint is closed.");
             }
             return;
         }
-        if self.agent_host.is_some() {
+        if self.agent_link.host.is_some() {
             return;
         }
-        let endpoint = self.agent_endpoint.clone().unwrap_or_else(default_endpoint);
+        let endpoint = self.agent_link.endpoint.clone().unwrap_or_else(default_endpoint);
         let ctx = ctx.clone();
         let wake: Waker = Arc::new(move || ctx.request_repaint());
-        match start(endpoint, self.agent.cancel.clone(), wake, HostMode::Attach) {
+        match start(endpoint, self.agent_link.state.cancel.clone(), wake, HostMode::Attach) {
             Ok(host) => {
                 self.say(format!("Agent access is on, listening on {}", host.endpoint));
-                self.agent_host = Some(host);
+                self.agent_link.host = Some(host);
             }
             Err(why) => {
-                self.allow_agent = false;
+                self.agent_link.allowed = false;
                 self.warn(why);
             }
         }

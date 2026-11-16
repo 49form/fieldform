@@ -58,7 +58,7 @@ impl App {
         };
         let triple = |v: Vector3<f64>| Value::Str(format!("{},{},{}", v.x, v.y, v.z));
         let args = args.with("at", triple(at.coords)).with("dir", triple(into));
-        self.pending_curve = None;
+        self.curve_ui.pending = None;
         self.make_hole(target, &args);
     }
 
@@ -101,7 +101,7 @@ impl App {
         self.clear_hidden(target);
         self.select_body(Some(body));
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         self.say(format!("Cut a hole in {}", self.body_label(body)));
     }

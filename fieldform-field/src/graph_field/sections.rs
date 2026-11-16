@@ -112,6 +112,7 @@ fn section_in_its_plane(
 ) -> Result<ExtrudeSection, CompileError> {
     match outline {
         fieldform_scene::Outline::Closed { profile } => {
+            let profile = &profile.source().ok_or(CompileError::EmptySection)?;
             let points = crate::profile_loop_turning(document, *profile, turn_degrees, ignore)
                 .map_err(|e| CompileError::BadLoop(*profile, e))?
                 .points;
@@ -120,6 +121,7 @@ fn section_in_its_plane(
             Ok(ExtrudeSection { points, closed: true, origin, normal })
         }
         fieldform_scene::Outline::Wall { curve, .. } => {
+            let curve = &curve.source().ok_or(CompileError::EmptySection)?;
             let chain = crate::outline_chain_turning(document, *curve, turn_degrees, ignore)
                 .map_err(|e| CompileError::BadLoop(*curve, e))?;
             let plane = if chain.closed {
@@ -265,7 +267,7 @@ pub fn outline_miters(
             extrude_section(document, outline, sweep, turn_degrees).ok()?
         }
         Node::Sweep { outline, spine, .. } => {
-            sweep_outline_section(document, outline, *spine, turn_degrees).ok()?
+            sweep_outline_section(document, outline, spine.source()?, turn_degrees).ok()?
         }
         _ => return None,
     };
@@ -309,6 +311,7 @@ pub fn block_wall(
     let fieldform_scene::Outline::Wall { curve, thickness, side, ends } = block.outline()? else {
         return None;
     };
+    let curve = &curve.source()?;
     let thickness = numbers(thickness)?;
     match block {
         Node::Extrude { outline, sweep, .. } => {
@@ -316,7 +319,8 @@ pub fn block_wall(
             wall_in_plane(&section, *curve, thickness, *side, *ends, f64::INFINITY).ok()
         }
         Node::Sweep { outline, spine, .. } => {
-            let section = sweep_outline_section(document, outline, *spine, turn_degrees).ok()?;
+            let section =
+                sweep_outline_section(document, outline, spine.source()?, turn_degrees).ok()?;
             wall_in_plane(&section, *curve, thickness, *side, *ends, f64::INFINITY).ok()
         }
         Node::Revolve { frame, .. } => {

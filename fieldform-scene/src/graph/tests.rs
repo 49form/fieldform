@@ -489,7 +489,7 @@
             // and one with neither at its default, which writes both.
             Node::Extrude { rims: Default::default(),
                 outline: Outline::Wall {
-                    curve,
+                    curve: curve.into(),
                     thickness: lit(2.0),
                     side: WallSide::Centre,
                     ends: WallEnds::Square,
@@ -503,7 +503,7 @@
             },
             Node::Extrude { rims: Default::default(),
                 outline: Outline::Wall {
-                    curve,
+                    curve: curve.into(),
                     thickness: lit(2.0),
                     side: WallSide::Right,
                     ends: WallEnds::Round,
@@ -516,18 +516,18 @@
                 corners: Default::default(),
             },
             Node::Offset { input: NodeId::new().into(), distance: lit(-2.0) },
-            Node::Pipe { curve, radius: lit(5.0) },
+            Node::Pipe { curve: curve.into(), radius: lit(5.0) },
             Node::Revolve { rims: Default::default(), outline: Outline::closed(curve), frame: Frame::default(), angle: crate::ParamRef::Literal(360.0), sides: crate::AngleSides::One },
             Node::Sweep { rims: Default::default(),
                 outline: Outline::closed(curve),
-                spine: curve,
+                spine: curve.into(),
                 section: crate::Section::Skewed,
                 law: Default::default(),
             },
             // And each of them on a wall with neither its side nor its ends at the default.
             Node::Revolve { rims: Default::default(),
                 outline: Outline::Wall {
-                    curve,
+                    curve: curve.into(),
                     thickness: lit(2.0),
                     side: WallSide::Left,
                     ends: WallEnds::Round,
@@ -538,12 +538,12 @@
             },
             Node::Sweep { rims: Default::default(),
                 outline: Outline::Wall {
-                    curve,
+                    curve: curve.into(),
                     thickness: lit(2.0),
                     side: WallSide::Right,
                     ends: WallEnds::Round,
                 },
-                spine: curve,
+                spine: curve.into(),
                 section: crate::Section::Skewed,
                 law: Default::default(),
             },
@@ -577,7 +577,7 @@
         let curve = CurveId::new();
         let mut g = Graph::from_cage(CageId::new());
         let cage = g.roots()[0];
-        let pipe = g.add(Node::Pipe { curve, radius: ParamRef::Named(ParamId::new()) });
+        let pipe = g.add(Node::Pipe { curve: curve.into(), radius: ParamRef::Named(ParamId::new()) });
         let blend = g.add(Node::Blend {
             op: BooleanOp::Union,
             inputs: vec![cage.into(), pipe.into()],
@@ -664,7 +664,7 @@
         let mut g = Graph::empty();
         let swept = || Node::Sweep { rims: Default::default(),
             outline: Outline::closed(profile),
-            spine,
+            spine: spine.into(),
             section: Default::default(),
             law: Default::default(),
         };
@@ -680,13 +680,170 @@
         );
     }
 
+    /// **A block made before its curves is a legal, savable state, and comes back as it was.**
+    ///
+    /// The curve-slot half of what `an_empty_slot_round_trips` holds for an operand: an empty
+    /// slot writes nothing where the curve's id would be, and reading that back is the slot
+    /// empty -- where it used to be the hard error "pipe node has no \"curve\" field", which is
+    /// what made a block impossible to have before its curve. A wall waiting for its curve keeps
+    /// its thickness, its side and its ends, which is the one place a `null` is written: `"wall"`
+    /// being there is what says the section is a wall at all.
+    #[test]
+    fn a_block_waiting_for_its_curves_round_trips_through_the_file() {
+        use crate::CurveSlot;
+        let named = CurveId::new();
+        let waiting_wall = Outline::Wall {
+            curve: CurveSlot::empty(),
+            thickness: ParamRef::Literal(2.5),
+            side: WallSide::Left,
+            ends: WallEnds::Round,
+        };
+        let blocks = [
+            Node::Pipe { curve: CurveSlot::empty(), radius: ParamRef::Literal(3.0) },
+            // Neither, and each alone: the section and the path are two slots, not one.
+            Node::Sweep {
+                outline: Outline::empty(),
+                spine: CurveSlot::empty(),
+                section: Default::default(),
+                law: Default::default(),
+                rims: Default::default(),
+            },
+            Node::Sweep {
+                outline: Outline::closed(named),
+                spine: CurveSlot::empty(),
+                section: Default::default(),
+                law: Default::default(),
+                rims: Default::default(),
+            },
+            Node::Sweep {
+                outline: waiting_wall,
+                spine: named.into(),
+                section: Default::default(),
+                law: Default::default(),
+                rims: Default::default(),
+            },
+            Node::Extrude {
+                outline: Outline::empty(),
+                sweep: Sweep::Normal,
+                start: ParamRef::Literal(0.0),
+                height: ParamRef::Literal(10.0),
+                sides: Default::default(),
+                draft: ParamRef::Literal(0.0),
+                corners: Default::default(),
+                rims: Default::default(),
+            },
+            Node::Revolve {
+                outline: waiting_wall,
+                frame: Frame::default(),
+                angle: ParamRef::Literal(360.0),
+                sides: Default::default(),
+                rims: Default::default(),
+            },
+            Node::Loft {
+                sections: Vec::new(),
+                spine: None,
+                smooth: LoftSmooth::default(),
+                rims: Default::default(),
+            },
+            Node::Loft {
+                sections: vec![Outline::closed(named)],
+                spine: None,
+                smooth: LoftSmooth::default(),
+                rims: Default::default(),
+            },
+        ];
+        for block in blocks {
+            let mut g = Graph::empty();
+            let id = g.add(block.clone());
+            let back = round_trip(&g);
+            assert_eq!(back.node(id), Some(&block), "read back exactly as it was written");
+            assert!(
+                !matches!(back.node(id), Some(Node::Unknown(_))),
+                "and as the block it is, not as something this build does not know"
+            );
+            assert!(block.waits_for_a_curve(), "{block:?} is waiting");
+            assert!(back.incomplete().contains(&id), "so it is left out of what is drawn");
+        }
+    }
+
+    /// **A block waiting for a curve is incomplete, and so is whatever reads it** -- the walk an
+    /// empty operand is found by, reading the other kind of hole. One walk for both is what lets
+    /// the viewport's prune, the commit gate and the compile's refusal each ask once.
+    #[test]
+    fn a_block_waiting_for_a_curve_is_incomplete_and_so_is_what_reads_it() {
+        use crate::CurveSlot;
+        let curve = CurveId::new();
+        let mut g = Graph::empty();
+        let fine = g.add(Node::Pipe { curve: curve.into(), radius: ParamRef::Literal(1.0) });
+        let waiting = g.add(Node::Pipe { curve: CurveSlot::empty(), radius: ParamRef::Literal(1.0) });
+        let above = g.add(Node::Offset { input: waiting.into(), distance: ParamRef::Literal(1.0) });
+        let incomplete = g.incomplete();
+        assert!(!incomplete.contains(&fine), "a pipe with its curve is whole");
+        assert!(incomplete.contains(&waiting), "a pipe with none is not");
+        assert!(incomplete.contains(&above), "nor is the offset reading it");
+        assert_eq!(g.first_waiting_for_a_curve(), Some(waiting), "and it is the one a refusal names");
+        assert_eq!(g.first_empty_operand(), None, "which no operand slot would have named");
+        assert!(g.node(waiting).is_some_and(|n| n.curves().is_empty()), "an empty slot is no edge");
+    }
+
+    /// **A block lets go of a curve it is built from, and of nothing else.** What Delete on a
+    /// curve and Clear on a curve's row both do: the slot empties and keeps its place, a loft's
+    /// section leaves the list, a loft's centreline goes back to derived. A curve a block is
+    /// only *aimed along* has no empty state to go to, so it is left, and said to be held.
+    #[test]
+    fn a_block_stops_building_on_a_curve_and_keeps_what_it_is_aimed_along() {
+        let (section, path, other) = (CurveId::new(), CurveId::new(), CurveId::new());
+        let mut sweep = Node::Sweep {
+            outline: Outline::closed(section),
+            spine: path.into(),
+            section: Default::default(),
+            law: Default::default(),
+            rims: Default::default(),
+        };
+        assert!(sweep.is_built_on(path) && sweep.is_built_on(section) && !sweep.is_built_on(other));
+        assert!(!sweep.waits_for_a_curve());
+        assert!(sweep.stop_building_on(path), "the path is let go of");
+        assert_eq!(sweep.curves(), vec![section], "and the section is still held");
+        assert!(sweep.waits_for_a_curve());
+        assert!(!sweep.stop_building_on(path), "there is nothing to let go of twice");
+
+        let mut loft = Node::Loft {
+            sections: vec![Outline::closed(section), Outline::closed(other)],
+            spine: Some(path),
+            smooth: LoftSmooth::default(),
+            rims: Default::default(),
+        };
+        assert!(loft.stop_building_on(path), "a named centreline goes back to derived");
+        assert!(matches!(&loft, Node::Loft { spine: None, sections, .. } if sections.len() == 2));
+        assert!(!loft.waits_for_a_curve());
+        assert!(loft.stop_building_on(other), "and a section leaves the list");
+        assert!(matches!(&loft, Node::Loft { sections, .. } if sections.len() == 1));
+        assert!(loft.waits_for_a_curve(), "one section is a loft still in the making");
+
+        // Aimed along a line: a reference with no empty state, so not a slot to empty.
+        let mut extrude = Node::Extrude {
+            outline: Outline::closed(section),
+            sweep: Sweep::Along { curve: path },
+            start: ParamRef::Literal(0.0),
+            height: ParamRef::Literal(10.0),
+            sides: Default::default(),
+            draft: ParamRef::Literal(0.0),
+            corners: Default::default(),
+            rims: Default::default(),
+        };
+        assert!(extrude.holds_beyond_its_slots(path), "the line it is pulled along is held");
+        assert!(!extrude.holds_beyond_its_slots(section), "the profile is a slot");
+        assert!(!extrude.stop_building_on(path), "so asking it to let go of the line does nothing");
+        assert!(extrude.curves().contains(&path));
+    }
+
     /// **A loft round-trips with every section, its centerline and its smoothness**, and is not
     /// met as something unknown -- the failure the known-fields list exists to prevent, and the
     /// one a text round trip cannot see, since an unknown node is preserved byte for byte.
     ///
     /// Both halves of the optional fields are held: a derived centerline and G0 write nothing,
     /// a named one and G1 come back named. And every curve is wiring, so deleting a section's
-    /// curve or the centerline is refused while the loft stands on it.
+    /// curve or the centerline reaches the loft, which lets go of it.
     #[test]
     fn a_loft_round_trips_with_every_section_and_says_what_it_stands_on() {
         let (a, b, c, spine) = (CurveId::new(), CurveId::new(), CurveId::new(), CurveId::new());
@@ -1087,7 +1244,7 @@
     fn a_wall_is_written_in_the_profiles_place_and_its_defaults_are_left_out() {
         let curve = CurveId::new();
         let wall = |side, ends| Node::Extrude { rims: Default::default(),
-            outline: Outline::Wall { curve, thickness: ParamRef::Literal(2.5), side, ends },
+            outline: Outline::Wall { curve: curve.into(), thickness: ParamRef::Literal(2.5), side, ends },
             sweep: Sweep::Normal,
             height: ParamRef::Literal(40.0),
             draft: ParamRef::Literal(0.0),
@@ -1168,7 +1325,7 @@
         let (curve, other) = (CurveId::new(), CurveId::new());
         let mut node = Node::Extrude { rims: Default::default(),
             outline: Outline::Wall {
-                curve,
+                curve: curve.into(),
                 thickness: ParamRef::Literal(2.5),
                 side: WallSide::Left,
                 ends: WallEnds::Square,
@@ -1207,7 +1364,7 @@
     }
 
     fn swept(outline: Outline, spine: CurveId) -> Node {
-        Node::Sweep { rims: Default::default(), outline, spine, section: Section::Skewed, law: Default::default() }
+        Node::Sweep { rims: Default::default(), outline, spine: spine.into(), section: Section::Skewed, law: Default::default() }
     }
 
     /// The same promise for the other two blocks an outline went onto: a revolve and a sweep
@@ -1250,7 +1407,7 @@
     #[test]
     fn a_wall_is_written_in_the_profiles_place_on_a_revolve_and_a_sweep() {
         let (curve, spine) = (CurveId::new(), CurveId::new());
-        let wall = |side, ends| Outline::Wall { curve, thickness: ParamRef::Literal(2.5), side, ends };
+        let wall = |side, ends| Outline::Wall { curve: curve.into(), thickness: ParamRef::Literal(2.5), side, ends };
         let both = |side, ends| [revolved(wall(side, ends)), swept(wall(side, ends), spine)];
 
         for plain in both(WallSide::Centre, WallEnds::Square) {
@@ -1322,7 +1479,7 @@
         let (curve, spine, other) = (CurveId::new(), CurveId::new(), CurveId::new());
         let thickness = ParamRef::Literal(2.5);
         let wall =
-            Outline::Wall { curve, thickness, side: WallSide::Left, ends: WallEnds::Square };
+            Outline::Wall { curve: curve.into(), thickness, side: WallSide::Left, ends: WallEnds::Square };
 
         let mut revolve = revolved(wall);
         assert_eq!(revolve.curves(), vec![curve]);
@@ -1362,7 +1519,7 @@
     fn the_blocks_built_on_a_section_hand_back_its_outline_and_what_they_are_aimed_by() {
         let (curve, spine, line) = (CurveId::new(), CurveId::new(), CurveId::new());
         let wall = Outline::Wall {
-            curve,
+            curve: curve.into(),
             thickness: ParamRef::Literal(2.0),
             side: WallSide::Right,
             ends: WallEnds::Round,
@@ -1963,7 +2120,7 @@
         for section in [Section::Square, Section::Skewed, Section::Parallel] {
             let node = Node::Sweep { rims: Default::default(),
                 outline: Outline::closed(CurveId::new()),
-                spine: CurveId::new(),
+                spine: CurveId::new().into(),
                 section,
                 law: Default::default(),
             };
@@ -3426,7 +3583,7 @@
         let mut g = Graph::from_cage(CageId::new());
         let cage = g.roots()[0];
         let pipe = g.add(Node::Pipe {
-            curve: CurveId::new(),
+            curve: CurveId::new().into(),
             radius: ParamRef::Literal(2.0),
         });
         assert_eq!(g.roots(), {
@@ -3447,7 +3604,7 @@
         let mut g = Graph::from_cage(CageId::new());
         let cage = g.roots()[0];
         let pipe = g.add(Node::Pipe {
-            curve: CurveId::new(),
+            curve: CurveId::new().into(),
             radius: ParamRef::Literal(2.0),
         });
         let joined = g.add(Node::Boolean { op: BooleanOp::Difference, inputs: vec![cage.into(), pipe.into()] });
@@ -3467,7 +3624,7 @@
         let mut g = Graph::from_cage(CageId::new());
         let cage = g.roots()[0];
         let pipe = g.add(Node::Pipe {
-            curve: CurveId::new(),
+            curve: CurveId::new().into(),
             radius: ParamRef::Literal(2.0),
         });
         assert!(g.remove_body(pipe));
@@ -3482,7 +3639,7 @@
         let mut g = Graph::from_cage(CageId::new());
         let cage = g.roots()[0];
         let pipe = g.add(Node::Pipe {
-            curve: CurveId::new(),
+            curve: CurveId::new().into(),
             radius: ParamRef::Literal(2.0),
         });
         let joined = g.add(Node::Boolean { op: BooleanOp::Union, inputs: vec![cage.into(), pipe.into()] });

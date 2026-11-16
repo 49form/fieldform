@@ -17,40 +17,40 @@ impl App {
             clipboard: self.clipboard.is_some(),
             clipboard_curve: matches!(self.clipboard, Some(Clipboard::Curve(_))),
             bodies: self.part_graph().roots().len(),
-            pair_candidates: self.pair_candidates().len(),
             field_drawn: self.field_is_drawn(),
             cage_control: self.control == ControlMesh::Cage,
             section_on: self.sections().iter().any(|s| s.on),
-            occlusion_possible: self.display_quality.occlusion(),
-            reflections_possible: self.display_quality.reflections(),
-            control_points: self.show_control_points,
-            view_cube: self.show_view_cube,
-            allow_agent: self.allow_agent,
+            occlusion_possible: self.view.quality.occlusion(),
+            reflections_possible: self.view.quality.reflections(),
+            control_points: self.curve_ui.show_control_points,
+            view_cube: self.view.show_view_cube,
+            allow_agent: self.agent_link.allowed,
             agent_launched: self
-                .agent_host
+                .agent_link.host
                 .as_ref()
                 .is_some_and(|h| h.mode == crate::agent::server::HostMode::Launch),
-            floating_panel: self.floating_panel,
-            idle_occlusion: self.idle_occlusion,
-            idle_reflections: self.idle_reflections,
-            draft_on: self.draft.enabled,
-            grid_on: self.show_grid,
+            floating_panel: self.tools.floating_panel,
+            idle_occlusion: self.view.idle_occlusion,
+            idle_reflections: self.view.idle_reflections,
+            draft_on: self.view.draft.enabled,
+            grid_on: self.view.show_grid,
             graph_shown: self.doc.graph_layout.shown,
             plane_selected: self.selected_plane().is_some(),
             curve_selected: self.selected_curve.is_some(),
             sketching: self.sketching(),
-            view_mode: match self.view_mode {
+            view_mode: match self.view.mode {
                 ViewMode::Polygon => "polygon",
                 ViewMode::Field => "field",
                 ViewMode::Overlay => "overlay",
             },
-            quality: self.display_quality.label().to_lowercase(),
+            quality: self.view.quality.label().to_lowercase(),
+            cage_detail: self.mesh_resolution,
         }
     }
 
     /// The command Shift+R would run (§8).
     pub(crate) fn last_repeatable(&self) -> Option<&'static commands::Command> {
-        self.last_command
+        self.tools.last_command
     }
 
     /// Runs `command` again: through the one door, so it keeps what is pending, starts a session
@@ -116,12 +116,12 @@ impl App {
             return;
         }
         let moves = self.document_moves;
-        let warned = self.console_warnings;
-        self.cage_line = None;
+        let warned = self.console.warnings;
+        self.console.cage_line = None;
         self.dispatch(command.op, &command.fixed_args());
         // A command that was refused did nothing, and a line that does nothing is not a record of
         // anything: it would be refused again on replay, which T1 found.
-        if self.document_moves == moves && self.console_warnings > warned {
+        if self.document_moves == moves && self.console.warnings > warned {
             return;
         }
         // Rename from a menu or a key only opens the row's name for typing: the name typed is the
@@ -139,7 +139,7 @@ impl App {
         // something, other than opening a window, the palette or the console's own words.
         if command.keeps_session() || command.op.starts_with("view.") {
             if !command.op.starts_with("help.") && !command.op.starts_with("console.") && !command.op.starts_with("palette.") {
-                self.last_command = Some(command);
+                self.tools.last_command = Some(command);
             }
         }
         let replaces = matches!(command.op, "file.new" | "file.open" | "file.import" | "file.import_obj" | "file.import_iges" | "file.import_step");
@@ -149,12 +149,12 @@ impl App {
         } else {
             // A change the lines cannot spell -- an eye turned over -- is written as the command
             // that made it, so the record is never silent about an action (§6.1).
-            let written = self.echo_log.len();
+            let written = self.console.echo_log.len();
             self.echo_settle();
-            if self.echo_log.len() == written && self.session.is_none() {
+            if self.console.echo_log.len() == written && self.tools.session.is_none() {
                 // A cage verb is written with the elements it read from the selection, which its
                 // bare word would not say.
-                let line = self.cage_line.take().unwrap_or_else(|| command.console_line());
+                let line = self.console.cage_line.take().unwrap_or_else(|| command.console_line());
                 self.echo_line(line);
             }
         }

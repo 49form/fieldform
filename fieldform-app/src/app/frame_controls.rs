@@ -136,7 +136,7 @@ impl App {
     /// starts at a thousandth of a millimetre, so the guard is against arithmetic rather than
     /// against a shape anyone can build.
     pub(crate) fn size_row(&mut self, ui: &mut egui::Ui, id: NodeId, size: [ParamRef; 3]) -> [ParamRef; 3] {
-        let was_locked = self.size_locked.contains(&id);
+        let was_locked = self.notebook.size_locked.contains(&id);
         let before = [self.resolve(size[0]), self.resolve(size[1]), self.resolve(size[2])];
         let (mut out, locked) = self.xyz_row_locked(
             ui,
@@ -149,8 +149,8 @@ impl App {
             Some(was_locked),
         );
         match locked {
-            true => self.size_locked.insert(id),
-            false => self.size_locked.remove(&id),
+            true => self.notebook.size_locked.insert(id),
+            false => self.notebook.size_locked.remove(&id),
         };
         if !was_locked {
             return out;
@@ -395,12 +395,12 @@ impl App {
     /// Esc with nothing begun since the sketch: stops it, and answers whether it did. A curve
     /// being placed, a drag or an armed tool is the more recent thing, and Esc is theirs first.
     pub(crate) fn escape_stops_sketching(&mut self) -> bool {
-        let nothing_nearer = self.pending_curve.is_none()
+        let nothing_nearer = self.curve_ui.pending.is_none()
             && self.gizmo_drag.is_none()
-            && self.point_drag.is_none()
+            && self.curve_ui.point_drag.is_none()
             && self.cage_tool.is_none()
-            && self.session.is_none()
-            && self.slide.is_none();
+            && self.tools.session.is_none()
+            && self.surface_points.slide.is_none();
         if !self.sketching() || !nothing_nearer {
             return false;
         }
@@ -1089,7 +1089,7 @@ impl App {
         // loop the two are the same walk.
         let seed = match self.part_graph().node(id) {
             Some(Node::Revolve { outline, .. }) | Some(Node::Extrude { outline, .. }) => {
-                Some(outline.curve())
+                outline.curve()
             }
             _ => None,
         };
@@ -1147,7 +1147,8 @@ impl App {
 
         // Which curve. A profile's loop or a wall's chain is walked from it either way, and
         // changing it leaves the kind alone: a wall pointed at another curve is still a wall.
-        let curve = out.curve();
+        // A slot, so it may also be emptied: the block stays and waits (`curve_slot_row`).
+        let curve = *out.slot();
         let label = if out.is_wall() { "Curve:" } else { "Profile:" };
         let picked = self.pick_profile(ui, id, curve, label);
         if picked != curve {
@@ -1158,14 +1159,15 @@ impl App {
             // curve would flip the wall to the other face of the loop. The picker itself hands
             // back a loop's first curve for any of its others, so without this, opening the
             // block of a wall read from a file could flip it.
-            let stood = match out {
-                Outline::Wall { side, .. } if side != WallSide::Centre => {
+            let stood = match (out, curve.source()) {
+                (Outline::Wall { side, .. }, Some(curve)) if side != WallSide::Centre => {
                     self.inside_side(id, curve).map(|inside| side == inside)
                 }
                 _ => None,
             };
-            *out.curve_mut() = picked;
-            if let (Some(was_inside), Outline::Wall { side, .. }) = (stood, &mut out)
+            *out.slot_mut() = picked;
+            if let (Some(was_inside), Some(picked), Outline::Wall { side, .. }) =
+                (stood, picked.source(), &mut out)
                 && let Some(inside) = self.inside_side(id, picked)
             {
                 *side = if was_inside { inside } else { across(inside) };
@@ -1184,14 +1186,14 @@ impl App {
         if walled != out.is_wall() {
             out = if walled {
                 Outline::Wall {
-                    curve: out.curve(),
+                    curve: *out.slot(),
                     // The last thickness a wall was given, as an offset repeats its distance.
-                    thickness: ParamRef::Literal(self.wall_thickness),
+                    thickness: ParamRef::Literal(self.next.wall_thickness),
                     side: WallSide::Centre,
                     ends: WallEnds::Square,
                 }
             } else {
-                Outline::closed(out.curve())
+                Outline::Closed { profile: *out.slot() }
             };
         }
 
@@ -1206,7 +1208,8 @@ impl App {
             );
             // `None` for a curve that closes no loop, which is what makes the row below say
             // Left and Right, and what leaves Ends something to choose.
-            let inside = self.inside_side(id, curve);
+            // A wall still waiting for its curve has no loop to have an inside.
+            let inside = curve.source().and_then(|curve| self.inside_side(id, curve));
             let mut side = side;
             ui.horizontal(|ui| {
                 row_label(ui, "Side:");
@@ -1237,7 +1240,7 @@ impl App {
             if let ParamRef::Literal(typed) = thickness
                 && out != outline
             {
-                self.wall_thickness = typed;
+                self.next.wall_thickness = typed;
             }
         }
         out
@@ -1269,7 +1272,7 @@ impl App {
             return None;
         }
         *block.outline_mut()? = Outline::Wall {
-            curve,
+            curve: curve.into(),
             thickness: ParamRef::Literal(1.0),
             side: WallSide::Left,
             ends: WallEnds::Square,
@@ -1301,8 +1304,9 @@ impl App {
         };
         // The chain rather than the loop, so a wall's open curve is measured too; for a profile
         // the two are the same walk.
-        let Ok(found) =
-            fieldform_field::outline_chain(&self.doc, outline.curve(), frame.curve_source())
+        // Nothing to spread while the revolve waits for its section.
+        let Some(section) = outline.curve() else { return };
+        let Ok(found) = fieldform_field::outline_chain(&self.doc, section, frame.curve_source())
         else {
             return;
         };
@@ -1374,6 +1378,8 @@ impl App {
             Some(Node::Revolve { outline, frame, .. }) => (outline.curve(), frame.curve_source()),
             _ => return Vec::new(),
         };
+        // A block still waiting for its section is made of no curves.
+        let Some(profile) = profile else { return Vec::new() };
         // The chain, which for a profile is its loop and for a wall is whatever runs on from
         // its curve end to end — every curve of which is equally not a line to sweep along.
         fieldform_field::outline_chain(&self.doc, profile, aimed_by)
@@ -1414,9 +1420,9 @@ impl App {
         &mut self,
         ui: &mut egui::Ui,
         id: NodeId,
-        current: CurveId,
+        current: fieldform_scene::CurveSlot,
         label: &str,
-    ) -> CurveId {
+    ) -> fieldform_scene::CurveSlot {
         // **The rows first, since a row is what a profile is.** This listed every curve by
         // name, which was right while a loop of four lines was four rows and wrong the moment
         // it became one: "Line, Line 2, Line 3, Line 4" is a list you cannot pick a profile
@@ -1424,7 +1430,7 @@ impl App {
         // the walk starts from; the curves outside any row follow, as they were.
         self.refresh_profiles();
         let mut closed: Vec<(CurveId, String)> = self
-            .profiles
+            .curve_ui.profiles
             .loops
             .iter()
             .map(|l| (l[0], format!("{} ({} curves)", self.profile_label(l[0]), l.len())))
@@ -1433,7 +1439,7 @@ impl App {
             .doc
             .curves
             .values()
-            .filter(|c| self.profiles.key_of(c.id).is_none())
+            .filter(|c| self.curve_ui.profiles.key_of(c.id).is_none())
             .map(|c| (c.id, c.name.clone()))
             .collect();
         loose.sort_by_key(|(id, _)| {
@@ -1442,40 +1448,25 @@ impl App {
         closed.extend(loose);
         // A member picked before the rows existed still reads its loop, so it is shown as the
         // row it is in.
-        let current = self.profiles.key_of(current).unwrap_or(current);
-
-        let mut out = current;
-        ui.horizontal(|ui| {
-            row_label(ui, label);
-            if closed.is_empty() {
-                ui.label(
-                    egui::RichText::new("no curves in this document")
-                        .weak(),
-                )
-                .on_hover_text(
+        let mut out = match current.source() {
+            Some(named) => fieldform_scene::CurveSlot::filled(self.curve_ui.profiles.key_of(named).unwrap_or(named)),
+            None => current,
+        };
+        // **The one curve row every block has** (`curve_slot_row`), so a section can be emptied
+        // as a path can, and the profile itself is drawn under the row that names it (§7.1, §17)
+        // -- the row for the whole loop, claimed by the loop rather than by the curve this block
+        // happens to name ([`App::host_nested_curve`]).
+        let offered = self.curve_choices(&closed);
+        self.curve_slot_row(ui, label, (id, "profile"), &mut out, &offered, "—");
+        if closed.is_empty() {
+            ui.horizontal(|ui| {
+                row_label(ui, "");
+                ui.label(egui::RichText::new("no curves in this document").weak()).on_hover_text(
                     "A profile is a closed loop — one closed curve, or several open \
                      ones whose ends meet. Draw one and it will appear here.",
                 );
-                return;
-            }
-            let offered = self.curve_choices(&closed);
-            let shown = self.shown_label(&offered, current, "—");
-            if let Some(picked) = self.reference_field(
-                ui,
-                (id, "profile"),
-                current,
-                &shown,
-                &offered,
-                RefKind::Curve,
-                DropsFrom::curve(|c| c),
-            ) {
-                out = picked;
-            }
-        });
-        // **The profile itself, under the row that names it** (§7.1, §17) -- the row for the
-        // whole loop, claimed by the loop rather than by the curve this block happens to name
-        // ([`App::host_nested_curve`]).
-        self.host_nested_curve(ui, current);
+            });
+        }
         out
     }
 
@@ -1690,7 +1681,7 @@ impl App {
             self.warn("The surface there has no direction to stand along — click somewhere else on it");
             return;
         };
-        self.pending_curve = None;
+        self.curve_ui.pending = None;
         if let Err(why) = self.stand_ends_at(id, at, into) {
             self.warn(why);
         }

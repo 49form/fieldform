@@ -277,7 +277,7 @@ fn curves_for(
                     unreachable!("every profile here belongs to an extrude");
                 };
                 let world =
-                    fieldform_field::profile_loop_turning(doc, outline.curve(), SPINE_DEGREES, sweep.source())
+                    fieldform_field::profile_loop_turning(doc, outline.curve().expect("a block that names its curve"), SPINE_DEGREES, sweep.source())
                         .expect("a closed loop")
                         .points;
                 let (origin, normal) = fieldform_field::plane_of(&world).expect("planar");

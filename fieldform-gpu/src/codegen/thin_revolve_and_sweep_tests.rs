@@ -21,7 +21,7 @@
     }
 
     fn wall(curve: CurveId, thickness: f64, side: WallSide, ends: WallEnds) -> Outline {
-        Outline::Wall { curve, thickness: lit(thickness), side, ends }
+        Outline::Wall { curve: curve.into(), thickness: lit(thickness), side, ends }
     }
 
     /// A chain in the half-plane y = 0, clear of the axis, with a sharp corner in it.
@@ -70,7 +70,7 @@
         let mut graph = Graph::empty();
         let id = graph.add(Node::Sweep { rims: Default::default(),
             outline: outline(section),
-            spine: path,
+            spine: path.into(),
             section: Section::Square,
             law: Default::default(),
         });

@@ -267,7 +267,7 @@ fn cases() -> Vec<(&'static str, Build)> {
             Box::new(move |v: f64| {
                 let mut g = Graph::empty();
                 let a = g.add(Node::Pipe {
-                    curve: fieldform_scene::CurveId::new(),
+                    curve: fieldform_scene::CurveId::new().into(),
                     radius: lit(5.0),
                 });
                 let b = g.add(Node::Sphere {
@@ -297,7 +297,7 @@ fn cases() -> Vec<(&'static str, Build)> {
                 );
                 g.add(Node::Sweep { rims: Default::default(),
                     outline: fieldform_scene::Outline::closed(profile),
-                    spine,
+                    spine: spine.into(),
                     section: fieldform_scene::Section::Skewed,
                     law: Default::default(),
                 });
@@ -320,7 +320,7 @@ fn cases() -> Vec<(&'static str, Build)> {
                 );
                 g.add(Node::Sweep { rims: Default::default(),
                     outline: fieldform_scene::Outline::closed(profile),
-                    spine,
+                    spine: spine.into(),
                     section: fieldform_scene::Section::Skewed,
                     law: Default::default(),
                 });

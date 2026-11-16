@@ -353,7 +353,9 @@ pub enum Node {
     ///
     /// It references a **curve**, not a face or an edge, which keeps it inside the boundary
     /// rule that makes topological naming never arise.
-    Pipe { curve: CurveId, radius: ParamRef },
+    ///
+    /// The curve is a [`crate::CurveSlot`]: empty, the pipe is there and waiting for one.
+    Pipe { curve: crate::CurveSlot, radius: ParamRef },
     /// A section carried along a curve, held square to it at every point: a closed profile, or
     /// a curve given a thickness — which is how an open profile is swept at all.
     ///
@@ -380,7 +382,10 @@ pub enum Node {
     ///
     /// `rims` rounds or chamfers where the side wall meets each end of an open path, as an
     /// extrude's do; a closed path has no ends, and a rim on one is refused by name.
-    Sweep { outline: Outline, spine: CurveId, section: Section, law: SweepLaw, rims: Rims },
+    ///
+    /// The section and the path are each a slot that may be empty ([`crate::CurveSlot`]): a
+    /// sweep made before either is drawn is a block waiting to be told what to read.
+    Sweep { outline: Outline, spine: crate::CurveSlot, section: Section, law: SweepLaw, rims: Rims },
     /// Two or more closed sections interpolated along a centerline: a solid that passes
     /// through each and changes smoothly between them. the loft-spec design note.
     ///
@@ -1797,7 +1802,7 @@ impl Node {
         match self {
             Node::Extrude { sweep, .. } => sweep.source(),
             Node::Revolve { frame, .. } => frame.curve_source(),
-            Node::Sweep { spine, .. } => Some(*spine),
+            Node::Sweep { spine, .. } => spine.source(),
             Node::Loft { spine, .. } => *spine,
             _ => None,
         }
@@ -1846,10 +1851,14 @@ impl Node {
     /// one place that knows, consulted by everything that asks.
     pub fn curves(&self) -> Vec<CurveId> {
         let mut out: Vec<CurveId> = match self {
-            Node::Pipe { curve, .. } => vec![*curve],
-            Node::Sweep { outline, spine, .. } => vec![outline.curve(), *spine],
+            // An empty slot names nothing, so it is no edge: reporting one would keep alive a
+            // curve nothing reads.
+            Node::Pipe { curve, .. } => curve.source().into_iter().collect(),
+            Node::Sweep { outline, spine, .. } => {
+                outline.curve().into_iter().chain(spine.source()).collect()
+            }
             Node::Loft { sections, spine, .. } => {
-                let mut out: Vec<CurveId> = sections.iter().map(|s| s.curve()).collect();
+                let mut out: Vec<CurveId> = sections.iter().filter_map(|s| s.curve()).collect();
                 out.extend(*spine);
                 out
             }
@@ -1857,7 +1866,9 @@ impl Node {
             // that is not there would keep a deleted curve alive in every check that asks.
             Node::Attract { toward, .. } => toward.curve().into_iter().collect(),
             // Through the outline, so a wall's curve is held as a closed profile's is.
-            Node::Extrude { outline, .. } | Node::Revolve { outline, .. } => vec![outline.curve()],
+            Node::Extrude { outline, .. } | Node::Revolve { outline, .. } => {
+                outline.curve().into_iter().collect()
+            }
             _ => Vec::new(),
         };
         out.extend(self.ends().iter().filter_map(|e| e.source()));
@@ -1880,11 +1891,13 @@ impl Node {
         // holding a borrow of one field across a borrow of the whole node, which is what the
         // two-pass version was refused for.
         match self {
-            Node::Pipe { curve, .. } => vec![curve],
-            Node::Sweep { outline, spine, .. } => vec![outline.curve_mut(), spine],
+            Node::Pipe { curve, .. } => curve.source_mut().into_iter().collect(),
+            Node::Sweep { outline, spine, .. } => {
+                outline.curve_mut().into_iter().chain(spine.source_mut()).collect()
+            }
             Node::Loft { sections, spine, .. } => {
                 let mut out: Vec<&mut CurveId> =
-                    sections.iter_mut().map(|s| s.curve_mut()).collect();
+                    sections.iter_mut().filter_map(|s| s.curve_mut()).collect();
                 out.extend(spine.as_mut());
                 out
             }
@@ -1902,8 +1915,9 @@ impl Node {
                 out.extend(turn.curve_mut());
                 out
             }
-            Node::Extrude { outline, .. } => vec![outline.curve_mut()],
-            Node::Revolve { outline, .. } => vec![outline.curve_mut()],
+            Node::Extrude { outline, .. } | Node::Revolve { outline, .. } => {
+                outline.curve_mut().into_iter().collect()
+            }
             // **Ends or a frame, never both**, which is what lets this be one borrow rather
             // than two. Asked with the immutable `ends` first so that borrow is over before the
             // mutable one begins; collecting from each in turn is refused outright, because the
@@ -1928,6 +1942,86 @@ impl Node {
                 .filter_map(|f| f.curve_source_mut())
                 .collect(),
         }
+    }
+
+    /// Whether this block is waiting for a curve it is built from: a pipe with none, a sweep
+    /// short of its section or its path, an extrude or a revolve with no profile, or a loft
+    /// with fewer than two sections or one of them not yet named.
+    ///
+    /// **What [`crate::Graph::incomplete`] reads beside the empty operand slots**, so a block
+    /// made before its curves is pruned from the viewport and waits, as a boolean made before
+    /// its bodies does -- one walk for both kinds of hole, which is what keeps a second
+    /// mechanism from growing beside the first.
+    ///
+    /// A loft short of two sections counts though its list has no hole in it: two is the least a
+    /// loft means anything with, and a list still being filled is the same state as a slot
+    /// still empty -- a block in the making, not a block at fault.
+    pub fn waits_for_a_curve(&self) -> bool {
+        match self {
+            Node::Pipe { curve, .. } => curve.is_empty(),
+            Node::Sweep { outline, spine, .. } => outline.is_empty() || spine.is_empty(),
+            Node::Extrude { outline, .. } | Node::Revolve { outline, .. } => outline.is_empty(),
+            Node::Loft { sections, .. } => {
+                sections.len() < 2 || sections.iter().any(Outline::is_empty)
+            }
+            _ => false,
+        }
+    }
+
+    /// Stops this block being built from `curve`, and answers whether it was.
+    ///
+    /// **[`Self::stop_reading`] for a curve**: the block lets go and waits. A slot empties and
+    /// keeps its place -- a sweep's section and its path are two different things to be told --
+    /// while a loft's section leaves the list, since a row naming nothing between two that name
+    /// something is a station with no shape, and a loft's centreline goes back to derived, which
+    /// is what naming none already means there.
+    ///
+    /// Only what the block is *built from* ([`crate::CurveSlot`]). A frame aimed along the curve
+    /// or an end standing on it is not let go of here: those have no empty state to go to, so
+    /// the caller refuses for them as it always did.
+    pub fn stop_building_on(&mut self, curve: CurveId) -> bool {
+        let mut let_go = false;
+        let mut empty = |slot: &mut crate::CurveSlot| {
+            if slot.source() == Some(curve) {
+                slot.clear();
+                let_go = true;
+            }
+        };
+        match self {
+            Node::Pipe { curve: slot, .. } => empty(slot),
+            Node::Sweep { outline, spine, .. } => {
+                empty(outline.slot_mut());
+                empty(spine);
+            }
+            Node::Extrude { outline, .. } | Node::Revolve { outline, .. } => {
+                empty(outline.slot_mut());
+            }
+            Node::Loft { sections, spine, .. } => {
+                let before = sections.len();
+                sections.retain(|s| s.curve() != Some(curve));
+                let_go = sections.len() != before;
+                if *spine == Some(curve) {
+                    *spine = None;
+                    let_go = true;
+                }
+            }
+            _ => {}
+        }
+        let_go
+    }
+
+    /// Whether `curve` is one this block is built from -- a slot [`Self::stop_building_on`] can
+    /// empty -- rather than one it is merely aimed by or stands on.
+    pub fn is_built_on(&self, curve: CurveId) -> bool {
+        self.clone().stop_building_on(curve)
+    }
+
+    /// Whether this block names `curve` in some way [`Self::stop_building_on`] cannot undo: a
+    /// frame, an end, a place, a turn, an extrude's sweep line, an attractor.
+    pub fn holds_beyond_its_slots(&self, curve: CurveId) -> bool {
+        let mut let_go = self.clone();
+        let_go.stop_building_on(curve);
+        let_go.curves().contains(&curve)
     }
 
     /// A copy of this node with every id it names pointing at the copy instead of the original.

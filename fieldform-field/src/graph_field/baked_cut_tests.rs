@@ -31,7 +31,7 @@
         let section = graph.add(Node::Extrude { rims: Default::default(),
             outline: if thin {
                 Outline::Wall {
-                    curve: id,
+                    curve: id.into(),
                     thickness: lit(20.0),
                     side: WallSide::Centre,
                     ends: WallEnds::Square,

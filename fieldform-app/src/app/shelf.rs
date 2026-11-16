@@ -21,31 +21,31 @@ impl App {
             return;
         }
         let text = settings::read();
-        self.shelf = settings::shelf_of(text.as_deref());
-        self.palette_opens = settings::palette_opens_of(text.as_deref());
+        self.tools.shelf = settings::shelf_of(text.as_deref());
+        self.tools.palette_opens = settings::palette_opens_of(text.as_deref());
     }
 
     fn save_shelf(&mut self) {
         if cfg!(test) {
             return;
         }
-        if let Err(why) = settings::write(settings::SHELF, serde_json::json!(self.shelf)) {
+        if let Err(why) = settings::write(settings::SHELF, serde_json::json!(self.tools.shelf)) {
             self.warn(format!("The shelf could not be kept: {why}"));
         }
     }
 
     /// Puts a command on the end of the shelf, if it is not there already.
     pub(crate) fn shelf_add(&mut self, id: &'static str) {
-        if self.shelf.contains(&id) || commands::by_id(id).is_none() {
+        if self.tools.shelf.contains(&id) || commands::by_id(id).is_none() {
             return;
         }
-        self.shelf.push(id);
+        self.tools.shelf.push(id);
         self.save_shelf();
     }
 
     /// Takes a command off the shelf.
     pub(crate) fn shelf_remove(&mut self, id: &'static str) {
-        self.shelf.retain(|s| *s != id);
+        self.tools.shelf.retain(|s| *s != id);
         self.save_shelf();
     }
 
@@ -53,12 +53,12 @@ impl App {
     /// while a command is being dragged.
     pub(crate) fn shelf_strip(&mut self, ui: &mut egui::Ui) {
         let dragging = egui::DragAndDrop::has_payload_of_type::<ShelfItem>(ui.ctx());
-        self.shelf_drawn.clear();
-        if self.shelf.is_empty() && !dragging {
+        self.tools.shelf_drawn.clear();
+        if self.tools.shelf.is_empty() && !dragging {
             return;
         }
         let ctx = self.command_context();
-        let shelf = self.shelf.clone();
+        let shelf = self.tools.shelf.clone();
         let mut run: Option<&'static commands::Command> = None;
         let mut remove: Option<&'static str> = None;
         let mut drawn = Vec::new();
@@ -92,7 +92,7 @@ impl App {
                 }
             });
         });
-        self.shelf_drawn = drawn;
+        self.tools.shelf_drawn = drawn;
         if let Some(item) = dropped {
             self.shelf_add(item.0);
         }
@@ -107,7 +107,7 @@ impl App {
     /// Whether the first-run hint shows: the document is empty, and the palette has been opened
     /// fewer than three times ever (§10.3).
     pub(crate) fn first_run_hint_due(&self) -> bool {
-        self.palette_opens < settings::HINT_UNTIL && self.part_graph().nodes().count() == 0 && self.doc.curves.is_empty()
+        self.tools.palette_opens < settings::HINT_UNTIL && self.part_graph().nodes().count() == 0 && self.doc.curves.is_empty()
     }
 
     /// The hint itself, faint, centred in the viewport -- below the splash while the splash shows.
@@ -124,12 +124,12 @@ impl App {
 
     /// Counts a palette opening toward the hint's going, and keeps the count -- until it has gone.
     pub(crate) fn count_palette_opening(&mut self) {
-        if self.palette_opens >= settings::HINT_UNTIL {
+        if self.tools.palette_opens >= settings::HINT_UNTIL {
             return;
         }
-        self.palette_opens += 1;
+        self.tools.palette_opens += 1;
         if !cfg!(test)
-            && let Err(why) = settings::write(settings::PALETTE_OPENS, serde_json::json!(self.palette_opens))
+            && let Err(why) = settings::write(settings::PALETTE_OPENS, serde_json::json!(self.tools.palette_opens))
         {
             self.warn(format!("The palette count could not be kept: {why}"));
         }

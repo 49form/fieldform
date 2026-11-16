@@ -181,13 +181,15 @@ impl BakedField {
                         for step in 0..run {
                             let p = block_lo + Vector3::new(step as f64 * cell.x, 0.0, 0.0);
                             let at = j * dims[0] + i + step;
-                            slab[at] = near.distance(p).clamp(-band, band) as f32;
+                            // Both from one question: a cage finds its distance and its
+                            // normal at the same closest point, and asking twice searched for
+                            // that point twice at every sample.
+                            let (value, normal) = near.distance_and_normal(p);
+                            slab[at] = value.clamp(-band, band) as f32;
                             // Falls back to differencing only for a field with no analytic
                             // answer of its own. A cage has one, which is the case this exists
                             // to carry.
-                            let n = near
-                                .normal(p)
-                                .unwrap_or_else(|| central_difference(near, p, cell.x));
+                            let n = normal.unwrap_or_else(|| central_difference(near, p, cell.x));
                             normal_slab[at] = [n.x as f32, n.y as f32, n.z as f32];
                         }
                         i += run;

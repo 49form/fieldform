@@ -21,7 +21,7 @@ impl App {
         // wandered.
         let response = ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             let response = ui.add(
-                egui::TextEdit::singleline(&mut self.console_input)
+                egui::TextEdit::singleline(&mut self.console.input)
                     .id(CONSOLE_INPUT_ID.with("console"))
                     .desired_width(f32::INFINITY)
                     .hint_text("command")
@@ -54,7 +54,7 @@ impl App {
                         // cannot do that, and truncating it loses the end of the sentence, which
                         // for a log is most of the point of having kept it.
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                        for line in &self.console_log {
+                        for line in &self.console.log {
                             let shown = if line.said > 1 {
                                 format!("{}  \u{00d7} {}", line.text, line.said)
                             } else {
@@ -68,7 +68,7 @@ impl App {
                             }
                         }
                         // The one line that is rewritten rather than added to.
-                        if let Some(doing) = &self.console_progress {
+                        if let Some(doing) = &self.console.progress {
                             ui.label(
                                 egui::RichText::new(doing)
                                     .monospace()
@@ -90,11 +90,11 @@ impl App {
                 self.recall_history(up);
             }
         }
-        if std::mem::take(&mut self.console_complete) && response.has_focus() {
+        if std::mem::take(&mut self.console.complete) && response.has_focus() {
             self.complete_command(ui.ctx(), response.id);
         }
         if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            let line = std::mem::take(&mut self.console_input);
+            let line = std::mem::take(&mut self.console.input);
             self.run_command(&line);
             response.request_focus();
         }
@@ -112,7 +112,7 @@ impl App {
         let ms = started.elapsed().as_secs_f32() * 1e3;
         // Only what is worth reading. A stage under a millisecond is not the hang.
         if ms >= 1.0 {
-            self.stages.push((what, ms));
+            self.perf.stages.push((what, ms));
         }
     }
 
@@ -151,14 +151,14 @@ impl App {
     /// A safety net is worth having precisely because the next such caller will be written by
     /// someone who has forgotten this one.
     fn report(&mut self, ok: bool, text: String) {
-        if let Some(capture) = self.line_capture.as_mut() {
+        if let Some(capture) = self.console.line_capture.as_mut() {
             capture.push((ok, text.clone()));
         }
-        self.console_reports += 1;
+        self.console.reports += 1;
         if !ok {
-            self.console_warnings += 1;
+            self.console.warnings += 1;
         }
-        match self.console_log.last_mut() {
+        match self.console.log.last_mut() {
             Some(last) if last.ok == ok && last.text == text => {
                 last.said += 1;
                 // Not written to the file again either — the count is the news, and the file is
@@ -167,10 +167,10 @@ impl App {
             }
             _ => {}
         }
-        self.console_log.push(ConsoleLine { ok, text: text.clone(), said: 1 });
-        if self.console_log.len() > CONSOLE_LINES {
-            let over = self.console_log.len() - CONSOLE_LINES;
-            self.console_log.drain(..over);
+        self.console.log.push(ConsoleLine { ok, text: text.clone(), said: 1 });
+        if self.console.log.len() > CONSOLE_LINES {
+            let over = self.console.log.len() - CONSOLE_LINES;
+            self.console.log.drain(..over);
         }
         self.mirror_to_file(ok, &text);
     }
@@ -187,13 +187,13 @@ impl App {
     /// session before it. Capped as well, because a session can be long.
     fn mirror_to_file(&mut self, ok: bool, text: &str) {
         use std::io::Write;
-        let Some(path) = self.console_file.clone() else { return };
+        let Some(path) = self.console.file.clone() else { return };
 
         // Rewritten from what is in memory once it grows past the cap. The in-memory log is
         // itself capped, so this terminates rather than trading one unbounded thing for another.
-        if self.console_file_bytes > CONSOLE_FILE_BYTES {
+        if self.console.file_bytes > CONSOLE_FILE_BYTES {
             let mut whole = String::new();
-            for line in &self.console_log {
+            for line in &self.console.log {
                 whole.push_str(&format!(
                     "{} {}\n",
                     if line.ok { "  " } else { "!!" },
@@ -201,7 +201,7 @@ impl App {
                 ));
             }
             if std::fs::write(&path, &whole).is_ok() {
-                self.console_file_bytes = whole.len() as u64;
+                self.console.file_bytes = whole.len() as u64;
             }
             return;
         }
@@ -214,7 +214,7 @@ impl App {
         );
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
             if file.write_all(entry.as_bytes()).is_ok() {
-                self.console_file_bytes += entry.len() as u64;
+                self.console.file_bytes += entry.len() as u64;
             }
         }
     }
@@ -232,7 +232,7 @@ impl App {
     /// seeing the alternatives is how you choose. None does nothing, silently — a console that
     /// scolded you for pressing Tab would be teaching you not to.
     fn complete_command(&mut self, ctx: &egui::Context, id: egui::Id) {
-        let typed = self.console_input.clone();
+        let typed = self.console.input.clone();
         // Only while the first word is still being typed. Once there is a space, the command is
         // settled and Tab has nothing to say about the arguments.
         if typed.trim().is_empty() || typed.contains(char::is_whitespace) {
@@ -263,10 +263,10 @@ impl App {
             self.say(matches.join(", "));
         }
         if shared.len() > prefix.len() || matches.len() == 1 {
-            self.console_input = shared;
+            self.console.input = shared;
             // The caret follows the text. Without this it stays where it was and the next
             // keystroke lands in the middle of the word that was just completed.
-            let at = self.console_input.chars().count();
+            let at = self.console.input.chars().count();
             if let Some(mut state) = egui::TextEdit::load_state(ctx, id) {
                 state
                     .cursor
@@ -278,20 +278,20 @@ impl App {
 
     /// Walks back and forward through what has been typed.
     fn recall_history(&mut self, backwards: bool) {
-        if self.console_history.is_empty() {
+        if self.console.history.is_empty() {
             return;
         }
-        let last = self.console_history.len() - 1;
-        self.console_history_at = match (self.console_history_at, backwards) {
+        let last = self.console.history.len() - 1;
+        self.console.history_at = match (self.console.history_at, backwards) {
             (None, true) => Some(last),
             (Some(i), true) => Some(i.saturating_sub(1)),
             (Some(i), false) if i < last => Some(i + 1),
             (Some(_), false) => None,
             (None, false) => None,
         };
-        self.console_input = self
-            .console_history_at
-            .and_then(|i| self.console_history.get(i).cloned())
+        self.console.input = self
+            .console.history_at
+            .and_then(|i| self.console.history.get(i).cloned())
             .unwrap_or_default();
     }
 
@@ -319,12 +319,12 @@ impl App {
     /// (`mcp-server-spec.md` §6.1). The console, the log and `--run` are untouched.
     #[cfg_attr(not(test), allow(dead_code))] // read by the agent host, which a later phase adds
     pub(crate) fn run_line(&mut self, line: &str) -> outcome::LineOutcome {
-        self.line_capture = Some(Vec::new());
-        self.line_error = None;
+        self.console.line_capture = Some(Vec::new());
+        self.console.line_error = None;
         let before = outcome::BlockSnapshot::of(&self.doc);
         self.run_command(line);
-        let caught = self.line_capture.take().unwrap_or_default();
-        let error = self.line_error.take();
+        let caught = self.console.line_capture.take().unwrap_or_default();
+        let error = self.console.line_error.take();
         let mut out = outcome::LineOutcome::from_reports(line, caught, error);
         out.blocks = before.changes_to(&outcome::BlockSnapshot::of(&self.doc), &self.doc);
         out
@@ -335,8 +335,8 @@ impl App {
         if line.is_empty() {
             return;
         }
-        self.console_history.push(line.to_string());
-        self.console_history_at = None;
+        self.console.history.push(line.to_string());
+        self.console.history_at = None;
         self.say(format!("> {line}"));
 
         let mut words = console_words(line).into_iter();
@@ -376,7 +376,7 @@ impl App {
             return;
         }
         if builtin == Some("console.clear") {
-            self.console_log.clear();
+            self.console.log.clear();
             return;
         }
         // `marchstats`, or `marchstats px=240`: a capture of steps per ray. Only in a build
@@ -445,13 +445,13 @@ impl App {
         match self.agent_guard_paths(&op, args) {
             Ok(guarded) => args = guarded,
             Err(error) => {
-                self.line_error = Some(error.clone());
+                self.console.line_error = Some(error.clone());
                 self.warn(error.message);
                 return;
             }
         }
         if let Some(why) = console_keys::refusal(&name, &op, &args) {
-            self.line_error = Some(outcome::unknown_key_error(&name, &op, &args, &why));
+            self.console.line_error = Some(outcome::unknown_key_error(&name, &op, &args, &why));
             self.warn(why);
             return;
         }
@@ -461,7 +461,7 @@ impl App {
         // only path by which anything an operation said was kept. Now that every operation reports
         // straight into the log, the question left is just whether this one did, and the log is
         // the thing that knows.
-        let said_before = self.console_reports;
+        let said_before = self.console.reports;
         // What was selected before, so the name lands on what this command *made* rather than
         // on whatever happened to be selected when a command made nothing.
         let was_body = self.selected_body;
@@ -491,16 +491,16 @@ impl App {
                 )),
             }
         }
-        // `console_reports` rather than the log's length, because a repeat collapses into the
+        // `console.reports` rather than the log's length, because a repeat collapses into the
         // line above it and leaves the length alone -- running the same refusal twice would
         // otherwise look like an operation that said nothing.
-        if self.console_reports > said_before {
+        if self.console.reports > said_before {
             return;
         }
         if op.contains('.') {
             self.say(format!("{op} ran"));
         } else {
-            self.line_error = Some(outcome::unknown_verb_error(&name));
+            self.console.line_error = Some(outcome::unknown_verb_error(&name));
             self.warn(format!("{name:?} is not a command — type `help` for the list"));
         }
     }
@@ -549,7 +549,7 @@ impl App {
     fn expect_unresolved(&mut self, what: String, why: String) {
         let said = format!("expect {what}: {why}");
         self.warn(said.clone());
-        self.expect_results.push(ExpectRecord {
+        self.scripting.expect_results.push(ExpectRecord {
             what,
             wanted: String::new(),
             got: String::new(),
@@ -605,6 +605,14 @@ impl App {
                 let graph = self.part_graph().clone();
                 let prepare = |id: NodeId| -> Result<(GraphField, (Point3<f64>, Point3<f64>)), String> {
                     let alone = expect::graph_of(&graph, id);
+                    // **A block still waiting says so, before its bounds are asked for.** One
+                    // with an empty slot covers nothing, so it met the line below and was told
+                    // it was "unbounded" -- which is the opposite of what is wrong with it.
+                    if !doc.incomplete_in(&alone).is_empty()
+                        && let Err(e) = GraphField::compile_graph(doc, &alone, crate::MEASURE_TOLERANCE_MM)
+                    {
+                        return Err(self.explain_compile(&e));
+                    }
                     let bounds = fieldform_field::part_extent(doc, &alone)
                         .as_box()
                         .ok_or_else(|| "it has no bounds to measure within — an unbounded block cannot be measured".to_string())?;
@@ -668,7 +676,10 @@ impl App {
                     }
                 };
                 let started = std::time::Instant::now();
-                let outcome = expect::decide(of, quantity, &wanted, h0, &mut measure);
+                // The finest grid follows the smallest body asked about, so a difference of a
+                // small part against its twin refines as far as the small part needs.
+                let smallest_side = boxes.iter().map(|(lo, hi)| (hi - lo).max()).fold(f64::INFINITY, f64::min);
+                let outcome = expect::decide(of, quantity, &wanted, h0, expect::h_min(smallest_side), &mut measure);
                 let secs = started.elapsed().as_secs_f64();
                 let nums = |v: &[f64]| v.iter().map(|x| format!("{x:.4}")).collect::<Vec<_>>().join(",");
                 let (wanted_said, tol_said) = match &wanted {
@@ -690,7 +701,7 @@ impl App {
         } else {
             self.warn(record.said.clone());
         }
-        self.expect_results.push(record);
+        self.scripting.expect_results.push(record);
     }
 
     /// `snap file="ref.png" [view=iso] [quality=still width=5000 ss=2 bg=transparent …]`: the
@@ -742,7 +753,7 @@ impl App {
 
     /// `run file=… [-keepgoing]`: arms a script for the next frame. See [`Script`].
     pub(crate) fn run_script_command(&mut self, args: &Args) {
-        if self.script_running {
+        if self.scripting.running {
             self.warn("`run` inside a script is refused — a script that runs scripts never ends");
             return;
         }
@@ -755,14 +766,14 @@ impl App {
             console_keys::flag(args, "keepgoing"),
             false,
         ) {
-            Ok(script) => self.script = Some(script),
+            Ok(script) => self.scripting.script = Some(script),
             Err(why) => self.warn(why),
         }
     }
 
     /// Runs the armed script's lines, one frame after it was armed. See [`Script`].
     pub(crate) fn drive_script(&mut self, ctx: &egui::Context) {
-        let Some(script) = self.script.as_mut() else { return };
+        let Some(script) = self.scripting.script.as_mut() else { return };
         script.frames += 1;
         if script.frames < 2 {
             ctx.request_repaint();
@@ -774,17 +785,17 @@ impl App {
             ctx.request_repaint();
             return;
         }
-        let Some(mut script) = self.script.take() else { return };
+        let Some(mut script) = self.scripting.script.take() else { return };
         let name = benchmark_name(&script.path);
         // Said once, however many frames the run takes: a snapshot sends it round again.
-        let mut tally = match self.script_tally.take() {
+        let mut tally = match self.scripting.tally.take() {
             Some(tally) => tally,
             None => {
                 self.say(format!("Running {name}: {} lines", script.lines.len()));
                 ScriptTally { started: Some(std::time::Instant::now()), ..Default::default() }
             }
         };
-        self.script_running = true;
+        self.scripting.running = true;
         let started = tally.started.unwrap_or_else(std::time::Instant::now);
         while script.next < script.lines.len() {
             let (n, line) = script.lines[script.next].clone();
@@ -792,8 +803,8 @@ impl App {
             // Every line is its own undo step: a file's lines are not one gesture.
             self.gesture = None;
             self.say(format!("{name}:{n}"));
-            let warned = self.console_warnings;
-            let expected = self.expect_results.len();
+            let warned = self.console.warnings;
+            let expected = self.scripting.expect_results.len();
             self.run_command(&line);
             // **What the line moved is named and said before the next line runs**, as the next
             // frame does after a click (`block-ownership-spec.md` §4.2). Every line runs in this
@@ -801,8 +812,8 @@ impl App {
             // line could type, its line came after the run's summary, and a folder's next `new`
             // threw it away unsaid. Said, never warned, so it cannot stop the run.
             self.drain_ownership_changes(false);
-            tally.expects.extend((expected..self.expect_results.len()).map(|i| (n, i)));
-            if self.console_warnings > warned && !script.keep_going {
+            tally.expects.extend((expected..self.scripting.expect_results.len()).map(|i| (n, i)));
+            if self.console.warnings > warned && !script.keep_going {
                 tally.stopped = Some(n);
                 break;
             }
@@ -811,18 +822,18 @@ impl App {
             // The script keeps its place, so it carries on from the next line once the file is
             // written.
             if self.pending_snap.is_some() {
-                self.script_running = false;
-                self.script_tally = Some(tally);
-                self.script = Some(script);
+                self.scripting.running = false;
+                self.scripting.tally = Some(tally);
+                self.scripting.script = Some(script);
                 ctx.request_repaint();
                 return;
             }
         }
-        self.script_running = false;
+        self.scripting.running = false;
         let (stopped, expects) = (tally.stopped, tally.expects);
         let not_passed = expects
             .iter()
-            .filter(|(_, i)| self.expect_results[*i].verdict != expect::Verdict::Pass)
+            .filter(|(_, i)| self.scripting.expect_results[*i].verdict != expect::Verdict::Pass)
             .count();
         let passed = expects.len() - not_passed;
         match stopped {
@@ -842,7 +853,7 @@ impl App {
             "refused_at": stopped,
             "ms": started.elapsed().as_millis() as u64,
             "expects": expects.iter().map(|(line, i)| {
-                let r = &self.expect_results[*i];
+                let r = &self.scripting.expect_results[*i];
                 serde_json::json!({
                     "line": line,
                     "what": r.what,
@@ -864,7 +875,7 @@ impl App {
                 Ok(following) => {
                     self.mark_saved();
                     self.dispatch("file.new", &Args::new());
-                    self.script = Some(Script {
+                    self.scripting.script = Some(Script {
                         report: script.report.clone(),
                         then: std::mem::take(&mut script.then),
                         done: std::mem::take(&mut script.done),
@@ -899,7 +910,7 @@ impl App {
             SCRIPT_EXIT_CODE.store(failed.min(i32::MAX as usize) as i32, std::sync::atomic::Ordering::SeqCst);
             // Closing without the unsaved-changes question: a run never writes over a document
             // anyone opened, and `--exit` was asked for.
-            self.closing = true;
+            self.saving.closing = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }

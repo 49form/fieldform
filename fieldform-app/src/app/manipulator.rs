@@ -293,7 +293,7 @@ impl App {
 
         // A selected profile row: its curves as one piece, pivoted on their centroid.
         if let Some(outputs::BlockRef::Profile(key)) = self.selected_block
-            && let Some(members) = self.profiles.members(key)
+            && let Some(members) = self.curve_ui.profiles.members(key)
         {
             let points: Vec<Point3<f64>> = members
                 .iter()
@@ -326,7 +326,7 @@ impl App {
         // a flat drawing can take (the owner, 2026-10-31).
         let sketch_basis = if self.sketching() { self.drawing_rotation() } else { None };
 
-        if !self.selected_points.is_empty() || !self.other_points.is_empty() {
+        if !self.selected_points.is_empty() || !self.curve_ui.other_points.is_empty() {
             // Every picked point, on whichever curve it is.
             let picked: Vec<Point3<f64>> = self
                 .picked_points()
@@ -369,7 +369,7 @@ impl App {
                 .is_some();
         if !cage_claimed
             && let Some(curve) = self.selected_curve
-            && !self.hidden_curves.contains(&curve)
+            && !self.curve_ui.hidden.contains(&curve)
             && let Some(points) = self.doc.curve(curve).map(|c| c.control_points().to_vec())
             && !points.is_empty()
         {
@@ -396,7 +396,7 @@ impl App {
         // else. Cage mode draws no field, so it offers no body handles however tempting the
         // fallback is — that is the rule two previous simplifications broke. Overlay draws
         // both, so with nothing picked on the cage it can still offer the body.
-        let draws_field = matches!(self.view_mode, ViewMode::Field | ViewMode::Overlay);
+        let draws_field = matches!(self.view.mode, ViewMode::Field | ViewMode::Overlay);
         let placement = self.control_placement();
         let on_cage = editable && self.selection.centroid(self.control(), &placement).is_some();
         if !on_cage && !draws_field {
@@ -678,7 +678,7 @@ impl App {
 
         // A selected profile row moves every curve of its loop as one piece.
         if let Some(outputs::BlockRef::Profile(key)) = self.selected_block
-            && let Some(members) = self.profiles.members(key).map(|m| m.to_vec())
+            && let Some(members) = self.curve_ui.profiles.members(key).map(|m| m.to_vec())
         {
             let mut moves = Vec::new();
             for curve in members {
@@ -713,7 +713,7 @@ impl App {
                 && self.selection.centroid(self.control(), &placement).is_some()
         };
         // Points picked across several curves move as one piece, the way a profile row's do.
-        if !self.other_points.is_empty() {
+        if !self.curve_ui.other_points.is_empty() {
             let mut moves = Vec::new();
             for (curve, indices) in group_by_curve(&self.picked_points()) {
                 let Some(points) = self.doc.curve(curve).map(|c| c.control_points().to_vec())
@@ -742,7 +742,7 @@ impl App {
         }
         if (!self.selected_points.is_empty() || !cage_claimed)
             && let Some(curve) = self.selected_curve
-            && !self.hidden_curves.contains(&curve)
+            && !self.curve_ui.hidden.contains(&curve)
             && let Some(points) = self.doc.curve(curve).map(|c| c.control_points().to_vec())
         {
             let indices: Vec<usize> = if self.selected_points.is_empty() {
@@ -798,6 +798,7 @@ impl App {
             // still wrap a pipe — this is the manipulator choosing the edit that matches what
             // the user pointed at, which is exactly what it already does for a cage body.
             if let Some(Node::Pipe { curve, .. }) = self.part_graph().node(body).cloned()
+                && let Some(curve) = curve.source()
                 && let Some(points) = self.doc.curve(curve).map(|c| c.control_points().to_vec())
                 && !points.is_empty()
             {

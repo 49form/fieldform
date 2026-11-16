@@ -351,7 +351,7 @@ fn structural_edit(
         }
         4 => {
             let curve = rng.pick(curves)?;
-            born.node(graph.add(Node::Pipe { curve, radius: lit(1.0) }));
+            born.node(graph.add(Node::Pipe { curve: curve.into(), radius: lit(1.0) }));
             Some("a pipe added")
         }
         5 => {
@@ -404,8 +404,8 @@ fn repoint_edit(rng: &mut Lcg, born: &Born, graph: &mut Graph, curves: &[CurveId
         nodes.into_iter().filter(|id| matches!(graph.node(*id), Some(Node::Pipe { .. }))).collect();
     let (Some(id), Some(to)) = (rng.pick(&pipes), rng.pick(curves)) else { return false };
     match graph.node_mut(id) {
-        Some(Node::Pipe { curve, .. }) if *curve != to => {
-            *curve = to;
+        Some(Node::Pipe { curve, .. }) if *curve != to.into() => {
+            *curve = to.into();
             true
         }
         _ => false,
@@ -609,7 +609,7 @@ fn every_edit_leaves_the_invariants_holding() {
                     let curve = line(&format!("Pasted {step}"));
                     born.curve(curve.id);
                     let mut after = graph(&doc, part);
-                    born.node(after.add(Node::Pipe { curve: curve.id, radius: lit(2.0) }));
+                    born.node(after.add(Node::Pipe { curve: curve.id.into(), radius: lit(2.0) }));
                     let mut members: Vec<Box<dyn Command>> = vec![
                         Box::new(SetCurve::insert(curve.clone())),
                         Box::new(SetPartGraph::new(part, graph(&doc, part), after)),

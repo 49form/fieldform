@@ -380,6 +380,14 @@ impl Graph {
         None
     }
 
+    /// The first block waiting for a curve it is built from, in id order -- for a refusal to
+    /// name, as [`Self::first_empty_operand`] is and ordered for its reason.
+    pub fn first_waiting_for_a_curve(&self) -> Option<NodeId> {
+        let mut ids: Vec<NodeId> = self.nodes.keys().copied().collect();
+        ids.sort();
+        ids.into_iter().find(|id| self.nodes[id].waits_for_a_curve())
+    }
+
     /// Every block that cannot be evaluated because a slot below it is empty: the holed blocks,
     /// and everything that reads them, however far up.
     ///
@@ -398,7 +406,11 @@ impl Graph {
         for (id, node) in self.nodes() {
             let mut holed = false;
             node.for_each_operand_slot_public(&mut |slot| holed |= slot.is_empty());
-            if holed {
+            // **And a block waiting for a curve it is built from**, which is the same hole one
+            // kind over: a pipe with no curve has no value either. Read here so that everything
+            // asking "what cannot be evaluated" -- the viewport's prune, the gate, the compile's
+            // refusal -- gets both answers from the one walk.
+            if holed || node.waits_for_a_curve() {
                 found.insert(id);
             }
         }

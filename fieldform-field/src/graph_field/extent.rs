@@ -358,6 +358,7 @@ fn extent_of(
                     })
                     .collect(),
                 fieldform_scene::Outline::Wall { curve, thickness, side: across, ends: stops } => {
+                    let Some(curve) = &curve.source() else { return Extent::Empty };
                     let built = wall_in_plane(
                         &section,
                         *curve,
@@ -493,6 +494,7 @@ fn extent_of(
             // The section as `(r, z)` points it does not reach past.
             let reach: Vec<(f64, f64)> = match outline {
                 fieldform_scene::Outline::Closed { profile } => {
+                    let Some(profile) = &profile.source() else { return Extent::Empty };
                     let Ok(found) = crate::profile_loop(document, *profile, frame.curve_source())
                     else {
                         return Extent::Empty;
@@ -508,6 +510,7 @@ fn extent_of(
                         .collect()
                 }
                 fieldform_scene::Outline::Wall { curve, thickness, side, ends } => {
+                    let Some(curve) = &curve.source() else { return Extent::Empty };
                     let Ok(chain) = crate::outline_chain(document, *curve, frame.curve_source())
                     else {
                         return Extent::Empty;
@@ -581,6 +584,8 @@ fn extent_of(
         // is from there. The law's own number, so a section doubled on the way does not grow
         // out of its box.
         Node::Sweep { outline, spine, law, .. } => {
+            // A sweep still waiting for its path covers nothing.
+            let Some(spine) = &spine.source() else { return Extent::Empty };
             let Some(curve) = document.curves.get(spine) else { return Extent::Empty };
             let Some(section) = sweep_section(document, outline, *spine) else {
                 return Extent::Empty;
@@ -632,7 +637,7 @@ fn extent_of(
             let bulge = build_loft(&parts, *smooth).map(|built| built.overshoot()).unwrap_or(0.0);
             Extent::around(parts.spine, reach + bulge)
         }
-        Node::Pipe { curve, radius } => match document.curves.get(curve) {
+        Node::Pipe { curve, radius } => match curve.source().and_then(|id| document.curves.get(&id)) {
             // The widest the radius ever gets, when a ramp drives it — the same reading the
             // offset's arm below makes, and for the same reason: a box drawn to the *current*
             // radius of a varying one clips the body wherever it is fatter than that.

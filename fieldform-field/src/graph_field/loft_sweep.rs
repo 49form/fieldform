@@ -94,6 +94,7 @@ pub fn loft_parts(
         let fieldform_scene::Outline::Closed { profile } = section else {
             return Err(CompileError::WallAsLoftSection(i));
         };
+        let profile = &profile.source().ok_or(CompileError::EmptySection)?;
         let ids = crate::loop_from(document, *profile, spine)
             .map_err(|e| CompileError::BadLoop(*profile, e))?;
         members.push(ids.iter().filter_map(|id| document.curves.get(id).cloned()).collect());
@@ -114,6 +115,7 @@ pub fn loft_parts(
         let fieldform_scene::Outline::Closed { profile } = section else {
             return Err(CompileError::WallAsLoftSection(i));
         };
+        let profile = &profile.source().ok_or(CompileError::EmptySection)?;
         let points = crate::profile_loop_turning(document, *profile, turn_degrees, spine)
             .map_err(|e| CompileError::BadLoop(*profile, e))?
             .points;
@@ -542,6 +544,7 @@ pub(crate) fn sweep_section(
         // A wall's curve is not its reach: the band goes a thickness past it. Asked of the
         // wall itself, so the bound is the one `Swept` computes from the footprint it holds.
         fieldform_scene::Outline::Wall { curve, thickness, side, ends } => {
+            let curve = &curve.source()?;
             let thickness = document.resolve(thickness)?;
             let wall =
                 wall_in_plane(&laid, *curve, thickness, *side, *ends, f64::INFINITY).ok()?;

@@ -138,11 +138,11 @@ fn main() {
                     let Some(Node::Sweep { rims: _, outline, spine, section, law }) = graph.node(node) else {
                         unreachable!("a frame belongs to a sweep");
                     };
-                    stretch = fieldform_field::sweep_stretch(&doc, outline, *spine, law);
-                    tube = fieldform_field::sweep_tube(&doc, outline, *spine, section, law)
+                    stretch = fieldform_field::sweep_stretch(&doc, outline, spine.source().expect("a block that names its curve"), law);
+                    tube = fieldform_field::sweep_tube(&doc, outline, spine.source().expect("a block that names its curve"), section, law)
                         .map(|(_, tube)| tube);
-                    let points = spine_points(spine);
-                    let frame = fieldform_field::sweep_frame(&doc, outline, *spine, &points)
+                    let points = spine_points(&spine.source().expect("a block that names its curve"));
+                    let frame = fieldform_field::sweep_frame(&doc, outline, spine.source().expect("a block that names its curve"), &points)
                         .expect("a spine with a direction");
                     (frame, None)
                 }
@@ -152,11 +152,11 @@ fn main() {
                 fieldform_gpu::CurveUse::Profile(node) => {
                     let (curve, ignore) = match graph.node(node) {
                         Some(Node::Extrude { outline, sweep, .. }) => (outline.curve(), sweep.source()),
-                        Some(Node::Sweep { outline, spine, .. }) => (outline.curve(), Some(*spine)),
+                        Some(Node::Sweep { outline, spine, .. }) => (outline.curve(), spine.source()),
                         _ => unreachable!("a profile belongs to an extrude or a sweep"),
                     };
                     let world =
-                        fieldform_field::profile_loop_turning(&doc, curve, SPINE_DEGREES, ignore)
+                        fieldform_field::profile_loop_turning(&doc, curve.expect("a block that names its curve"), SPINE_DEGREES, ignore)
                             .expect("a closed loop")
                             .points;
                     let (origin, normal) = fieldform_field::plane_of(&world).expect("planar");
@@ -221,7 +221,9 @@ fn main() {
         // Each spine walked once, as the application walks it however many bindings read it,
         // and a sweep's frame worked out over that walk; the median of nine.
         let sweep_of = |node| match graph.node(node) {
-            Some(Node::Sweep { outline, spine, .. }) => (outline, *spine),
+            Some(Node::Sweep { outline, spine, .. }) => {
+                (outline, spine.source().expect("a sweep that names its path"))
+            }
             _ => unreachable!("a frame belongs to a sweep"),
         };
         let mut walks: Vec<f64> = (0..9)
@@ -376,7 +378,7 @@ fn swept(which: Path) -> (Document, Graph) {
     let profile = glyph(&mut doc);
     let spine = path(&mut doc, which);
     let mut graph = Graph::empty();
-    graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine, section: Default::default(), law: Default::default() });
+    graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine: spine.into(), section: Default::default(), law: Default::default() });
     (doc, graph)
 }
 
@@ -384,6 +386,6 @@ fn piped() -> (Document, Graph) {
     let mut doc = Document::new();
     let spine = path(&mut doc, Path::Tight);
     let mut graph = Graph::empty();
-    graph.add(Node::Pipe { curve: spine, radius: ParamRef::Literal(40.0) });
+    graph.add(Node::Pipe { curve: spine.into(), radius: ParamRef::Literal(40.0) });
     (doc, graph)
 }

@@ -625,7 +625,7 @@ fn bent_polyline_spine(doc: &mut Document) -> CurveId {
 
 fn sweep(profile: CurveId, spine: CurveId, section: Section) -> (Graph, NodeId) {
     let mut g = Graph::empty();
-    let n = g.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine, section, law: Default::default() });
+    let n = g.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine: spine.into(), section, law: Default::default() });
     (g, n)
 }
 
@@ -744,7 +744,7 @@ fn a_tapered_or_drafted_sweep_holds_every_solid_point() {
         let mut g = Graph::empty();
         let n = g.add(Node::Sweep { rims: Default::default(),
             outline: fieldform_scene::Outline::closed(p),
-            spine: s,
+            spine: s.into(),
             section: Section::Square,
             law,
         });
@@ -802,7 +802,7 @@ fn thin(
 ) -> (Graph, NodeId) {
     let mut graph = Graph::empty();
     let node = graph.add(Node::Extrude { rims: Default::default(),
-        outline: fieldform_scene::Outline::Wall { curve, thickness: lit(thickness), side, ends },
+        outline: fieldform_scene::Outline::Wall { curve: curve.into(), thickness: lit(thickness), side, ends },
         sweep,
         height: lit(height),
         draft: lit(draft),
@@ -941,7 +941,7 @@ fn a_thin_revolve_holds_every_solid_point() {
     ] {
         let mut g = Graph::empty();
         let n = g.add(Node::Revolve { rims: Default::default(),
-            outline: Outline::Wall { curve: c, thickness: lit(5.0), side, ends },
+            outline: Outline::Wall { curve: c.into(), thickness: lit(5.0), side, ends },
             frame: Frame::default(),
             angle: fieldform_scene::ParamRef::Literal(360.0),
             sides: fieldform_scene::AngleSides::One,
@@ -964,7 +964,7 @@ fn a_thin_revolve_whose_band_crosses_the_axis_holds_every_solid_point() {
     let mut g = Graph::empty();
     let n = g.add(Node::Revolve { rims: Default::default(),
         outline: Outline::Wall {
-            curve: near,
+            curve: near.into(),
             thickness: lit(9.0),
             side: WallSide::Left,
             ends: WallEnds::Square,
@@ -1005,8 +1005,8 @@ fn an_open_section_sweep_holds_every_solid_point() {
     for (side, ends) in [(WallSide::Right, WallEnds::Square), (WallSide::Centre, WallEnds::Round)] {
         let mut g = Graph::empty();
         let n = g.add(Node::Sweep { rims: Default::default(),
-            outline: Outline::Wall { curve: section, thickness: lit(2.0), side, ends },
-            spine: path,
+            outline: Outline::Wall { curve: section.into(), thickness: lit(2.0), side, ends },
+            spine: path.into(),
             section: Section::Square,
             law: Default::default(),
         });

@@ -121,8 +121,8 @@ impl App {
         self.cancel_curve_placement_quietly();
         // Extrude and inset are sessions on the selected faces, not click tools.
         if matches!(command.op, "cage.extrude" | "cage.inset") {
-            if !self.view_mode.cage_is_editable() {
-                self.view_mode = ViewMode::Overlay;
+            if !self.view.mode.cage_is_editable() {
+                self.view.mode = ViewMode::Overlay;
             }
             self.begin_cage_session(command);
             return;
@@ -143,8 +143,8 @@ impl App {
         }
         self.cage_tool = Some(CageTool::new(command));
         // Field mode draws no cage to aim at: said, rather than left to a hover that never lands.
-        if !self.view_mode.cage_is_editable() {
-            self.view_mode = ViewMode::Overlay;
+        if !self.view.mode.cage_is_editable() {
+            self.view.mode = ViewMode::Overlay;
             self.say(format!("{}: {} (switched to Field + Cage so the cage can be picked)", command.display_name, tool_hint(command)));
             return;
         }
@@ -257,7 +257,7 @@ impl App {
         };
         self.stack.keep_since(session.mark, session.command.display_name);
         self.gesture = None;
-        self.last_command = Some(session.command);
+        self.tools.last_command = Some(session.command);
         // Kept, the cage is judged again: a cap pulled to a height is a solid, and one an inset
         // folded or a drag put back at nought is red, said where the faults are drawn.
         let was_red = self.doc.cage_is_red(session.cage);
@@ -289,13 +289,13 @@ impl App {
         self.move_state = None;
         self.selection = session.selection_before;
         self.after_document_change();
-        self.echo_base.moves = self.document_moves;
+        self.console.echo_base.moves = self.document_moves;
         self.say(format!("{} taken back", session.command.display_name));
     }
 
 
     fn cancel_curve_placement_quietly(&mut self) {
-        if self.pending_curve.is_some() {
+        if self.curve_ui.pending.is_some() {
             self.cancel_curve_placement();
         }
     }

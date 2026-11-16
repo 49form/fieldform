@@ -117,7 +117,7 @@
     #[test]
     fn the_autosave_is_not_the_document_s_own_file() {
         let path = super::autosave_path();
-        assert_eq!(path.parent(), Some(std::env::temp_dir().as_path()));
+        assert_eq!(path.parent(), Some(super::recovery_dir().as_path()));
         let own = format!("fieldform-autosave-{}.", std::process::id());
         assert!(
             path.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&own)),
@@ -150,7 +150,7 @@
         assert_ne!(recovered_path(Some(&already_kept)), already_kept);
 
         let untitled = recovered_path(None);
-        assert_eq!(untitled.parent(), Some(std::env::temp_dir().as_path()));
+        assert_eq!(untitled.parent(), Some(super::recovery_dir().as_path()));
         assert_eq!(
             untitled.file_name().map(|n| n.to_string_lossy().into_owned()),
             Some(format!("fieldform-untitled.recovered.{DOCUMENT_EXTENSION}"))
@@ -207,7 +207,7 @@
 
         let kept = write_recovered(&doc, Some(&(file, archive))).expect("kept somewhere");
         let beside_the_logs =
-            std::env::temp_dir().join(format!("{stem}.recovered.{DOCUMENT_EXTENSION}"));
+            super::recovery_dir().join(format!("{stem}.recovered.{DOCUMENT_EXTENSION}"));
         assert_eq!(kept, beside_the_logs);
         assert!(fieldform_io::open(&kept).is_ok(), "the kept file opens");
         let _ = std::fs::remove_file(&kept);
@@ -418,7 +418,7 @@
     /// A block that takes two operands finds them itself, without either slot being set.
     ///
     /// **The complaint was that a morph would not recognise the bodies in the part.** It read
-    /// `boolean_a` and `boolean_b` directly and refused unless both held something, and those
+    /// `next.boolean_a` and `next.boolean_b` directly and refused unless both held something, and those
     /// two are only ever written by the boolean tool's own pickers — so adding bodies, however
     /// many, never filled them and the morph stayed unavailable while saying only that it
     /// needed two bodies. The boolean beside it read the body list instead, which is why the
@@ -2515,7 +2515,7 @@
             let spare = line(&mut doc, "spare", [500.0, 0.0, 0.0], [500.0, 0.0, 30.0]);
             let mut stack = CommandStack::default();
             let mut g = Graph::empty();
-            let tube = g.add(Node::Pipe { curve: path, radius: ParamRef::Literal(3.0) });
+            let tube = g.add(Node::Pipe { curve: path.into(), radius: ParamRef::Literal(3.0) });
             record_graph_edit(&mut stack, &mut doc, &mut None, part, g.clone()).expect("the pipe");
             assert_eq!(
                 doc.nesting_in(&doc.parts[&part].graph).curve_owners_of(path).to_vec(),
@@ -2529,13 +2529,13 @@
             let mut swept = g.clone();
             let bar = swept.add(Node::Sweep { rims: Default::default(),
                 outline: Outline::closed(square[0]),
-                spine: if spare_first { spare } else { path },
+                spine: if spare_first { spare.into() } else { path.into() },
                 section: Default::default(),
                 law: Default::default(),
             });
             let mut told = swept.clone();
             if let Some(Node::Sweep { spine, .. }) = told.node_mut(bar) {
-                *spine = up;
+                *spine = up.into();
             }
             let mut gesture = None;
             record_graph_edit(&mut stack, &mut doc, &mut gesture, part, swept).expect("the sweep");
@@ -3354,7 +3354,7 @@
         let here = Rc::clone(&last);
         last = frame("a part switch", &doc, key(moves, second), Some(&last));
         let mut graph = doc.parts[&second].graph.clone();
-        graph.add(Node::Pipe { curve: spine, radius: lit(3.0) });
+        graph.add(Node::Pipe { curve: spine.into(), radius: lit(3.0) });
         record_graph_edit_with(&mut stack, &mut doc, &mut gesture, &mut edits, second, graph)
             .expect("the pipe");
         moves += 1;
@@ -4942,6 +4942,141 @@
             );
         }
 
+        /// **A curve a block is built from can be deleted, and the block is left waiting.**
+        ///
+        /// Reported as curves "stuck inside" blocks: Delete on a pipe's curve, or a sweep's path,
+        /// answered "delete that first", and there was no way to take the curve out of the block
+        /// either, because a curve slot could not name nothing. It can be empty now, so the curve
+        /// goes, the pipe and the sweep let go of it and wait, and the sweep keeps the section it
+        /// still has. One entry, undone in one go, to exactly the graph there was.
+        #[test]
+        fn deleting_a_curve_blocks_are_built_from_leaves_them_waiting() {
+            use super::super::{delete_held_curve_commands, SetPartGraph};
+            use fieldform_scene::{Outline, ParamRef};
+            let (mut doc, part, square) = square_document();
+            let mut stack = CommandStack::default();
+            let path = CurveId::new();
+            doc.curves.insert(
+                path,
+                Curve::polyline(path, "Path", vec![Point3::new(5.0, 5.0, 0.0), Point3::new(5.0, 5.0, 40.0)], false)
+                    .expect("a line"),
+            );
+            let empty = doc.parts[&part].graph.clone();
+            let mut graph = empty.clone();
+            let pipe = graph.add(Node::Pipe { curve: path.into(), radius: ParamRef::Literal(1.0) });
+            let sweep = graph.add(Node::Sweep {
+                outline: Outline::closed(square[0]),
+                spine: path.into(),
+                section: Default::default(),
+                law: Default::default(),
+                rims: Default::default(),
+            });
+            let built = graph.clone();
+            stack
+                .execute(&mut doc, Box::new(SetPartGraph::new(part, empty, graph)))
+                .expect("the blocks are added");
+            let explain = |e: &fieldform_field::CompileError| e.to_string();
+            assert_eq!(crate::App::refusal_of(&doc, &built, &explain), None, "the part builds");
+
+            let (commands, after, let_go) =
+                delete_held_curve_commands(&doc, part, path).expect("a curve read through slots");
+            assert_eq!(let_go.len(), 2, "the pipe and the sweep both let go");
+            assert!(let_go.contains(&pipe) && let_go.contains(&sweep));
+            // The delete is not one the gate refuses: a waiting block is passed over.
+            assert_eq!(crate::App::delete_breaks(&doc, &built, &after, &explain), None);
+            stack
+                .execute(&mut doc, Box::new(Batch::new("curve.delete", commands)))
+                .expect("the delete applies");
+            assert!(doc.curve(path).is_none(), "the curve is gone");
+            let now = &doc.parts[&part].graph;
+            assert!(
+                matches!(now.node(pipe), Some(Node::Pipe { curve, .. }) if curve.is_empty()),
+                "the pipe is still there, waiting for a curve",
+            );
+            match now.node(sweep) {
+                Some(Node::Sweep { outline, spine, .. }) => {
+                    assert!(spine.is_empty(), "the sweep waits for a path");
+                    assert_eq!(outline.curve(), Some(square[0]), "and keeps its section");
+                }
+                other => panic!("the sweep should still be a sweep, not {other:?}"),
+            }
+            assert!(now.incomplete().contains(&pipe) && now.incomplete().contains(&sweep));
+            assert!(square.iter().all(|id| doc.curve(*id).is_some()), "nothing else was deleted");
+
+            stack.undo(&mut doc).expect("one undo");
+            assert!(doc.curve(path).is_some(), "the curve is back");
+            assert_eq!(doc.parts[&part].graph, built, "and both blocks read it again");
+        }
+
+        /// **What has no empty state to go to still holds its curve.** An extrude pulled along a
+        /// line names that line as a direction, not as something it is built from, so deleting
+        /// the line is not an edit this makes -- the caller says what holds it.
+        #[test]
+        fn a_curve_a_block_is_aimed_along_is_not_let_go_of_by_a_delete() {
+            use super::super::{delete_held_curve_commands, SetPartGraph};
+            use fieldform_scene::{Outline, ParamRef};
+            let (mut doc, part, square) = square_document();
+            let mut stack = CommandStack::default();
+            let along = CurveId::new();
+            doc.curves.insert(
+                along,
+                Curve::polyline(along, "Along", vec![Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, 3.0, 20.0)], false)
+                    .expect("a line"),
+            );
+            let empty = doc.parts[&part].graph.clone();
+            let mut graph = empty.clone();
+            graph.add(Node::Extrude {
+                outline: Outline::closed(square[0]),
+                sweep: fieldform_scene::Sweep::Along { curve: along },
+                height: ParamRef::Literal(10.0),
+                draft: ParamRef::Literal(0.0),
+                start: ParamRef::Literal(0.0),
+                sides: fieldform_scene::Sides::One,
+                corners: Default::default(),
+                rims: Default::default(),
+            });
+            stack
+                .execute(&mut doc, Box::new(SetPartGraph::new(part, empty, graph)))
+                .expect("the extrude is added");
+            assert!(delete_held_curve_commands(&doc, part, along).is_none());
+            assert!(doc.curve(along).is_some());
+        }
+
+        /// **A loft through a loop lets go of it when the loop is opened.** A loft's section has
+        /// to close, so deleting one side of a lofted square was refused for the part it would
+        /// break -- a line of a lofted profile could not be deleted at all. The section leaves
+        /// the list instead, and the loft waits for another.
+        #[test]
+        fn deleting_a_side_of_a_lofted_square_takes_the_section_out_of_the_loft() {
+            use super::super::{delete_loop_member_commands, SetPartGraph};
+            use fieldform_scene::Outline;
+            let (mut doc, part, square, mut stack) = joined_square();
+            let before = doc.parts[&part].graph.clone();
+            let mut graph = before.clone();
+            let loft = graph.add(Node::Loft {
+                sections: vec![Outline::closed(square[1])],
+                spine: None,
+                smooth: Default::default(),
+                rims: Default::default(),
+            });
+            stack
+                .execute(&mut doc, Box::new(SetPartGraph::new(part, before, graph)))
+                .expect("the loft is added");
+            let gone = square[0];
+            let mates = fieldform_field::loop_from(&doc, gone, None).expect("a loop");
+            let (commands, _, done) =
+                delete_loop_member_commands(&doc, part, gone, &mates, 2.5).expect("a loop member");
+            assert_eq!(done.let_go, vec![loft], "the loft named another side of the same loop");
+            assert!(done.walled.is_empty(), "and nothing was turned into a wall");
+            stack
+                .execute(&mut doc, Box::new(Batch::new("curve.delete", commands)))
+                .expect("the delete applies");
+            assert!(
+                matches!(doc.parts[&part].graph.node(loft), Some(Node::Loft { sections, .. }) if sections.is_empty()),
+                "the section left the list",
+            );
+        }
+
         /// **A curve can be taken out of a loop a block is built on, and the block follows.**
         /// Asked for the first day a block could be built on an open chain: deleting a side of an
         /// extruded square was refused, since the extrude read the loop. The side goes, the two
@@ -4984,7 +5119,7 @@
             assert_eq!(ends_held(&doc, &square[1..]), 4, "two curves still held at each of them");
             match doc.parts[&part].graph.node(extrude).and_then(Node::outline) {
                 Some(Outline::Wall { curve, thickness, side, .. }) => {
-                    assert!(square[1..].contains(curve), "pointed at a curve that is still there");
+                    assert!(square[1..].contains(&curve.source().expect("a block that names its curve")), "pointed at a curve that is still there");
                     assert_eq!(*thickness, ParamRef::Literal(2.5));
                     assert_eq!(*side, WallSide::Centre);
                 }
@@ -5333,7 +5468,7 @@
             let rail = lone_line(&mut doc, "Rail", 30.0);
             let spare = lone_line(&mut doc, "Spare", 60.0);
             doc.parts.get_mut(&base).expect("the base").graph.add(Node::Pipe {
-                curve: rail,
+                curve: rail.into(),
                 radius: fieldform_scene::ParamRef::Literal(1.0),
             });
             let label = |graph: &Graph, node: NodeId| {
@@ -5375,7 +5510,7 @@
             assert_eq!((one.parts, one.built_on()), (1, "another part is built on it, so it stays"));
             let cap = second_part(&mut doc, "Cap");
             doc.parts.get_mut(&cap).expect("the cap").graph.add(Node::Pipe {
-                curve: square[0],
+                curve: square[0].into(),
                 radius: fieldform_scene::ParamRef::Literal(1.0),
             });
             let two = readers_in_other_parts(&doc, base, &[square[0]], label);
@@ -5443,7 +5578,7 @@
                 &mut doc,
                 lid,
                 Outline::Wall {
-                    curve: square[1],
+                    curve: square[1].into(),
                     thickness: ParamRef::Literal(2.0),
                     side: WallSide::Centre,
                     ends: WallEnds::Square,
@@ -5474,7 +5609,7 @@
             let walled = extrude_in(&mut doc, base, square[0]);
             let lid = second_part(&mut doc, "Lid");
             let pipe = doc.parts.get_mut(&lid).expect("the lid").graph.add(Node::Pipe {
-                curve: square[1],
+                curve: square[1].into(),
                 radius: fieldform_scene::ParamRef::Literal(1.0),
             });
             let mates = fieldform_field::loop_from(&doc, square[0], None).expect("a loop");
@@ -5495,7 +5630,7 @@
             assert!(
                 matches!(
                     doc.parts[&lid].graph.node(pipe),
-                    Some(Node::Pipe { curve, .. }) if *curve == square[1]
+                    Some(Node::Pipe { curve, .. }) if *curve == square[1].into()
                 ),
                 "and the lid's pipe still runs along it",
             );
@@ -5910,7 +6045,7 @@
             let extrude = extrude_in(&mut doc, part, square[0]);
             let rail = lone_line(&mut doc, "Rail", 30.0);
             let graph = &mut doc.parts.get_mut(&part).expect("the part").graph;
-            let pipe = graph.add(Node::Pipe { curve: rail, radius: ParamRef::Literal(1.0) });
+            let pipe = graph.add(Node::Pipe { curve: rail.into(), radius: ParamRef::Literal(1.0) });
             let inputs = vec![extrude.into(), pipe.into()];
             let union = graph.add(Node::Boolean { op: BooleanOp::Union, inputs });
             (doc, part, square, extrude, rail, pipe, union)
@@ -6027,7 +6162,7 @@
                 Some(fieldform_scene::Outline::Closed { profile }) => *profile,
                 other => panic!("an extrude of a closed profile, not {other:?}"),
             };
-            let found = fieldform_field::profile_loop(doc, named, None).expect("a closed profile");
+            let found = fieldform_field::profile_loop(doc, named.source().expect("a block that names its curve"), None).expect("a closed profile");
             let points = &found.points;
             let twice: f64 = (0..points.len())
                 .map(|i| {
@@ -6061,11 +6196,11 @@
                     Some(Outline::Closed { profile }) => *profile,
                     other => panic!("the paste should extrude a closed profile, not {other:?}"),
                 };
-                assert!(!originals.contains(&named), "the pasted extrude names a curve of its own");
+                assert!(!originals.contains(&named.source().expect("a block that names its curve")), "the pasted extrude names a curve of its own");
                 let copies: BTreeSet<CurveId> =
                     doc.curves.keys().copied().filter(|c| !originals.contains(c)).collect();
                 assert_eq!(copies.len(), square.len(), "one copy for each side of the loop");
-                assert!(copies.contains(&named));
+                assert!(copies.contains(&named.source().expect("a block that names its curve")));
                 let shapes = |ids: &mut dyn Iterator<Item = &CurveId>| {
                     let mut out: Vec<Vec<[u64; 3]>> =
                         ids.map(|id| every_control_point_bits(&doc, &[*id])).collect();
@@ -7109,7 +7244,7 @@
             )
             .expect("a line"),
         );
-        let pipe = graph.add(Node::Pipe { curve: spine, radius: lit(3.0) });
+        let pipe = graph.add(Node::Pipe { curve: spine.into(), radius: lit(3.0) });
         let pipes = graph.add(Node::Pattern {
             options: Default::default(),
             input: pipe.into(),
@@ -7167,7 +7302,7 @@
         );
 
         // **The reported path, with two screenshots behind it.** `add_pipe_body` points
-        // `boolean_b` at the raw pipe it just made; a pattern is built over that pipe afterwards;
+        // `next.boolean_b` at the raw pipe it just made; a pattern is built over that pipe afterwards;
         // `boolean -u` then runs with a seed naming a node that is now inside something. Both
         // seeds are lifted, so the union is still of the two patterns -- unlifted, it took the
         // pipe, which then has the union for a second reader and is drawn inside it as well as

@@ -194,9 +194,8 @@ pub struct Ctx {
     pub selected: bool,
     pub clipboard: bool,
     pub clipboard_curve: bool,
-    /// The part's bodies, and what a two-body tool can take.
+    /// The part's bodies.
     pub bodies: usize,
-    pub pair_candidates: usize,
     /// The viewport draws the field, so a surface can be clicked.
     pub field_drawn: bool,
     /// The cage tools are editing the cage rather than a surface.
@@ -230,6 +229,8 @@ pub struct Ctx {
     pub view_mode: &'static str,
     /// The display quality's label, lowercased.
     pub quality: String,
+    /// Cells across the scene the control cage is baked at for display.
+    pub cage_detail: usize,
 }
 
 /// Whether a command is on offer now, and if not, why not.
@@ -288,9 +289,6 @@ fn has_clipboard_curve(c: &Ctx) -> Result<(), &'static str> {
 }
 fn a_body(c: &Ctx) -> Result<(), &'static str> {
     if c.bodies > 0 { Ok(()) } else { Err("Needs a body") }
-}
-fn two_bodies(c: &Ctx) -> Result<(), &'static str> {
-    if c.pair_candidates >= 2 { Ok(()) } else { Err("Needs two bodies") }
 }
 fn field_drawn(c: &Ctx) -> Result<(), &'static str> {
     if c.field_drawn {
@@ -468,6 +466,7 @@ const EDIT: &[&str] = &["Edit"];
 const VIEW: &[&str] = &["View"];
 const VIEW_MODE: &[&str] = &["View", "Display mode"];
 const VIEW_QUALITY: &[&str] = &["View", "Display quality"];
+const VIEW_CAGE: &[&str] = &["View", "Cage detail"];
 const VIEW_PANEL: &[&str] = &["View", "Blocks as"];
 const CREATE: &[&str] = &["Create"];
 const PRIMITIVES: &[&str] = &["Create", "Primitives"];
@@ -490,6 +489,7 @@ pub const MENUS: &[&str] = &["File", "Edit", "View", "Create", "Modify", "Evalua
 const SUBMENUS: &[(&[&str], u8)] = &[
     (VIEW_MODE, 4),
     (VIEW_QUALITY, 5),
+    (VIEW_CAGE, 5),
     (VIEW_PANEL, 7),
     (PRIMITIVES, 0),
     (SWEEP, 0),
@@ -648,7 +648,7 @@ fn build() -> Vec<Command> {
     use crate::display_quality::DisplayQuality as Q;
     vec![
         // ---------------------------------------------------------------------------- File
-        op("file.new", "new", "New").menu(FILE, 0)
+        op("file.new", "new", "New").menu(FILE, 0).keys(&["Ctrl+N"])
             .hint("An empty document. Asks first if this one has changes that are not saved."),
         op("file.open", "open", "Open...").menu(FILE, 0).keys(&["Ctrl+O"])
             .hint("Opens a document. `open file=\"C:/in/part.fform\"` opens it without the dialog."),
@@ -665,7 +665,7 @@ fn build() -> Vec<Command> {
             .hint("Saves another picture with the settings used last, to the next free name."),
         op("file.import", "import", "Import...").menu(FILE, 1)
             .hint("STEP, OBJ or IGES — the file says which, and its options are asked after."),
-        op("file.exit", "exit", "Exit").menu(FILE, 2).also(&["quit"])
+        op("file.exit", "exit", "Exit").menu(FILE, 2).keys(&["Ctrl+Q"]).also(&["quit"])
             .hint("Closes fieldform, asking first if there are unsaved changes."),
 
         // ---------------------------------------------------------------------------- Edit
@@ -699,6 +699,13 @@ fn build() -> Vec<Command> {
         op("edit.delete_body", "delete", "Delete").menu(EDIT, 1).when(something_selected)
             .keys(&["Delete"])
             .hint("Removes the selected block and nothing else: what it was made from stays."),
+        op("block.lock", "lock", "Lock / unlock").menu(EDIT, 1).when(something_selected)
+            .hint("A locked block cannot be deleted or used in another block; its own numbers still \
+                   change. Alone, turns the selected block's lock over; `lock target=Sphere_0` locks \
+                   that block."),
+        op("block.unlock", "unlock", "Unlock")
+            .hint("Lets a locked block be deleted and used again: `unlock target=Sphere_0`, or the \
+                   selected one."),
         op("block.rename", "rename", "Rename...").menu(EDIT, 1).when(something_selected)
             .keys(&["F2"])
             .hint("A new name for the selected row, typed into the row. From the console any row by \
@@ -795,6 +802,21 @@ fn build() -> Vec<Command> {
             .menu(VIEW_QUALITY, 0).checked(|c| c.quality == "full").hint(Q::Full.hint()),
         cmd("view.quality.enchilada", "view.display", "display", "Enchilada").args(&[("quality", "enchilada")])
             .menu(VIEW_QUALITY, 0).checked(|c| c.quality == "enchilada").hint(Q::Enchilada.hint()),
+        // Four presets rather than a number: a menu is for choosing, and these are the steps at
+        // which the bake visibly changes. Anything between them is `display cage=<cells>`.
+        cmd("view.cage.coarse", "view.display", "display", "Coarse (32)").args(&[("cage", "32")])
+            .menu(VIEW_CAGE, 0).checked(|c| c.cage_detail == 32)
+            .hint("The control cage baked at 32 cells across the scene: quickest to edit, soft at creases."),
+        cmd("view.cage.normal", "view.display", "display", "Normal (64)").args(&[("cage", "64")])
+            .menu(VIEW_CAGE, 0).checked(|c| c.cage_detail == 64)
+            .hint("The control cage baked at 64 cells across the scene. What a session starts on."),
+        cmd("view.cage.fine", "view.display", "display", "Fine (128)").args(&[("cage", "128")])
+            .menu(VIEW_CAGE, 0).checked(|c| c.cage_detail == 128)
+            .hint("The control cage baked at 128 cells across the scene: sharper creases, a slower bake after each edit."),
+        cmd("view.cage.finest", "view.display", "display", "Finest (256)").args(&[("cage", "256")])
+            .menu(VIEW_CAGE, 0).checked(|c| c.cage_detail == 256)
+            .hint("The control cage baked at 256 cells across the scene, the most this takes. Bodies that are \
+                   not cages are traced from the field and are the same at every setting."),
         // Last, and on its own, because it is the only thing in this menu that does something
         // rather than setting how the part is looked at.
         // F, as §9.1 fixes it; it was `/` before the registry.
@@ -885,26 +907,31 @@ fn build() -> Vec<Command> {
             .aliases(&["pull", "push"])
             .hint("Gives a closed curve thickness along its own normal, out of one side of the \
                    plane it was drawn on. An open curve is given a thickness instead and extruded \
-                   as a wall."),
+                   as a wall. With nothing drawn yet, or `profile=none`, the block is made \
+                   empty and waits for its profile."),
         op("create.revolve", "revolve", "Revolve").menu(SWEEP, 0).keys(&["R"]).session(REVOLVE_P).inputs(PROFILE)
             .aliases(&["lathe", "spin"])
             .hint("Sweeps a closed curve about an axis. The profile has to stay clear of the axis, \
                    or the solid would pass through itself. An open curve is given a thickness \
-                   instead and revolved as a wall."),
+                   instead and revolved as a wall. With nothing drawn yet, or `profile=none`, \
+                   the block is made empty and waits for its profile."),
         op("create.sweep", "sweep", "Sweep").menu(SWEEP, 0).keys(&["S"]).session(SWEEP_P).inputs(SWEEP_IN)
             .hint("Carries a closed curve along another, held square to it the whole way. A \
                    straight path is an extrude and reads exactly; a bent one always reads a \
                    little short, and a fillet against it says so. With no closed curve to carry, \
-                   the selected one is given a thickness and carried as a wall."),
+                   the selected one is given a thickness and carried as a wall. With nothing \
+                   drawn yet, or `profile=none` or `spine=none`, the block is made with that \
+                   slot empty and waits for it."),
         op("create.loft", "loft", "Loft").menu(SWEEP, 0).keys(&["L"]).session(LOFT_P).inputs(LOFT_IN)
             .hint("Passes a solid through two or more closed curves in turn, along a centerline — \
                    a curve you name, or one built from the first and last sections. Takes every \
                    closed curve in the document to start with; the block is where sections are \
-                   added, removed and put in order."),
+                   added, removed and put in order. With fewer than two to take, or \
+                   `sections=none`, the loft is made empty and waits for them."),
         op("create.pipe", "pipe", "Pipe").menu(SWEEP, 0).keys(&["Shift+P"]).session(PIPE_P).inputs(PIPE_IN)
             .aliases(&["tube"])
             .hint("Sweeps a curve into a tube. Makes a straight one to sweep if the document has \
-                   none."),
+                   none; `curve=none` makes the pipe empty, waiting for its curve."),
         // **Features** (the owner, 2026-10-28): things a part is given rather than shapes it is
         // built from -- a spring, a hole, a thread -- in a submenu of their own under Sweep.
         op("create.capsule", "capsule", "Capsule").menu(FEATURES, 0).session(CAPSULE_P)
@@ -945,42 +972,45 @@ fn build() -> Vec<Command> {
                    the viewport. Export Mesh writes one to a file; File → Export makes both."),
 
         // -------------------------------------------------------------------------- Modify
-        // **Counted over what a tool can actually take**, the bodies *and* anything named.
-        op("create.boolean", "boolean", "Boolean").menu(MODIFY, 0).keys(&["B"]).when(two_bodies)
+        // **On offer with nothing to act on**: each makes its block with the slot empty and
+        // waiting (`App::target_operand`, `notebook-spec.md` §7.2), so a part can be laid out
+        // top-down. Greyed with "Needs a body", they could only ever be added last. Split is the
+        // one still gated: it cuts a body that is there and leaves no block waiting for one.
+        op("create.boolean", "boolean", "Boolean").menu(MODIFY, 0).keys(&["B"])
             .session(BOOLEAN_P).inputs(TWO_BODIES).aliases(&["union", "subtract", "intersect", "fillet"])
             .hint("Combines two bodies; which two is editable in its block. `boolean -u`, `-s` or \
                    `-i` says which operation."),
-        op("modify.pattern", "pattern", "Pattern").menu(MODIFY, 1).keys(&["P"]).when(a_body)
+        op("modify.pattern", "pattern", "Pattern").menu(MODIFY, 1).keys(&["P"])
             .session(PATTERN_P).inputs(BODY).aliases(&["array", "repeat"])
             .hint("Repeats the selected body and unions the copies. How many, and in a row or \
                    around an axis, are editable in its block."),
-        op("modify.mirror", "mirror", "Mirror").menu(MODIFY, 1).keys(&["M"]).when(a_body)
+        op("modify.mirror", "mirror", "Mirror").menu(MODIFY, 1).keys(&["M"])
             .session(MIRROR_P).inputs(BODY).aliases(&["reflect"])
             .hint("Reflects the selected body about the origin and unions the two. The plane and \
                    the axis are editable in its block."),
-        op("modify.twist", "twist", "Twist").menu(MODIFY, 1).when(a_body)
+        op("modify.twist", "twist", "Twist").menu(MODIFY, 1)
             .session(TWIST_P).inputs(BODY)
             .hint("Winds the selected body about Z. The rate is editable in its block."),
-        op("modify.attract", "attract", "Attract").menu(MODIFY, 1).when(a_body)
+        op("modify.attract", "attract", "Attract").menu(MODIFY, 1)
             .session(ATTRACT_P).inputs(BODY)
             .hint("Draws the selected body toward a curve. Which curve, how hard and how far it \
                    reaches are editable in its block."),
-        op("modify.offset", "offset", "Offset").menu(MODIFY, 1).keys(&["O"]).when(a_body)
+        op("modify.offset", "offset", "Offset").menu(MODIFY, 1).keys(&["O"])
             .session(OFFSET_P).inputs(BODY).aliases(&["grow", "thicken"])
             .hint("Moves the selected body's surface outward, or inward for a negative distance. \
                    The amount is editable in its block."),
-        op("modify.morph", "morph", "Morph").menu(MODIFY, 1).when(two_bodies)
+        op("modify.morph", "morph", "Morph").menu(MODIFY, 1)
             .session(MORPH_P).inputs(MORPH_IN).aliases(&["blend between", "interpolate"])
             .hint("Averages two bodies into one, so that one becomes the other as the amount is \
                    dragged; which two is editable in its block. Works when they are in the same \
                    place — two bodies apart from each other vanish in between rather than \
                    travelling."),
         // "shell", which is what every CAD tool calls it.
-        op("modify.shell", "shell", "Shell").menu(MODIFY, 1).keys(&["Shift+S"]).when(a_body)
+        op("modify.shell", "shell", "Shell").menu(MODIFY, 1).keys(&["Shift+S"])
             .session(SHELL_P).inputs(BODY).aliases(&["hollow"])
             .hint("Hollows the selected body out to a wall thickness, measured inward so the \
                    outside dimensions do not change."),
-        op("modify.infill", "infill", "Infill").menu(MODIFY, 1).when(a_body)
+        op("modify.infill", "infill", "Infill").menu(MODIFY, 1)
             .session(INFILL_P).inputs(BODY)
             .aliases(&["lattice infill", "lightweight", "fill with lattice"])
             .hint("Gives the selected body a solid skin and fills the inside with a lattice. The \
@@ -1140,7 +1170,8 @@ fn build() -> Vec<Command> {
             .aliases(&["unhide"])
             .hint("Every hidden body drawn again."),
         op("view.display", "display", "Display")
-            .hint("`display quality=fast|balanced|full|enchilada`, `display mode=polygon|field|overlay`; \
+            .hint("`display quality=fast|balanced|full|enchilada`, `display mode=polygon|field|overlay`, \
+                   `display cage=coarse|normal|fine|finest` or a number of cells from 8 to 256; \
                    alone, says which."),
         op("view.environment", "environment", "Environment").aliases(&["lighting", "studio"])
             .hint("The lighting the part is shown in: `environment name=zebra`."),
@@ -1491,6 +1522,8 @@ mod tests {
             ("Z", m(true, false), "edit.undo"),
             ("Z", m(true, true), "edit.redo"),
             ("Y", m(true, false), "edit.redo"),
+            ("N", m(true, false), "file.new"),
+            ("Q", m(true, false), "file.exit"),
             ("O", m(true, false), "file.open"),
             ("S", m(true, false), "file.save"),
             ("S", m(true, true), "file.save_as"),
@@ -1534,8 +1567,10 @@ mod tests {
         // modelling keys, and Ctrl+R and I for the cage's Insert Edge and Inset (R9) -- which
         // brings the modelling keys to the fifteen the cap allows; and A and Home for Frame all, the
         // graph view's spec (`view.frame_all` frames the viewport too); and Ctrl+F for the graph's Find.
-        // Less Shift+X, which went with Flip section (the owner, 2026-11-08).
-        assert_eq!(km.bindings().len(), 37, "no binding added or lost beyond those");
+        // Less Shift+X, which went with Flip section (the owner, 2026-11-08). And Ctrl+N for New
+        // and Ctrl+Q for Exit (the owner, 2026-11-14): Ctrl+Q knowingly, though it is not the
+        // convention on every desktop.
+        assert_eq!(km.bindings().len(), 39, "no binding added or lost beyond those");
         assert!(km.lookup(&Shortcut::new("X", m(false, true))).is_none(), "Shift+X went with Flip section");
         assert!(km.lookup(&Shortcut::new("Slash", m(false, false))).is_none(), "F replaced /");
     }
@@ -1594,6 +1629,16 @@ mod tests {
             let found = words.iter().find(|(w, _)| w == word).map(|(_, o)| *o);
             assert_eq!(found, Some(op), "`{word}`");
         }
+    }
+
+    /// The menu's cage presets are distinct numbers, so exactly one of them is ever ticked.
+    #[test]
+    fn each_cage_detail_preset_chooses_a_different_number_of_cells() {
+        let cells: Vec<&str> = built()
+            .filter(|c| c.op == "view.display")
+            .filter_map(|c| c.args.iter().find(|(k, _)| *k == "cage").map(|(_, v)| *v))
+            .collect();
+        assert_eq!(cells, ["32", "64", "128", "256"]);
     }
 
     /// A display quality or mode added without an entry would be one the menu cannot choose.

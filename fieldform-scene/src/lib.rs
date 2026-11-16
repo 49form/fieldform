@@ -31,6 +31,7 @@ mod frame;
 mod helix;
 mod hole;
 mod sweep;
+mod curve_slot;
 mod outline;
 mod corners;
 mod law;
@@ -58,7 +59,7 @@ pub use surface_point::{across, Facing, Guide, GuideFrame, Solved, SurfacePoint}
 pub use import::StepOptions;
 pub use document::{
     Document, ExpressionError, EyeFlag, GraphLayout, ImportSettings, ImportSource, InputKind, InputPort,
-    ListReadings, Nesting, NodeMeta, ParamValue, Parameter, ParameterError, Part, RenameError,
+    ListReadings, LockBroken, Nesting, NodeMeta, ParamValue, Parameter, ParameterError, Part, RenameError,
 };
 pub use expression::{BinOp, EvalError, Expr, Expression, Function, Name, ParseError};
 pub use written::{Written, WrittenClaim};
@@ -87,6 +88,7 @@ pub use hole::{
     Fit, HoleDepth, HoleKind, HoleTip, CLEARANCE_TABLE, COUNTERBORE_TABLE, COUNTERSINK_TABLE,
 };
 pub use sweep::{Section, Sweep};
+pub use curve_slot::CurveSlot;
 pub use outline::{Outline, WallEnds, WallSide};
 pub use corners::{Corners, MITRE_LIMIT};
 pub use law::{SweepLaw, Taper};

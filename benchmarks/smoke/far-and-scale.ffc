@@ -1,0 +1,66 @@
+# Far from the origin and across scales (backlog item 141): the measurement, which is f64.
+#
+#   fieldform.exe --run benchmarks/smoke/far-and-scale.ffc --keep-going --report far-and-scale.json --exit
+#
+# Exit code 0 when every expect passed. Every line here is meant to succeed. The same closed forms
+# as closed-form.ffc, built 10 m and 10 km from the origin along a diagonal, and a ball from 2 mm
+# to 10 m across. Every centre is a whole number of millimetres, so the grid anchored at the
+# origin meets each copy the same way and a difference can only be the arithmetic's.
+# The picture is a separate question: the march is f32, and far_from_origin in fieldform-gpu's
+# examples measures it.
+
+# --- A ball of radius 10: 4/3 pi 10^3 = 4188.790, 4 pi 10^2 = 1256.637.
+new
+sphere 'near' radius=10 centre=0,0,0
+sphere 'ten_m' radius=10 centre=7785,-5449,3114
+sphere 'ten_km' radius=10 centre=7784989,-5449493,3113996
+expect target=near volume=4188.790 tol=0.1%
+expect target=ten_m volume=4188.790 tol=0.1%
+expect target=ten_km volume=4188.790 tol=0.1%
+expect target=ten_km area=1256.637 tol=0.2%
+expect target=ten_km bbox=7784979,-5449503,3113986,7784999,-5449483,3114006 tol=0.05
+expect ratio=ten_km,near volume=1 tol=0.01%
+saveas file=target/far-ball.fform
+
+# --- A torus of radii 30 and 5, 10 km out: 2 pi^2 R r^2 = 14804.407, 4 pi^2 R r = 5921.763.
+new
+torus 'ring' major_radius=30 minor_radius=5 centre=7784989,-5449493,3113996
+expect target=ring volume=14804.407 tol=0.1%
+expect target=ring area=5921.763 tol=0.2%
+saveas file=target/far-torus.fform
+
+# --- closed-form.ffc's fillet, 10 km out: (1 - pi/4) k^2 of section on each of two edges over
+# 50 mm, k = 4, against the sharp twin: 343.363.
+new
+cube 'slab_r' size=40,60,10 centre=7784989,-5449493,3113991
+cube 'wall_r' size=10,60,25 centre=7784979,-5449493,3114003.5
+boolean -u in=slab_r,wall_r radius=4 'joined_r'
+cube 'trim_r' size=80,50,80 centre=7784989,-5449493,3113996
+boolean -i in=joined_r,trim_r 'filleted'
+cube 'slab_s' size=40,60,10 centre=7784989,-5449493,3113991
+cube 'wall_s' size=10,60,25 centre=7784979,-5449493,3114003.5
+boolean -u in=slab_s,wall_s 'joined_s'
+cube 'trim_s' size=80,50,80 centre=7784989,-5449493,3113996
+boolean -i in=joined_s,trim_s 'sharp'
+expect target=sharp volume=30000 tol=0.1%
+expect diff=filleted,sharp volume=343.363 tol=1
+saveas file=target/far-fillet.fform
+
+# --- A ball from 10 um to 10 m across: 4/3 pi r^3 and 4 pi r^2. The finest grid is a 4096th of
+# the body, no coarser than 1/64 mm; while it was 1/64 mm for everything, a ball under about half
+# a millimetre across had no second level and could only be unresolved.
+#   r = 0.005: 5.235988e-7, 3.141593e-4;  r = 0.25: 0.06544985, 0.7853982;  r = 1: 4.18879, 12.56637
+new
+sphere 'tiny' radius=0.005 centre=0,0,0
+expect target=tiny volume=5.235988e-7 tol=0.1%
+expect target=tiny area=3.141593e-4 tol=0.2%
+sphere 'grain' radius=0.25 centre=5,0,0
+expect target=grain volume=0.06544985 tol=0.1%
+expect target=grain area=0.7853982 tol=0.2%
+sphere 'small' radius=1 centre=10,0,0
+expect target=small volume=4.18879 tol=0.1%
+expect target=small area=12.56637 tol=0.2%
+sphere 'large' radius=5000 centre=20000,0,0
+expect target=large volume=523598775598 tol=0.1%
+expect target=large area=314159265.36 tol=0.2%
+saveas file=target/scale-balls.fform

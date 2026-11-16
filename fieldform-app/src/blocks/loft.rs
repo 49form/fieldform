@@ -33,8 +33,13 @@ impl App {
         );
         ui.separator();
         // **The sections, as a list.** Each row is a curve field like a boolean's
-        // operand row, with the two arrows that are the order, and a remove while
-        // more than two remain -- two being the least a loft means anything with.
+        // operand row, with the two arrows that are the order, and a remove.
+        //
+        // **A row can always be taken out, down to none.** It was offered only while more than
+        // two remained, two being the least a loft means anything with -- which made the last
+        // two sections impossible to take out of the block, and a loft impossible to start
+        // empty and fill. Short of two the loft is a block in the making: not drawn, and said so
+        // under the list, as a slot with nothing in it is.
         let mut new_sections: Vec<fieldform_scene::Outline> = sections.to_vec();
         let mut curves: Vec<(CurveId, String)> = self
             .doc
@@ -50,10 +55,13 @@ impl App {
         let count = new_sections.len();
         for i in 0..count {
             let current = new_sections[i].curve();
-            let shown = self.shown_label(&offered, current, "missing");
+            let shown = match current {
+                Some(named) => self.shown_label(&offered, named, "missing"),
+                None => String::new(),
+            };
             ui.horizontal(|ui| {
                 row_label(ui, if i == 0 { "Sections:" } else { "" });
-                if let Some(picked) = self.reference_field(
+                if let Some(picked) = self.reference_field_in(
                     ui,
                     (id, "loft_section", i),
                     current,
@@ -84,29 +92,27 @@ impl App {
                         moved = Some((i, i + 1));
                     }
                 });
-                if count > 2
-                    && remove_button(ui, "Take this section out of the loft. The curve stays.")
-                {
+                if remove_button(ui, "Take this section out of the loft. The curve stays.") {
                     removed = Some(i);
                 }
             });
             // Each section under its own row, which is what makes a loft of four sections read
             // as four things it is made of rather than a list and a heap (§7.1, §17).
-            self.host_nested_curve(ui, current);
+            if let Some(named) = current {
+                self.host_nested_curve(ui, named);
+            }
         }
         if let Some((from, to)) = moved {
             new_sections.swap(from, to);
         }
-        if let Some(i) = removed
-            && new_sections.len() > 2
-        {
+        if let Some(i) = removed {
             new_sections.remove(i);
         }
         // Adding by name, from the curves not yet in the list. Whether a curve closes
         // is the compile's to say, by name, when the edit is refused.
         let eligible: Vec<(CurveId, String)> = curves
             .iter()
-            .filter(|(c, _)| !new_sections.iter().any(|o| o.curve() == *c))
+            .filter(|(c, _)| !new_sections.iter().any(|o| o.curve() == Some(*c)))
             .cloned()
             .collect();
         ui.horizontal(|ui| {
@@ -134,6 +140,25 @@ impl App {
                 .on_hover_text("Add a section after the last");
             }
         });
+        // **Short of two, said where the sections are added**: the state an empty slot is in, in
+        // its words and its colour, because it is fixed here and nowhere else.
+        if new_sections.len() < 2 {
+            ui.horizontal(|ui| {
+                row_label(ui, "");
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    match new_sections.len() {
+                        0 => "no sections yet — not drawn",
+                        _ => "one section — not drawn",
+                    },
+                )
+                .on_hover_text(
+                    "A loft passes through two or more sections, so with fewer there is nothing \
+                     to work out: it is left out of the viewport while everything beside it goes \
+                     on being drawn. Add closed curves with Add, or drop them on a row.",
+                );
+            });
+        }
         ui.separator();
         // **The centerline: a curve, or "derived".** The field never answers "clear",
         // so going back to a derived one is a button beside it; and a derived one can
@@ -141,7 +166,7 @@ impl App {
         // like any curve and the loft follows it.
         let mut new_spine = spine;
         let mut make_editable = false;
-        let section_ids: Vec<CurveId> = new_sections.iter().map(|o| o.curve()).collect();
+        let section_ids: Vec<CurveId> = new_sections.iter().filter_map(|o| o.curve()).collect();
         let mut paths: Vec<(CurveId, String)> = self
             .doc
             .curves

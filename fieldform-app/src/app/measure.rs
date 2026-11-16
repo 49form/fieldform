@@ -185,7 +185,7 @@ impl App {
         // At the detail the next export would use, scaled to what is on screen.
         let bounds = self.pick_bounds();
         let extent = bounds.1 - bounds.0;
-        let tolerance = self.export_detail.tolerance(extent.x.max(extent.y).max(extent.z));
+        let tolerance = self.next.export_detail.tolerance(extent.x.max(extent.y).max(extent.z));
         let field = match GraphField::compile_graph(
             &self.doc,
             &graph,

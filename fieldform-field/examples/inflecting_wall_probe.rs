@@ -76,7 +76,7 @@ fn main() {
                 let mut doc = Document::new();
                 let id = s_curve(&mut doc, degree, control.clone(), lift);
                 let outline = Outline::Wall {
-                    curve: id,
+                    curve: id.into(),
                     thickness: lit(THICKNESS_MM),
                     side,
                     ends: WallEnds::Square,

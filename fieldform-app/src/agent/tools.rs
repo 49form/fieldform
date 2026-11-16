@@ -114,7 +114,7 @@ impl App {
                 "json" => Reply::ok(self.agent_document()),
                 "text" => {
                     let script = self.agent_script();
-                    Reply::ok(json!({ "revision": self.revision, "text": script.text, "omitted": script.omitted }))
+                    Reply::ok(json!({ "revision": self.saving.revision, "text": script.text, "omitted": script.omitted }))
                 }
                 other => {
                     let mut e = tool_error("bad_value", format!("`{other}` is not a format"));
@@ -161,7 +161,7 @@ impl App {
                     expected_revision: args.get("expected_revision").and_then(J::as_u64),
                     allow_overwrite: args.get("allow_overwrite").and_then(J::as_bool).unwrap_or(false),
                     label: string_arg(args, "label"),
-                    timeout: Some(self.agent.run_timeout.unwrap_or(std::time::Duration::from_secs(super::DEFAULT_RUN_SECS))),
+                    timeout: Some(self.agent_link.state.run_timeout.unwrap_or(std::time::Duration::from_secs(super::DEFAULT_RUN_SECS))),
                 };
                 let out = self.agent_run(&req);
                 let mut o = json!({

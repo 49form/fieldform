@@ -179,7 +179,7 @@ fn spokes(n: usize) -> (Document, Graph) {
             )
             .expect("a bent line"),
         );
-        pipes.push(graph.add(Node::Pipe { curve: id, radius: lit(9.0) }));
+        pipes.push(graph.add(Node::Pipe { curve: id.into(), radius: lit(9.0) }));
     }
     graph.add(Node::Boolean { op: BooleanOp::Union, inputs: pipes.into_iter().map(Into::into).collect() });
     (doc, graph)

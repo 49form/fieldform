@@ -22,8 +22,8 @@ impl App {
         };
         let nesting_ref = &list.nesting;
         let curve_row = |c: CurveId| match self.folded_curve_row(c, nesting_ref) {
-            Some(Block::Profile(key)) => CurveRow::Profile(self.profiles.members(key).map_or(0, <[_]>::len)),
-            None => self.profiles.key_of(c).map_or(CurveRow::Own, CurveRow::Inside),
+            Some(Block::Profile(key)) => CurveRow::Profile(self.curve_ui.profiles.members(key).map_or(0, <[_]>::len)),
+            None => self.curve_ui.profiles.key_of(c).map_or(CurveRow::Own, CurveRow::Inside),
             Some(_) => CurveRow::Own,
         };
         let sources = crate::graph_view::sources(
@@ -54,8 +54,8 @@ impl App {
         // **Followed here as the notebook follows it, and remembered apart from it**, so that going
         // to the other view finds the selection there too. Every block is a node of its own, so
         // there is nothing to open: what it can lack is being on the sheet.
-        if selected != self.graph_followed {
-            self.graph_followed = selected;
+        if selected != self.notebook.graph_followed {
+            self.notebook.graph_followed = selected;
             if let Some(id) = selected {
                 self.graph_view.request_bring(id);
             }

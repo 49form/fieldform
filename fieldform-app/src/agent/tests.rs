@@ -18,7 +18,7 @@ fn root_in_temp(app: &mut App, tag: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let dir = dir.canonicalize().unwrap();
-    app.agent.roots = vec![dir.clone()];
+    app.agent_link.state.roots = vec![dir.clone()];
     dir
 }
 
@@ -28,13 +28,13 @@ fn a_refused_line_takes_the_whole_call_back() {
     run(&mut app, "sphere radius=5 'keep'");
     let before_nodes = app.part_graph().nodes().count();
     let history = app.stack.history();
-    let revision = app.revision;
+    let revision = app.saving.revision;
     let out = run(&mut app, "sphere radius=1\ncube size=2,2,2\ncube side=3\nsphere radius=9\nsphere radius=8");
     assert!(!out.ok && !out.kept);
     assert_eq!(out.lines.len(), 3, "it stops at the refusal");
     assert_eq!(app.part_graph().nodes().count(), before_nodes);
     assert_eq!(app.stack.history(), history, "the history, redo list included, is as found");
-    assert_eq!(app.revision, revision);
+    assert_eq!(app.saving.revision, revision);
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn a_stale_revision_is_refused() {
     let nodes = app.part_graph().nodes().count();
     let out = app.agent_run(&RunRequest {
         lines: "sphere radius=2".into(),
-        expected_revision: Some(app.revision.wrapping_add(7)),
+        expected_revision: Some(app.saving.revision.wrapping_add(7)),
         ..Default::default()
     });
     assert_eq!(out.error.map(|e| e.code), Some("stale_revision"));
@@ -79,7 +79,7 @@ fn an_agent_does_not_undo_a_persons_edit_unasked() {
 #[test]
 fn a_cancelled_call_is_taken_back() {
     let Some(mut app) = headless_app() else { return };
-    app.agent.cancel.store(false, std::sync::atomic::Ordering::SeqCst);
+    app.agent_link.state.cancel.store(false, std::sync::atomic::Ordering::SeqCst);
     // A zero timeout expires before the first line, which is the same path a cancellation takes.
     let out = app.agent_run(&RunRequest {
         lines: "sphere radius=1\nsphere radius=2".into(),
@@ -196,8 +196,8 @@ fn a_client_on_the_socket_lists_tools_and_runs_a_line() {
             std::env::temp_dir().join(format!("fieldform-agent-test-{}.sock", std::process::id())).display().to_string()
         }
     };
-    let host = server::start(endpoint.clone(), app.agent.cancel.clone(), std::sync::Arc::new(|| {}), server::HostMode::Launch).expect("listens");
-    app.agent_host = Some(host);
+    let host = server::start(endpoint.clone(), app.agent_link.state.cancel.clone(), std::sync::Arc::new(|| {}), server::HostMode::Launch).expect("listens");
+    app.agent_link.host = Some(host);
 
     let client = std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
@@ -308,7 +308,7 @@ fn a_script_through_run_builds_what_the_same_script_through_the_console_builds()
     let out = by_run.agent_run(&RunRequest { lines: lines.clone(), atomic: false, ..Default::default() });
     assert!(out.kept, "{:?}", out.error);
 
-    by_console.script_running = true;
+    by_console.scripting.running = true;
     for l in lines.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
         by_console.gesture = None;
         by_console.run_command(l);
@@ -425,7 +425,7 @@ fn a_view_that_is_not_one_is_refused_with_the_views_there_are() {
     assert!(got.reply.is_error && got.image.is_none());
     assert_eq!(got.reply.json["error"]["code"], "bad_value");
     assert!(got.reply.json["error"]["accepted"].as_array().unwrap().iter().any(|v| v == "iso"));
-    assert!(app.agent.snapshot.is_none());
+    assert!(app.agent_link.state.snapshot.is_none());
 }
 
 
@@ -456,7 +456,7 @@ fn attach_endpoint(tag: &str) -> String {
 fn attached(tag: &str) -> Option<(App, String)> {
     let mut app = headless_app()?;
     let endpoint = attach_endpoint(tag);
-    app.agent_endpoint = Some(endpoint.clone());
+    app.agent_link.endpoint = Some(endpoint.clone());
     app.set_allow_agent(true, &eframe::egui::Context::default());
     Some((app, endpoint))
 }
@@ -480,7 +480,7 @@ fn allow_agent_publishes_an_endpoint_and_turning_it_off_takes_it_away() {
     let (_, edit) = bar.iter().find(|(t, _)| *t == "Edit").expect("an Edit menu");
     assert!(crate::commands::menu_commands(edit).iter().any(|c| c.id == "edit.allow_agent"));
     app.run_command("allowagent");
-    assert!(!app.allow_agent && app.agent_host.is_none(), "the Edit menu's command turns it off");
+    assert!(!app.agent_link.allowed && app.agent_link.host.is_none(), "the Edit menu's command turns it off");
     // The listener ends on its own thread; give it the moment it needs.
     let started = std::time::Instant::now();
     while can_connect(&endpoint) && started.elapsed() < std::time::Duration::from_secs(5) {
@@ -493,7 +493,7 @@ fn allow_agent_publishes_an_endpoint_and_turning_it_off_takes_it_away() {
 fn an_agent_the_person_disconnects_is_dropped_and_not_counted() {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
     let Some((app, endpoint)) = attached("drop") else { return };
-    let host_clients = |app: &App| app.agent_host.as_ref().unwrap().clients();
+    let host_clients = |app: &App| app.agent_link.host.as_ref().unwrap().clients();
     let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
     let client = std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
@@ -517,7 +517,7 @@ fn an_agent_the_person_disconnects_is_dropped_and_not_counted() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     assert_eq!(host_clients(&app), 1);
-    app.agent_host.as_ref().unwrap().disconnect_all();
+    app.agent_link.host.as_ref().unwrap().disconnect_all();
     go_tx.send(()).unwrap();
     assert!(client.join().unwrap(), "the client saw the connection end");
     let started = std::time::Instant::now();
@@ -530,16 +530,16 @@ fn an_agent_the_person_disconnects_is_dropped_and_not_counted() {
 #[test]
 fn a_call_that_arrives_mid_gesture_waits_then_is_told_the_person_is_busy() {
     let Some((mut app, _)) = attached("busy") else { return };
-    app.agent.pretend_busy = true;
+    app.agent_link.state.pretend_busy = true;
     let (fresh, mut fresh_answer) = job("check", serde_json::json!({}));
-    app.agent.held.push_back((fresh, std::time::Instant::now()));
+    app.agent_link.state.held.push_back((fresh, std::time::Instant::now()));
     app.drive_agent();
     assert!(fresh_answer.try_recv().is_err(), "within the allowance it waits");
-    assert_eq!(app.agent.held.len(), 1);
+    assert_eq!(app.agent_link.state.held.len(), 1);
 
     let (late, mut late_answer) = job("check", serde_json::json!({}));
-    app.agent.held.clear();
-    app.agent.held.push_back((late, std::time::Instant::now() - std::time::Duration::from_secs(3)));
+    app.agent_link.state.held.clear();
+    app.agent_link.state.held.push_back((late, std::time::Instant::now() - std::time::Duration::from_secs(3)));
     app.drive_agent();
     let answer = late_answer.try_recv().expect("after the allowance it is answered");
     assert!(answer.reply.is_error);
@@ -548,13 +548,13 @@ fn a_call_that_arrives_mid_gesture_waits_then_is_told_the_person_is_busy() {
 
     // session_info is how an agent finds out, so it is never made to wait.
     let (info, mut info_answer) = job("session_info", serde_json::json!({}));
-    app.agent.held.push_back((info, std::time::Instant::now()));
+    app.agent_link.state.held.push_back((info, std::time::Instant::now()));
     app.drive_agent();
     assert_eq!(info_answer.try_recv().unwrap().reply.json["busy"], true);
 
-    app.agent.pretend_busy = false;
+    app.agent_link.state.pretend_busy = false;
     let (go, mut go_answer) = job("check", serde_json::json!({}));
-    app.agent.held.push_back((go, std::time::Instant::now()));
+    app.agent_link.state.held.push_back((go, std::time::Instant::now()));
     app.drive_agent();
     assert!(!go_answer.try_recv().unwrap().reply.is_error, "the person is done, so it runs");
 }
@@ -562,15 +562,15 @@ fn a_call_that_arrives_mid_gesture_waits_then_is_told_the_person_is_busy() {
 #[test]
 fn a_snapshot_leaves_the_persons_view_alone() {
     let Some((mut app, _)) = attached("snap") else { return };
-    let (quality, mode) = (app.display_quality, app.view_mode);
+    let (quality, mode) = (app.view.quality, app.view.mode);
     let (snap, mut answer) = job("snapshot", serde_json::json!({ "view": "top" }));
-    app.agent.held.push_back((snap, std::time::Instant::now()));
+    app.agent_link.state.held.push_back((snap, std::time::Instant::now()));
     app.drive_agent();
     let answer = answer.try_recv().expect("refused at once, not left waiting for a picture");
     assert_eq!(answer.reply.json["error"]["code"], "not_available");
     assert!(answer.image.is_none());
     assert!(app.pending_snap.is_none(), "no still was begun");
-    assert!(app.display_quality == quality && app.view_mode == mode, "the person's view is as they left it");
+    assert!(app.view.quality == quality && app.view.mode == mode, "the person's view is as they left it");
     assert_eq!(app.agent_session_info()["capabilities"]["snapshot"], false);
 }
 
@@ -578,7 +578,7 @@ fn a_snapshot_leaves_the_persons_view_alone() {
 fn an_attached_agent_reaches_only_the_documents_own_folder() {
     let Some((mut app, _)) = attached("roots") else { return };
     let (info, mut answer) = job("session_info", serde_json::json!({}));
-    app.agent.held.push_back((info, std::time::Instant::now()));
+    app.agent_link.state.held.push_back((info, std::time::Instant::now()));
     app.drive_agent();
     assert_eq!(answer.try_recv().unwrap().reply.json["roots"], serde_json::json!([]), "an unsaved document has no folder");
     let refused = run(&mut app, "saveas file=\"elsewhere.fform\"");
@@ -715,7 +715,7 @@ fn replacing_the_document_moves_the_revision() {
     root_in_temp(&mut app, "replace");
     assert!(run(&mut app, "sphere radius=5 'ball'\nsaveas file=first.fform").ok);
     for line in ["new", "open file=first.fform"] {
-        let read = app.revision;
+        let read = app.saving.revision;
         let out = run(&mut app, line);
         assert!(out.ok && out.kept, "{line}: {:?}", out.lines.iter().map(|l| &l.outcome).collect::<Vec<_>>());
         assert_ne!(out.revision_after, read, "{line}");
@@ -753,14 +753,14 @@ fn a_refused_line_takes_back_a_new_in_the_same_call() {
     root_in_temp(&mut app, "take-back");
     assert!(run(&mut app, "sphere radius=5 'ball'\nsaveas file=first.fform").ok);
     let history = app.stack.history();
-    let path = app.file.as_ref().map(|(p, _)| p.clone());
-    let revision = app.revision;
+    let path = app.saving.file.as_ref().map(|(p, _)| p.clone());
+    let revision = app.saving.revision;
     let out = run(&mut app, "new\ncube side=3");
     assert!(!out.ok && !out.kept);
     assert!(app.node_named("ball").is_some(), "the block is back");
     assert_eq!(app.stack.history(), history);
-    assert_eq!(app.file.as_ref().map(|(p, _)| p.clone()), path, "Save still means the same file");
-    assert_eq!(app.revision, revision);
+    assert_eq!(app.saving.file.as_ref().map(|(p, _)| p.clone()), path, "Save still means the same file");
+    assert_eq!(app.saving.revision, revision);
     assert!(!app.is_dirty());
     assert!(run(&mut app, "sphere radius=1 'after'").ok, "the active part is this document's");
     assert!(app.node_named("after").is_some());

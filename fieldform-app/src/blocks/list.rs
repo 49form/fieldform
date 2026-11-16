@@ -606,6 +606,38 @@ pub(crate) fn grip_mark(ui: &mut egui::Ui) {
     }
 }
 
+/// The padlock on a locked block's row, which unlocks it when clicked.
+///
+/// Painted for [`grip_mark`]'s reason: the glyph a font offers for a lock is whatever that font
+/// drew, and at a row's height it did not read as one. A body and a shackle cannot be mistaken.
+pub(crate) fn lock_mark(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(14.0, ui.spacing().interact_size.y), egui::Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let colour = if response.hovered() {
+        ui.visuals().strong_text_color()
+    } else {
+        ui.visuals().text_color()
+    };
+    let centre = rect.center();
+    // The body, sitting a little below the middle so the whole mark is centred on the row.
+    let body = egui::Rect::from_center_size(centre + egui::vec2(0.0, 2.5), egui::vec2(10.0, 7.0));
+    ui.painter().rect_filled(body, 1.5, colour);
+    // The shackle: two legs into the body joined by a half circle over it.
+    let radius = 3.0_f32;
+    let top = body.top() - 2.0;
+    let mut shackle = vec![egui::pos2(centre.x - radius, body.top())];
+    shackle.extend((0..=12).map(|i| {
+        let angle = std::f32::consts::PI * (1.0 - i as f32 / 12.0);
+        egui::pos2(centre.x + radius * angle.cos(), top - radius * angle.sin())
+    }));
+    shackle.push(egui::pos2(centre.x + radius, body.top()));
+    ui.painter().add(egui::Shape::line(shackle, egui::Stroke::new(1.5_f32, colour)));
+    response
+}
+
 /// A block being dragged by its grip, and the block whose slot it was drawn in.
 ///
 /// **The holder travels with the drag because the drop needs it** (`notebook-spec.md` §7.2):
@@ -816,7 +848,7 @@ pub(crate) fn nest_rows(
 ///
 /// **Cached behind a revision counter rather than walked per frame.** `profile_partition`
 /// samples every open curve for every seed, and the block list is drawn sixty times a second;
-/// `App::curve_revision` moves whenever the curve display is rebuilt, which is every moment a
+/// `App::curve_ui.revision` moves whenever the curve display is rebuilt, which is every moment a
 /// curve changes, and [`App::refresh_profiles`] re-walks only when it has. A document with no
 /// open curves costs nothing either way.
 ///
@@ -825,7 +857,7 @@ pub(crate) fn nest_rows(
 /// the file when it opened did not close because of an edit, and saying so would be false.
 #[derive(Default)]
 pub(crate) struct ProfileRows {
-    /// The `curve_revision` the loops were found at.
+    /// The `curve_ui.revision` the loops were found at.
     pub(crate) at: Option<u64>,
     /// Each loop's curves in walk order; the first is its key.
     pub(crate) loops: Vec<Vec<CurveId>>,

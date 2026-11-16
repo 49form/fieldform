@@ -40,7 +40,7 @@ fn composed_document() -> Document {
     let mut part = Part::from_cage("bracket", cage_id);
     let cage_node = part.graph.roots()[0];
     let pipe = part.graph.add(Node::Pipe {
-        curve: curve_id,
+        curve: curve_id.into(),
         radius: ParamRef::Literal(8.0),
     });
     let drilled = part.graph.add(Node::Boolean {

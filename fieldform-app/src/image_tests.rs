@@ -29,10 +29,10 @@ fn finish(app: &mut App) {
 
 /// Types `line`, drives it to its end, and answers what the console said after it.
 fn snap(app: &mut App, line: &str) -> Vec<(bool, String)> {
-    let before = app.console_log.len();
+    let before = app.console.log.len();
     app.run_command(line);
     finish(app);
-    app.console_log.iter().skip(before).map(|l| (l.ok, l.text.clone())).collect()
+    app.console.log.iter().skip(before).map(|l| (l.ok, l.text.clone())).collect()
 }
 
 fn wrote(said: &[(bool, String)]) -> bool {
@@ -358,10 +358,10 @@ fn measure_a_five_thousand_wide_still_of_a_gyroid_cube() {
         "display quality=full",
         "frameall",
     ] {
-        let before = app.console_log.len();
+        let before = app.console.log.len();
         app.run_command(line);
         frame(&mut app, Vec::new());
-        for l in app.console_log.iter().skip(before) {
+        for l in app.console.log.iter().skip(before) {
             eprintln!("{} {}", if l.ok { "  " } else { "!!" }, l.text);
         }
     }
@@ -439,11 +439,11 @@ fn an_automatic_capture_is_said_in_the_console() {
         cost: None,
     };
     let said = written.said();
-    let before = app.console_log.len();
+    let before = app.console.log.len();
     app.image_written(&request, written);
-    assert!(app.console_log[before..].iter().any(|l| l.ok && l.text == said), "the capture is in the console");
-    let warned = app.console_warnings;
+    assert!(app.console.log[before..].iter().any(|l| l.ok && l.text == said), "the capture is in the console");
+    let warned = app.console.warnings;
     app.image_failed(None, true, "the drive is full".to_string());
-    assert!(app.console_log.iter().any(|l| l.ok && l.text.contains("the drive is full")), "and so is a failed one");
-    assert_eq!(app.console_warnings, warned, "as a line, not a warning");
+    assert!(app.console.log.iter().any(|l| l.ok && l.text.contains("the drive is full")), "and so is a failed one");
+    assert_eq!(app.console.warnings, warned, "as a line, not a warning");
 }

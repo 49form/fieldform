@@ -49,18 +49,56 @@ pub(crate) fn half_thickness(
     limit: f64,
     steps: usize,
 ) -> f64 {
+    let steps = steps.max(1);
+    let stride = limit / steps as f64;
+    let depth_at = |t: f64| -field.distance(p - outward * t);
     let mut deepest = 0.0f64;
-    for step in 1..=steps.max(1) {
-        let t = limit * step as f64 / steps.max(1) as f64;
+    for step in 1..=steps {
+        let t = stride * step as f64;
         // Depth, so positive inside. It rises to the middle of the wall and falls after it, and
         // the turn is what says the far surface has been passed.
-        let depth = -field.distance(p - outward * t);
+        let depth = depth_at(t);
         if depth < deepest {
-            break;
+            // **The middle of the wall lies between two samples, almost never on one**, so the
+            // deepest sample reads short by up to a stride -- a sixteenth of the threshold, and
+            // always toward "too thin". A 2 mm ball shell read 1.899 against a threshold of 1.9
+            // that way. The peak is inside the two strides either side of the deepest sample, and
+            // a wall's depth rises once and falls once there, so a golden-section search finds
+            // it. Every value it returns is a sample of the field, so it can only come closer to
+            // the true depth, never pass it.
+            return deepest.max(peak_between(&depth_at, stride * (step as f64 - 2.0), t));
         }
         deepest = depth;
     }
     deepest
+}
+
+/// The greatest value `f` takes on `[lo, hi]`, for a function that rises and then falls there,
+/// found by golden-section search: twelve narrowings leave a bracket under a three-hundredth of
+/// where it started.
+fn peak_between(f: &dyn Fn(f64) -> f64, lo: f64, hi: f64) -> f64 {
+    const NARROWINGS: usize = 12;
+    let shrink = (5f64.sqrt() - 1.0) / 2.0;
+    let (mut lo, mut hi) = (lo.max(0.0), hi);
+    let mut a = hi - shrink * (hi - lo);
+    let mut b = lo + shrink * (hi - lo);
+    let (mut fa, mut fb) = (f(a), f(b));
+    for _ in 0..NARROWINGS {
+        if fa < fb {
+            lo = a;
+            a = b;
+            fa = fb;
+            b = lo + shrink * (hi - lo);
+            fb = f(b);
+        } else {
+            hi = b;
+            b = a;
+            fb = fa;
+            a = hi - shrink * (hi - lo);
+            fa = f(a);
+        }
+    }
+    fa.max(fb)
 }
 
 /// Where a solid is thinner than it should be, and how thin it gets.
@@ -406,6 +444,33 @@ mod tests {
             "a {thickness} mm slab measured {:.3} mm",
             report.thinnest_mm
         );
+    }
+
+    /// A wall's depth is read at its middle, not at the nearest of the walk's samples.
+    ///
+    /// The walk steps a sixteenth of the threshold at a time, and a 2 mm wall asked about at
+    /// 1.9 mm has its middle at 1 mm, between the samples at 0.95 and 1.069: the deepest sample
+    /// read 0.95, so the wall read 1.9, and a ball's shell failed `thickness_min=1.9`. Every wall
+    /// from 1.0 to 1.6 mm is tried against a fixed threshold, so the middle falls everywhere
+    /// between two samples, and the answer must be close and must never read thicker.
+    #[test]
+    fn a_wall_is_read_at_its_middle_wherever_that_falls_between_two_samples() {
+        struct Slab {
+            half: f64,
+        }
+        impl ScalarField for Slab {
+            fn distance(&self, p: Point3<f64>) -> f64 {
+                p.z.abs() - self.half
+            }
+        }
+        let threshold = 1.9;
+        for i in 0..=60 {
+            let thickness = 1.0 + 0.01 * i as f64;
+            let field = Slab { half: thickness / 2.0 };
+            let read = 2.0 * super::half_thickness(&field, Point3::new(0.0, 0.0, thickness / 2.0), Vector3::z(), threshold, 16);
+            assert!(read <= thickness + 1e-12, "a {thickness} mm wall read thicker, {read}");
+            assert!(thickness - read < 1e-3, "a {thickness} mm wall read {read}");
+        }
     }
 
     /// A wedge is thin at its edge and thick at its back, and the report finds the edge.

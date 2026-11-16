@@ -329,6 +329,9 @@ fn main() {
         Scene::LoftedDerived,
         Scene::ThinSweptScaled,
         Scene::SpokedPipes,
+        Scene::BlendedSpokedPipes,
+        Scene::TaperedSpokedPipes,
+        Scene::BlendedTaperedSpokedPipes,
         Scene::DrilledBlock,
         Scene::PrimitiveRuns,
         Scene::SpokedBlades,
@@ -437,7 +440,7 @@ fn main() {
                 fieldform_gpu::CurveUse::Profile(node) => {
                     let derived = match graph.node(*node) {
                         Some(Node::Extrude { outline, .. }) => {
-                            let world = doc.curves[&outline.curve()].tessellate(0.05);
+                            let world = doc.curves[&outline.curve().expect("a block that names its curve")].tessellate(0.05);
                             let (origin, normal) = fieldform_field::plane_of(&world)
                                 .unwrap_or((Point3::origin(), nalgebra::Vector3::z()));
                             let rotation = fieldform_field::rotation_from_z(normal);
@@ -463,7 +466,7 @@ fn main() {
                             let laid = fieldform_field::sweep_outline_section(
                                 &doc,
                                 outline,
-                                *spine,
+                                spine.source().expect("a block that names its curve"),
                                 fieldform_field::PROFILE_TURN_DEGREES,
                             )
                             .expect("a sweep that compiled has a section");
@@ -551,9 +554,9 @@ fn main() {
                 // at another tolerance, so a frame handed back by position would be the twin's.
                 fieldform_gpu::CurveUse::Frame(node) => match graph.node(*node) {
                     Some(Node::Sweep { outline, spine, .. }) => {
-                        let path = doc.curves[spine].tessellate(tolerance_of(scene));
+                        let path = doc.curves[&spine.source().expect("a block that names its curve")].tessellate(tolerance_of(scene));
                         (
-                            fieldform_field::sweep_frame(&doc, outline, *spine, &path)
+                            fieldform_field::sweep_frame(&doc, outline, spine.source().expect("a block that names its curve"), &path)
                                 .expect("a spine with a direction"),
                             None,
                         )
@@ -1256,6 +1259,29 @@ enum Scene {
     /// `first + k` lands on a spine that exists and is the wrong one — which is the mistake a
     /// two-pipe scene could not tell from a correct one.
     SpokedPipes,
+    /// **The same four pipes joined by one blend** -- the shape `pipe_blend_run` walks, where a
+    /// blend of a list used to be a call an operand however many pipes it held.
+    ///
+    /// A blend is a chain, so a run walked in the wrong order, or one that skipped a member it
+    /// should have joined, is a fillet in the wrong place at the hub where all four meet --
+    /// which is where the spokes are closest and this scene has most of its surface.
+    BlendedSpokedPipes,
+    /// **Four pipes one ramp tapers, in one union** -- `driven_pipe_run_distance`: the ramp read
+    /// once outside the loop, and each member's own divisor in its slot.
+    ///
+    /// The ramp reads the distance from the hub, so every spoke is thick there and thin at its
+    /// tip, and a run that handed a member another's divisor, or read the ramp at the wrong
+    /// point, is a wrong thickness somewhere along it.
+    TaperedSpokedPipes,
+    /// **Both at once**: tapered by one ramp and joined by one blend, which is a frame of bones
+    /// as somebody models one, and the document the two runs were written for.
+    ///
+    /// **With a ball before the pipes in the blend's list and a ball after them**, at the hub
+    /// and on one tip. A blend is a chain, so the run has to take what the hub ball made as
+    /// its starting value and hand what it made to the tip ball's join; a run stitched in the
+    /// wrong place, or one that dropped the operand either side of it, is a fillet missing
+    /// where a ball meets a spoke, and no test of the text can see that.
+    BlendedTaperedSpokedPipes,
     /// **A block drilled with five holes in one difference** -- the shape a run of cylinders
     /// walks when it is a difference's tools: the walk's minimum, negated by the fold.
     ///
@@ -1768,6 +1794,11 @@ impl Scene {
             }
             Scene::ThinSweptScaled => "a thin open sweep whose section scales to a half",
             Scene::SpokedPipes => "four pipes on spokes, in one union",
+            Scene::BlendedSpokedPipes => "the four pipes on spokes, joined by one blend",
+            Scene::TaperedSpokedPipes => "four pipes on spokes one ramp tapers, in one union",
+            Scene::BlendedTaperedSpokedPipes => {
+                "four pipes one ramp tapers, joined by one blend between two balls"
+            }
             Scene::DrilledBlock => "a block drilled with five holes in one difference",
             Scene::PrimitiveRuns => "four each of five primitives, each four a union",
             Scene::SpokedBlades => "four blades on spokes, in one union",
@@ -2157,10 +2188,35 @@ impl Scene {
         // **A run**: four pipes on their own spokes, each read by the union alone, which is what
         // `looped_pipe_run` admits. Its own branch, as the many-way booleans have, because a pipe
         // on its own is a graph with no cage node in it rather than one whose cage goes unused.
-        if matches!(self, Scene::SpokedPipes) {
+        if matches!(
+            self,
+            Scene::SpokedPipes
+                | Scene::BlendedSpokedPipes
+                | Scene::TaperedSpokedPipes
+                | Scene::BlendedTaperedSpokedPipes
+        ) {
             let mut graph = Graph::empty();
             let mut points = Vec::new();
             let mut pipes = Vec::new();
+            // **One ramp for all four**, reading how far a point stands from the hub: thick
+            // there, thin at the tips. One ramp because that is what makes the four a run --
+            // its reading is the same expression for every member.
+            let tapered = matches!(self, Scene::TaperedSpokedPipes | Scene::BlendedTaperedSpokedPipes);
+            let ramp = tapered.then(|| {
+                let nought = ParamRef::Literal(0.0);
+                let hub = graph.add(Node::Sphere {
+                    centre: fieldform_scene::Place::At([nought, nought, nought]),
+                    radius: ParamRef::Literal(1.0),
+                });
+                graph.add(Node::Ramp {
+                    input: hub.into(),
+                    in_min: ParamRef::Literal(0.0),
+                    in_max: ParamRef::Literal(0.9 * CAGE_MM),
+                    out_min: ParamRef::Literal(0.11 * CAGE_MM),
+                    out_max: ParamRef::Literal(0.05 * CAGE_MM),
+                    shape: fieldform_scene::RampShape::Smooth,
+                })
+            });
             for i in 0..4 {
                 let turn = std::f64::consts::TAU * f64::from(i) / 4.0;
                 let (c, sn) = (turn.cos(), turn.sin());
@@ -2184,13 +2240,46 @@ impl Scene {
                 points.push(spoke.tessellate(TOLERANCE_MM));
                 doc.curves.insert(id, spoke);
                 pipes.push(graph.add(Node::Pipe {
-                    curve: id,
+                    curve: id.into(),
                     // Each radius different, so a run reading the wrong slot is a wrong thickness
-                    // rather than the same picture.
-                    radius: ParamRef::Literal((0.07 + 0.015 * f64::from(i)) * CAGE_MM),
+                    // rather than the same picture -- or the one ramp's reading, where the
+                    // members differ by their divisors instead.
+                    radius: match ramp {
+                        Some(ramp) => ParamRef::Field(ramp),
+                        None => ParamRef::Literal((0.07 + 0.015 * f64::from(i)) * CAGE_MM),
+                    },
                 }));
             }
-            graph.add(Node::Boolean { op: BooleanOp::Union, inputs: pipes.into_iter().map(Into::into).collect() });
+            let mut inputs: Vec<fieldform_scene::Operand> =
+                pipes.into_iter().map(fieldform_scene::Operand::from).collect();
+            if matches!(self, Scene::BlendedTaperedSpokedPipes) {
+                // The hub ball first and the tip ball last, so the run stands mid-list.
+                let ball = |graph: &mut Graph, at: [f64; 3], radius: f64| {
+                    graph.add(Node::Sphere {
+                        centre: fieldform_scene::Place::At(at.map(|v| ParamRef::Literal(v * CAGE_MM))),
+                        radius: ParamRef::Literal(radius * CAGE_MM),
+                    })
+                };
+                let hub = ball(&mut graph, [0.0, 0.0, 0.0], 0.12);
+                let tip = ball(&mut graph, [0.92, 0.0, -0.05], 0.09);
+                inputs.insert(0, hub.into());
+                inputs.push(tip.into());
+            }
+            if matches!(self, Scene::BlendedSpokedPipes | Scene::BlendedTaperedSpokedPipes) {
+                // G2, the exponent a frame of bones is usually joined at, and a reach the
+                // spokes overlap by at the hub.
+                graph.add(Node::Blend {
+                    op: BooleanOp::Union,
+                    inputs,
+                    fillet: Fillet {
+                        radius: ParamRef::Literal(0.03 * CAGE_MM),
+                        continuity: Continuity::G2,
+                        second: None,
+                    },
+                });
+            } else {
+                graph.add(Node::Boolean { op: BooleanOp::Union, inputs });
+            }
             return (doc, graph, points);
         }
 
@@ -2297,7 +2386,7 @@ impl Scene {
                 doc.curves.insert(id, rib);
                 ids.push(graph.add(Node::Extrude { rims: Default::default(),
                     outline: Outline::Wall {
-                        curve: id,
+                        curve: id.into(),
                         thickness: ParamRef::Literal((0.04 + 0.012 * k) * CAGE_MM),
                         side,
                         ends,
@@ -2425,7 +2514,7 @@ impl Scene {
             };
             let mut graph = Graph::empty();
             let wall = graph.add(Node::Extrude { rims: Default::default(),
-                outline: Outline::Wall { curve, thickness: lit(0.12 * h), side, ends },
+                outline: Outline::Wall { curve: curve.into(), thickness: lit(0.12 * h), side, ends },
                 sweep,
                 height: lit(0.4 * CAGE_MM),
                 start: lit(0.0),
@@ -2672,7 +2761,7 @@ impl Scene {
             let mut graph = Graph::empty();
             let wedge = matches!(self, Scene::ThinRevolvedWedge);
             graph.add(Node::Revolve { rims: Default::default(),
-                outline: Outline::Wall { curve, thickness: lit(thickness), side, ends },
+                outline: Outline::Wall { curve: curve.into(), thickness: lit(thickness), side, ends },
                 frame: fieldform_scene::Frame::default(),
                 angle: lit(if wedge { 90.0 } else { 360.0 }),
                 sides: if wedge {
@@ -2716,7 +2805,7 @@ impl Scene {
             let node = graph.add(Node::Extrude { rims: Default::default(),
                 outline: match wall {
                     true => Outline::Wall {
-                        curve,
+                        curve: curve.into(),
                         thickness: ParamRef::Literal(0.06 * CAGE_MM),
                         side: WallSide::Centre,
                         ends: WallEnds::Square,
@@ -3002,12 +3091,12 @@ impl Scene {
             let mut graph = Graph::empty();
             graph.add(Node::Sweep { rims: Default::default(),
                 outline: Outline::Wall {
-                    curve: loop_id,
+                    curve: loop_id.into(),
                     thickness: ParamRef::Literal(0.05 * CAGE_MM),
                     side: WallSide::Centre,
                     ends: WallEnds::Square,
                 },
-                spine: path,
+                spine: path.into(),
                 section: fieldform_scene::Section::Square,
                 law: fieldform_scene::SweepLaw {
                     // Gentle: the band grows by the offset on each side, so the reach the
@@ -3026,7 +3115,7 @@ impl Scene {
             let frame = fieldform_field::sweep_frame(
                 &doc,
                 &Outline::Wall {
-                    curve: loop_id,
+                    curve: loop_id.into(),
                     thickness: ParamRef::Literal(0.05 * CAGE_MM),
                     side: WallSide::Centre,
                     ends: WallEnds::Square,
@@ -3088,12 +3177,12 @@ impl Scene {
             let mut graph = Graph::empty();
             graph.add(Node::Sweep { rims: Default::default(),
                 outline: Outline::Wall {
-                    curve,
+                    curve: curve.into(),
                     thickness: ParamRef::Literal(0.25 * hs),
                     side: WallSide::Left,
                     ends: WallEnds::Square,
                 },
-                spine: path,
+                spine: path.into(),
                 section: fieldform_scene::Section::Square,
                 // Scaled to a half on the way, where the scaled scene asks for one: an open
                 // wall scales whole, thickness and all, which is the arm of
@@ -3153,7 +3242,7 @@ impl Scene {
             graph.add(Node::Sweep {
                 rims: Default::default(),
                 outline: fieldform_scene::Outline::closed(profile),
-                spine: path,
+                spine: path.into(),
                 section: match self {
                     Scene::LeaningLens => fieldform_scene::Section::Skewed,
                     _ => fieldform_scene::Section::Parallel,
@@ -3210,7 +3299,7 @@ impl Scene {
             graph.add(Node::Sweep {
                 rims: Default::default(),
                 outline: fieldform_scene::Outline::closed(profile),
-                spine: path,
+                spine: path.into(),
                 section: match self {
                     Scene::CoiledFlush => fieldform_scene::Section::Skewed,
                     _ => fieldform_scene::Section::Square,
@@ -3268,7 +3357,7 @@ impl Scene {
             graph.add(Node::Sweep {
                 rims: Default::default(),
                 outline: fieldform_scene::Outline::closed(profile),
-                spine: path,
+                spine: path.into(),
                 section: fieldform_scene::Section::Square,
                 law: Default::default(),
             });
@@ -3350,7 +3439,7 @@ impl Scene {
             let lit = ParamRef::Literal;
             graph.add(Node::Sweep { rims: Default::default(),
                 outline: fieldform_scene::Outline::closed(profile),
-                spine: path,
+                spine: path.into(),
                 section: match self {
                     Scene::SweptFlush => fieldform_scene::Section::Skewed,
                     Scene::SweptParallel => fieldform_scene::Section::Parallel,
@@ -4690,12 +4779,15 @@ impl Scene {
         // Absent only for the cageless scene, which never reaches the arms that use it.
         let cage_node = graph.roots().first().copied().unwrap_or_else(NodeId::new);
         let pipe = graph.add(Node::Pipe {
-            curve: curve_id,
+            curve: curve_id.into(),
             radius: ParamRef::Literal(PIPE_RADIUS_MM),
         });
         match self {
             // Returned above with a graph of its own, so it never reaches this pipe or this cage.
             Scene::SpokedPipes
+            | Scene::BlendedSpokedPipes
+            | Scene::TaperedSpokedPipes
+            | Scene::BlendedTaperedSpokedPipes
             | Scene::DrilledBlock
             | Scene::PrimitiveRuns
             | Scene::SpokedBlades

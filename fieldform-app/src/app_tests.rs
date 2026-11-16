@@ -15,12 +15,83 @@
 use super::*;
 use eframe::App as _;
 
+/// How many headless `App`s the test threads may hold at once, unless `FIELDFORM_TEST_APPS`
+/// names another number.
+///
+/// Every `App` here owns a device, and a device takes the card's memory a block at a time, so
+/// sixteen test threads held some 3.7 GB of a 4 GB card between them, and the one test that
+/// asks for a block more -- a still at four times the size -- was refused with "Out of Memory"
+/// in five runs of fourteen. Nothing was wrong with the test: alone it peaks at 465 MiB.
+/// Measured on an RTX A500 Laptop GPU (4 GB) on Vulkan, 2026-11-15: the whole binary, the
+/// card's memory in use read every 250 ms, two runs a row.
+///
+/// | apps at once | peak on the card, MiB | the suite, s | refused |
+/// |---|---|---|---|
+/// | 16, every thread | 3 685, 3 823 | 129, 155 | one run of two |
+/// | 8 | 2 582, 2 582 | 127, 126 | none |
+/// | 6 | 2 192, 2 128 | 132, 132 | none |
+/// | **4** | 1 539, 3 113 | 134, 150 | none |
+///
+/// Four, because the card is shared. The second run at four is not the tests': another
+/// program took 1.2 GB of the card partway through it, which on top of eight `App`s is the old
+/// ceiling again. Against that, four costs seven seconds in two minutes. A larger card can ask
+/// for more.
+const APPS_AT_ONCE: usize = 4;
+
+/// The places not yet taken, and the bell rung when one comes back.
+fn places() -> &'static (std::sync::Mutex<usize>, std::sync::Condvar) {
+    static PLACES: std::sync::OnceLock<(std::sync::Mutex<usize>, std::sync::Condvar)> = std::sync::OnceLock::new();
+    PLACES.get_or_init(|| {
+        let asked = std::env::var("FIELDFORM_TEST_APPS").ok().and_then(|n| n.parse::<usize>().ok());
+        (std::sync::Mutex::new(asked.unwrap_or(APPS_AT_ONCE).max(1)), std::sync::Condvar::new())
+    })
+}
+
+/// One place among the headless `App`s, given back when the thread holding it ends.
+struct Place;
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        let (free, bell) = places();
+        *free.lock().unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+        bell.notify_one();
+    }
+}
+
+thread_local! {
+    /// The place this test's thread holds. A thread's locals are dropped after everything the
+    /// test itself owned, so the place outlives the `App` and its device, and is given back
+    /// whether the test passed or panicked.
+    static PLACE: std::cell::RefCell<Option<Place>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Waits for a place if this thread has none. A thread keeps the one it has, so a test that
+/// builds two `App`s cannot wait on itself.
+fn take_a_place() {
+    PLACE.with(|held| {
+        if held.borrow().is_some() {
+            return;
+        }
+        let (free, bell) = places();
+        let mut free = free.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *free == 0 {
+            free = bell.wait(free).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *free -= 1;
+        *held.borrow_mut() = Some(Place);
+    });
+}
+
 /// The application as a window would make it, or `None` where this machine has no adapter.
 ///
 /// A test build keeps its hands off the owner's files: no console log (the name is shared and
 /// opening it truncates it), no autosave written or offered, and no display quality kept for the
 /// next session -- see the `cfg!(test)` guards beside each.
+///
+/// It waits for a place first (`take_a_place`), so the card is never asked to hold more `App`s
+/// than `APPS_AT_ONCE`.
 pub(crate) fn headless_app() -> Option<App> {
+    take_a_place();
     let config = wgpu_configuration();
     let instance = pollster::block_on(config.wgpu_setup.new_instance());
     let state = match pollster::block_on(eframe::egui_wgpu::RenderState::create(
@@ -90,24 +161,24 @@ fn a_menu_setting_and_its_console_line_reach_the_same_state() {
     let by = |id: &str| commands::by_id(id).unwrap_or_else(|| panic!("{id} is in the registry"));
 
     app.invoke_command(by("view.mode.field"));
-    assert!(app.view_mode == ViewMode::Field);
+    assert!(app.view.mode == ViewMode::Field);
     app.run_command("display mode=overlay");
-    assert!(app.view_mode == ViewMode::Overlay);
+    assert!(app.view.mode == ViewMode::Overlay);
 
     app.invoke_command(by("view.quality.fast"));
-    assert_eq!(app.display_quality, crate::display_quality::DisplayQuality::Fast);
+    assert_eq!(app.view.quality, crate::display_quality::DisplayQuality::Fast);
     app.run_command("display quality=balanced");
-    assert_eq!(app.display_quality, crate::display_quality::DisplayQuality::Balanced);
+    assert_eq!(app.view.quality, crate::display_quality::DisplayQuality::Balanced);
 
-    let shown = app.show_control_points;
+    let shown = app.curve_ui.show_control_points;
     app.invoke_command(by("view.control_points"));
-    assert_eq!(app.show_control_points, !shown);
+    assert_eq!(app.curve_ui.show_control_points, !shown);
     app.run_command("points");
-    assert_eq!(app.show_control_points, shown);
+    assert_eq!(app.curve_ui.show_control_points, shown);
 
-    let cube = app.show_view_cube;
+    let cube = app.view.show_view_cube;
     app.run_command("viewcube");
-    assert_eq!(app.show_view_cube, !cube);
+    assert_eq!(app.view.show_view_cube, !cube);
 
     app.invoke_command(by("help.about"));
     assert!(app.show_about);
@@ -142,7 +213,7 @@ fn the_section_stays_on_and_unmoved_while_a_cage_face_is_picked_and_moved() {
     // Polygon mode, so a click picks on the cage: picking follows what the mode draws.
     app.dispatch("view.display", &Args::new().with("mode", Value::Str("polygon".into())));
     frame(&mut app, Vec::new());
-    assert!(app.view_mode.cage_is_editable());
+    assert!(app.view.mode.cage_is_editable());
 
     app.invoke_command(by("view.section"));
     frame(&mut app, Vec::new());
@@ -286,25 +357,25 @@ fn every_smoke_script_passes_every_expect() {
         let text = std::fs::read_to_string(scripts.join(script)).expect("the script");
         app.mark_saved();
         app.dispatch("file.new", &Args::new());
-        let first = app.expect_results.len();
+        let first = app.scripting.expect_results.len();
         for line in text.lines().filter_map(redirect) {
             app.gesture = None;
-            let said = app.console_log.len();
+            let said = app.console.log.len();
             app.run_command(&line);
             app.drain_ownership_changes(false);
             frame(&mut app, Vec::new());
             if std::env::var("SMOKE_TRACE").is_ok() {
-                for l in app.console_log.iter().skip(said.min(app.console_log.len())) {
+                for l in app.console.log.iter().skip(said.min(app.console.log.len())) {
                     eprintln!("{} {}", if l.ok { "  " } else { "!!" }, l.text);
                 }
             }
         }
-        for r in &app.expect_results[first..] {
+        for r in &app.scripting.expect_results[first..] {
             if r.verdict != expect::Verdict::Pass {
                 failures.push(format!("{script}: {}", r.said));
             }
         }
-        assert!(app.expect_results.len() > first, "{script} measured nothing");
+        assert!(app.scripting.expect_results.len() > first, "{script} measured nothing");
     }
     let _ = std::fs::remove_dir_all(&out);
     assert!(failures.is_empty(), "smoke expects that did not pass:\n{}", failures.join("\n"));
@@ -424,11 +495,11 @@ fn a_sketch_follows_its_plane_until_a_point_leaves_it() {
     assert!(near(back[1], nalgebra::Point3::new(10.0, 3.0, 5.0)), "the edit came along: {back:?}");
 
     // A point taken off the plane: a 3D sketch now, and the console says so.
-    let said = app.console_log.len();
+    let said = app.console.log.len();
     app.run_command("set rib.p1=0,8,20");
     frame(&mut app, Vec::new());
     assert!(!app.doc.sketches[&rib].live, "no longer following");
-    assert!(app.console_log[said..].iter().any(|l| l.text.contains("3D sketch")), "and it says so");
+    assert!(app.console.log[said..].iter().any(|l| l.text.contains("3D sketch")), "and it says so");
     app.run_command("set block.centre=30,0,0");
     frame(&mut app, Vec::new());
     assert!(near(curve_points(&app, "rib")[0], nalgebra::Point3::new(0.0, 0.0, 5.0)), "left behind");
@@ -568,11 +639,11 @@ fn edit(app: &mut App, name: &str, change: impl FnOnce(&mut Node)) {
 fn replay(lines: &[String]) -> App {
     let mut app = headless_app().expect("an adapter, as the session had one");
     for line in lines {
-        let warned = app.console_warnings;
+        let warned = app.console.warnings;
         app.run_command(line);
         frame(&mut app, Vec::new());
-        if app.console_warnings > warned {
-            let said: Vec<&str> = app.console_log.iter().rev().take(4).map(|l| l.text.as_str()).collect();
+        if app.console.warnings > warned {
+            let said: Vec<&str> = app.console.log.iter().rev().take(4).map(|l| l.text.as_str()).collect();
             panic!("replaying `{line}` was refused: {said:?}\nthe whole echo:\n{}", lines.join("\n"));
         }
     }
@@ -603,13 +674,13 @@ fn t1_the_echo_of_a_gui_session_replays_to_the_same_graph() {
     let Some(mut app) = headless_app() else { return };
     frame(&mut app, Vec::new());
     // What an empty part says on its first frame is not the session's.
-    let said_before = app.console_log.len();
+    let said_before = app.console.log.len();
     // A command from the menu, and -- where it leaves its block pending -- Enter to keep it, as a
     // person would before going on.
     let invoke = |app: &mut App, id: &str| {
         app.invoke_command(by(id));
         frame(app, Vec::new());
-        if app.session.is_some() {
+        if app.tools.session.is_some() {
             frame(app, vec![key(egui::Key::Enter)]);
         }
     };
@@ -721,7 +792,7 @@ fn t1_the_echo_of_a_gui_session_replays_to_the_same_graph() {
     app.doc.rename_parameter(number, "wall").expect("a free name");
     app.mark_changed();
     app.refresh_profiles();
-    let base = app.profiles.loops[0][0];
+    let base = app.curve_ui.profiles.loops[0][0];
     app.rename_profile(base, "base");
     frame(&mut app, Vec::new());
 
@@ -772,9 +843,9 @@ fn t1_the_echo_of_a_gui_session_replays_to_the_same_graph() {
 
     // The session itself refused nothing it was asked: a refusal here is a step the echo then has
     // nothing to say about, and the test would be checking less than it reads as checking.
-    let refused: Vec<&str> = app.console_log[said_before..].iter().filter(|l| !l.ok).map(|l| l.text.as_str()).collect();
+    let refused: Vec<&str> = app.console.log[said_before..].iter().filter(|l| !l.ok).map(|l| l.text.as_str()).collect();
     assert!(refused.is_empty(), "the GUI session was refused: {refused:#?}");
-    let lines = app.echo_log.clone();
+    let lines = app.console.echo_log.clone();
     eprintln!("T1: the session echoed {} lines", lines.len());
     assert!(lines.len() >= 30, "the session echoed {} lines:\n{}", lines.len(), lines.join("\n"));
     let replayed = replay(&lines);
@@ -794,7 +865,7 @@ fn document_bytes(app: &App) -> Vec<u8> {
 
 /// Edits the block a session is waiting on, as its panel does: in place, the selection unmoved.
 fn edit_pending(app: &mut App, change: impl FnOnce(&mut Node)) {
-    let id = app.session.as_ref().expect("a session is pending").block;
+    let id = app.tools.session.as_ref().expect("a session is pending").block;
     let mut node = app.part_graph().node(id).cloned().expect("the pending block");
     change(&mut node);
     app.gesture = None;
@@ -815,12 +886,12 @@ fn t3_a_cancelled_session_leaves_the_document_its_names_and_the_history_as_they_
     app.run_command("undo");
     frame(&mut app, Vec::new());
     assert_eq!(document_bytes(&app), document_bytes(&app), "the archive is the same bytes each time it is written");
-    let before = (document_bytes(&app), app.stack.history(), names::instance_name(&app.doc, "Cylinder"), app.echo_log.len());
+    let before = (document_bytes(&app), app.stack.history(), names::instance_name(&app.doc, "Cylinder"), app.console.echo_log.len());
     assert!(!before.1.1.is_empty(), "there is something to redo, which a cancel must not lose");
 
     app.invoke_command(by("create.cylinder"));
     frame(&mut app, Vec::new());
-    assert!(app.session.is_some(), "the cylinder is pending");
+    assert!(app.tools.session.is_some(), "the cylinder is pending");
     for r in [7.0, 9.5] {
         edit_pending(&mut app, |n| {
             if let Node::Cylinder { radius, .. } = n {
@@ -830,8 +901,8 @@ fn t3_a_cancelled_session_leaves_the_document_its_names_and_the_history_as_they_
     }
     frame(&mut app, vec![key(egui::Key::Escape)]);
 
-    assert!(app.session.is_none(), "Esc takes it back");
-    let after = (document_bytes(&app), app.stack.history(), names::instance_name(&app.doc, "Cylinder"), app.echo_log.len());
+    assert!(app.tools.session.is_none(), "Esc takes it back");
+    let after = (document_bytes(&app), app.stack.history(), names::instance_name(&app.doc, "Cylinder"), app.console.echo_log.len());
     assert!(after.0 == before.0, "the document is not byte-identical after a cancel");
     assert_eq!(after.1, before.1, "the history, redo included");
     assert_eq!(after.2, before.2, "no name was taken");
@@ -856,15 +927,15 @@ fn t4_a_session_is_one_undo_step_and_undo_removes_its_block() {
         });
     }
     frame(&mut app, vec![key(egui::Key::Enter)]);
-    assert!(app.session.is_none(), "Enter keeps it");
+    assert!(app.tools.session.is_none(), "Enter keeps it");
     let (done, _) = app.stack.history();
     assert_eq!(done.len(), depth + 1, "one entry for the making and three edits: {done:?}");
     assert_eq!(done.last().map(String::as_str), Some("Sphere"));
     assert_eq!(app.part_graph().nodes().count(), nodes + 1);
     assert!(
-        app.echo_log.last().is_some_and(|l| l.starts_with("sphere radius=30 ")),
+        app.console.echo_log.last().is_some_and(|l| l.starts_with("sphere radius=30 ")),
         "the echo carries the values it was kept with: {:?}",
-        app.echo_log
+        app.console.echo_log
     );
     app.invoke_command(by("edit.undo"));
     frame(&mut app, Vec::new());
@@ -886,22 +957,22 @@ fn t5_another_command_keeps_the_pending_one_first() {
             *radius = ParamRef::Literal(12.0);
         }
     });
-    let sphere = app.session.as_ref().expect("pending").block;
+    let sphere = app.tools.session.as_ref().expect("pending").block;
     app.invoke_command(by("create.cube"));
     frame(&mut app, Vec::new());
-    let pending = app.session.as_ref().expect("the cube is pending");
+    let pending = app.tools.session.as_ref().expect("the cube is pending");
     assert!(matches!(app.part_graph().node(pending.block), Some(Node::Cuboid { .. })));
     let (done, _) = app.stack.history();
     assert_eq!(done.len(), depth + 2, "the sphere kept as one entry, and the cube's making: {done:?}");
     assert_eq!(done[depth], "Sphere");
     assert_eq!(app.body_name(sphere), Some("Sphere_0"), "kept, so named");
-    assert!(app.echo_log.iter().any(|l| l.starts_with("sphere radius=12 ")), "{:?}", app.echo_log);
-    assert!(!app.echo_log.iter().any(|l| l.starts_with("cube ")), "the cube is not kept yet");
+    assert!(app.console.echo_log.iter().any(|l| l.starts_with("sphere radius=12 ")), "{:?}", app.console.echo_log);
+    assert!(!app.console.echo_log.iter().any(|l| l.starts_with("cube ")), "the cube is not kept yet");
 
     frame(&mut app, vec![key(egui::Key::Escape)]);
     app.invoke_command(by("create.sphere"));
     frame(&mut app, Vec::new());
-    let again = app.session.as_ref().expect("a second sphere").block;
+    let again = app.tools.session.as_ref().expect("a second sphere").block;
     assert!(
         matches!(app.part_graph().node(again), Some(Node::Sphere { radius: ParamRef::Literal(r), .. }) if *r == 12.0),
         "a sphere starts from the radius the last was kept with"
@@ -941,7 +1012,7 @@ fn type_text(app: &mut App, text: &str) {
 fn t6_typed_entry_sets_the_first_number_and_an_expression_echoes_as_typed() {
     let Some(mut app) = headless_app() else { return };
     // The floating panel is what this holds, and it is off by default since the owner's trial.
-    app.floating_panel = true;
+    app.tools.floating_panel = true;
     frame(&mut app, Vec::new());
     for line in [
         "line p0=0,0,0 p1=30,0,0",
@@ -954,45 +1025,45 @@ fn t6_typed_entry_sets_the_first_number_and_an_expression_echoes_as_typed() {
     }
     app.invoke_command(by("create.extrude"));
     frame(&mut app, Vec::new());
-    let extrude = app.session.as_ref().expect("the extrude is pending").block;
+    let extrude = app.tools.session.as_ref().expect("the extrude is pending").block;
     assert_eq!(app.panel_rows().first().map(|r| r.key), Some("height"), "the first number is the depth");
     type_text(&mut app, "20");
     frame(&mut app, vec![key_event(egui::Key::Enter)]);
-    assert!(app.session.is_some(), "the first Enter confirms the row, not the session");
+    assert!(app.tools.session.is_some(), "the first Enter confirms the row, not the session");
     frame(&mut app, vec![key_event(egui::Key::Enter)]);
-    assert!(app.session.is_none(), "the second Enter keeps it");
+    assert!(app.tools.session.is_none(), "the second Enter keeps it");
     assert!(
         matches!(app.part_graph().node(extrude), Some(Node::Extrude { height: ParamRef::Literal(h), .. }) if *h == 20.0),
         "{:?}",
         app.part_graph().node(extrude)
     );
-    let extruded = app.echo_log.last().cloned().unwrap_or_default();
+    let extruded = app.console.echo_log.last().cloned().unwrap_or_default();
     assert!(extruded.starts_with("extrude ") && extruded.contains(" height=20 "), "{extruded}");
 
     // An expression, which a letter starting a parameter's name begins.
     app.run_command("param name=radius value=10");
     app.invoke_command(by("create.sphere"));
     frame(&mut app, Vec::new());
-    let sphere = app.session.as_ref().expect("the sphere is pending").block;
+    let sphere = app.tools.session.as_ref().expect("the sphere is pending").block;
     type_text(&mut app, "radius+2");
     frame(&mut app, vec![key_event(egui::Key::Enter)]);
     frame(&mut app, vec![key_event(egui::Key::Enter)]);
-    assert!(app.session.is_none());
+    assert!(app.tools.session.is_none());
     let variable = app.doc.parameter_named("Radius_1").expect("a variable named after the row");
     assert!(matches!(app.part_graph().node(sphere), Some(Node::Sphere { radius: ParamRef::Named(id), .. }) if *id == variable));
     assert_eq!(app.doc.parameter_value(variable), Some(12.0));
-    let n = app.echo_log.len();
-    let said = &app.echo_log[n.saturating_sub(2)..];
+    let n = app.console.echo_log.len();
+    let said = &app.console.echo_log[n.saturating_sub(2)..];
     assert_eq!(said[0], "param name=Radius_1 expr=radius+2", "the source text, not the value: {said:?}");
     assert!(said[1].starts_with("sphere radius=Radius_1 "), "{said:?}");
 
     // Tab confirms the row it leaves and moves to the next.
     app.invoke_command(by("create.cube"));
     frame(&mut app, Vec::new());
-    let cube = app.session.as_ref().expect("the cube is pending").block;
+    let cube = app.tools.session.as_ref().expect("the cube is pending").block;
     type_text(&mut app, "5");
     frame(&mut app, vec![key_event(egui::Key::Tab)]);
-    assert_eq!(app.session.as_ref().map(|s| s.panel.focus), Some(1), "Tab moves to the centre");
+    assert_eq!(app.tools.session.as_ref().map(|s| s.panel.focus), Some(1), "Tab moves to the centre");
     type_text(&mut app, "1,2,3");
     frame(&mut app, vec![key_event(egui::Key::Enter)]);
     frame(&mut app, vec![key_event(egui::Key::Enter)]);
@@ -1008,18 +1079,18 @@ fn t6_typed_entry_sets_the_first_number_and_an_expression_echoes_as_typed() {
 fn a_middle_drag_on_a_panel_number_scrubs_it() {
     let Some(mut app) = headless_app() else { return };
     // The floating panel is what this holds, and it is off by default since the owner's trial.
-    app.floating_panel = true;
+    app.tools.floating_panel = true;
     frame(&mut app, Vec::new());
     app.invoke_command(by("create.sphere"));
     frame(&mut app, Vec::new());
     frame(&mut app, Vec::new());
-    let sphere = app.session.as_ref().expect("pending").block;
+    let sphere = app.tools.session.as_ref().expect("pending").block;
     let radius = |app: &App| match app.part_graph().node(sphere) {
         Some(Node::Sphere { radius: ParamRef::Literal(r), .. }) => *r,
         other => panic!("{other:?}"),
     };
     let before = radius(&app);
-    let at = app.session.as_ref().expect("pending").panel.rects.first().copied().expect("the radius row was drawn").center();
+    let at = app.tools.session.as_ref().expect("pending").panel.rects.first().copied().expect("the radius row was drawn").center();
     let button = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton {
         pos,
         button: egui::PointerButton::Middle,
@@ -1043,13 +1114,13 @@ fn a_middle_drag_on_a_panel_number_scrubs_it() {
 fn a_refused_value_is_said_in_the_panel_and_the_session_waits() {
     let Some(mut app) = headless_app() else { return };
     // The floating panel is what this holds, and it is off by default since the owner's trial.
-    app.floating_panel = true;
+    app.tools.floating_panel = true;
     frame(&mut app, Vec::new());
     app.invoke_command(by("create.sphere"));
     frame(&mut app, Vec::new());
     type_text(&mut app, "-nothing");
     frame(&mut app, vec![key_event(egui::Key::Enter)]);
-    let session = app.session.as_ref().expect("still pending");
+    let session = app.tools.session.as_ref().expect("still pending");
     assert!(session.panel.error.is_some(), "the refusal is said in the panel");
     assert!(app.doc.parameter_named("Radius").is_none(), "no variable is left behind");
 }
@@ -1066,12 +1137,12 @@ fn t7_a_console_line_from_the_palette_is_the_line_from_the_console() {
     let Some(mut palette) = headless_app() else { return };
     frame(&mut palette, Vec::new());
     frame(&mut palette, vec![key_event(egui::Key::Space), egui::Event::Text(" ".into())]);
-    assert!(palette.palette.is_some(), "Space opens the palette");
+    assert!(palette.tools.palette.is_some(), "Space opens the palette");
     type_text(&mut palette, line);
     frame(&mut palette, vec![key_event(egui::Key::Enter)]);
     frame(&mut palette, Vec::new());
-    assert!(palette.palette.is_none(), "it closes once the line has run");
-    assert_eq!(palette.console_history.last().map(String::as_str), Some(line), "the line is in the console's history as typed");
+    assert!(palette.tools.palette.is_none(), "it closes once the line has run");
+    assert_eq!(palette.console.history.last().map(String::as_str), Some(line), "the line is in the console's history as typed");
 
     let mut console = headless_app().expect("an adapter, as the first had one");
     frame(&mut console, Vec::new());
@@ -1092,18 +1163,18 @@ fn the_palette_runs_what_it_finds_and_esc_runs_nothing() {
     type_text(&mut app, "cyl");
     frame(&mut app, vec![key_event(egui::Key::Enter)]);
     frame(&mut app, Vec::new());
-    let pending = app.session.as_ref().expect("the cylinder is pending, as from its menu row");
+    let pending = app.tools.session.as_ref().expect("the cylinder is pending, as from its menu row");
     assert!(matches!(app.part_graph().node(pending.block), Some(Node::Cylinder { .. })));
     frame(&mut app, vec![key_event(egui::Key::Enter)]);
-    assert!(app.session.is_none());
-    assert_eq!(app.recent.first().copied(), Some("create.cylinder"), "remembered as run lately");
+    assert!(app.tools.session.is_none());
+    assert_eq!(app.tools.recent.first().copied(), Some("create.cylinder"), "remembered as run lately");
 
     let nodes = app.part_graph().nodes().count();
     frame(&mut app, vec![key_event(egui::Key::Space), egui::Event::Text(" ".into())]);
     type_text(&mut app, "sph");
     frame(&mut app, vec![key_event(egui::Key::Escape)]);
     frame(&mut app, Vec::new());
-    assert!(app.palette.is_none(), "Esc closes it");
+    assert!(app.tools.palette.is_none(), "Esc closes it");
     assert_eq!(app.part_graph().nodes().count(), nodes, "and nothing ran");
 }
 
@@ -1115,14 +1186,14 @@ fn a_click_outside_the_palette_closes_it() {
     frame(&mut app, Vec::new());
     frame(&mut app, vec![key_event(egui::Key::Space), egui::Event::Text(" ".into())]);
     type_text(&mut app, "sph");
-    assert!(app.palette.is_some());
+    assert!(app.tools.palette.is_some());
     let nodes = app.part_graph().nodes().count();
     // Its own field, near the top of the screen's middle, keeps it.
     let field = egui::pos2(700.0, 900.0 * 0.18 + 12.0);
     left_click(&mut app, field);
-    assert!(app.palette.is_some(), "a click on the palette keeps it");
+    assert!(app.tools.palette.is_some(), "a click on the palette keeps it");
     left_click(&mut app, egui::pos2(1300.0, 860.0));
-    assert!(app.palette.is_none(), "a click outside closes it");
+    assert!(app.tools.palette.is_none(), "a click outside closes it");
     assert_eq!(app.part_graph().nodes().count(), nodes, "and runs nothing");
 }
 
@@ -1149,8 +1220,8 @@ fn a_command_is_rebound_by_pressing_keys_and_a_taken_chord_is_refused() {
     app.invoke_command(by("help.shortcuts"));
     app.begin_capture("edit.duplicate");
     frame(&mut app, vec![chord_event(egui::Key::D, true, false, true)]);
-    assert!(app.capturing.is_none(), "the chord pressed was taken");
-    assert_eq!(app.bindings_note.as_deref(), Some("Duplicate is on Ctrl+Alt+D"));
+    assert!(app.keys.capturing.is_none(), "the chord pressed was taken");
+    assert_eq!(app.keys.note.as_deref(), Some("Duplicate is on Ctrl+Alt+D"));
 
     let before = nodes(&app);
     frame(&mut app, vec![chord_event(egui::Key::D, true, false, false)]);
@@ -1161,12 +1232,12 @@ fn a_command_is_rebound_by_pressing_keys_and_a_taken_chord_is_refused() {
 
     app.begin_capture("edit.duplicate");
     frame(&mut app, vec![chord_event(egui::Key::S, true, false, false)]);
-    assert_eq!(app.bindings_note.as_deref(), Some("Ctrl+S is Save's — take it off there first"));
-    assert!(app.keymap.lookup(&Shortcut::new("S", Modifiers::ctrl())).is_some_and(|b| b.op == "file.save"));
+    assert_eq!(app.keys.note.as_deref(), Some("Ctrl+S is Save's — take it off there first"));
+    assert!(app.keys.keymap.lookup(&Shortcut::new("S", Modifiers::ctrl())).is_some_and(|b| b.op == "file.save"));
 
     app.begin_capture("edit.duplicate");
     frame(&mut app, vec![key_event(egui::Key::Escape)]);
-    assert!(app.capturing.is_none() && app.bindings_note.is_none(), "Esc gives up");
+    assert!(app.keys.capturing.is_none() && app.keys.note.is_none(), "Esc gives up");
 }
 
 /// **F frames and Alt+H shows every hidden body** (§9.1's table).
@@ -1239,17 +1310,17 @@ fn a_right_click_opens_the_marking_menu_and_a_slot_runs() {
     app.select_body(app.node_named("ball"));
     let at = in_viewport(&mut app);
     right_click(&mut app, at);
-    let menu = app.marking.as_ref().expect("the right-click opened the marking menu");
+    let menu = app.tools.marking.as_ref().expect("the right-click opened the marking menu");
     assert_eq!(menu.subject, marking::Subject::Body);
     let (dx, dy) = marking::slot_offset(2, 84.0);
     left_click(&mut app, at + egui::vec2(dx, dy));
-    let pending = app.session.as_ref().expect("East on a body is Shell, now pending");
+    let pending = app.tools.session.as_ref().expect("East on a body is Shell, now pending");
     assert!(matches!(app.part_graph().node(pending.block), Some(Node::Shell { .. })));
     frame(&mut app, vec![key_event(egui::Key::Enter)]);
 
     app.select_body(app.node_named("ball"));
     right_click(&mut app, at);
-    assert!(app.marking.is_some());
+    assert!(app.tools.marking.is_some());
     let (dx, dy) = marking::slot_offset(1, 60.0);
     frame(&mut app, vec![egui::Event::PointerMoved(at)]);
     frame(&mut app, vec![press(at, egui::PointerButton::Primary, true)]);
@@ -1259,23 +1330,23 @@ fn a_right_click_opens_the_marking_menu_and_a_slot_runs() {
     }
     frame(&mut app, vec![press(at + egui::vec2(dx, dy), egui::PointerButton::Primary, false)]);
     frame(&mut app, Vec::new());
-    let pending = app.session.as_ref().expect("a drag North-East picked Offset");
+    let pending = app.tools.session.as_ref().expect("a drag North-East picked Offset");
     assert!(matches!(app.part_graph().node(pending.block), Some(Node::Offset { .. })));
     frame(&mut app, vec![key_event(egui::Key::Escape)]);
 
     app.select_body(None);
     right_click(&mut app, at);
-    assert_eq!(app.marking.as_ref().map(|m| m.subject), Some(marking::Subject::Empty));
+    assert_eq!(app.tools.marking.as_ref().map(|m| m.subject), Some(marking::Subject::Empty));
     let (dx, dy) = marking::slot_offset(marking::MORE, 84.0);
     left_click(&mut app, at + egui::vec2(dx, dy));
-    let palette = app.palette.as_ref().expect("More… opens the palette");
+    let palette = app.tools.palette.as_ref().expect("More… opens the palette");
     let only = palette.only.as_ref().expect("narrowed to what is on offer");
     assert!(only.contains(&"create.sphere") && !only.contains(&"edit.paste_here"), "Paste here is not on offer");
 
     frame(&mut app, vec![key_event(egui::Key::Escape)]);
     right_click(&mut app, at);
     frame(&mut app, vec![key_event(egui::Key::Escape)]);
-    assert!(app.marking.is_none(), "Esc closes it, having run nothing");
+    assert!(app.tools.marking.is_none(), "Esc closes it, having run nothing");
 }
 
 /// **Shift+R runs the last command again, from the values it was last kept with, on the current
@@ -1285,7 +1356,7 @@ fn a_right_click_opens_the_marking_menu_and_a_slot_runs() {
 fn shift_r_repeats_the_last_command_with_its_kept_values() {
     let Some(mut app) = headless_app() else { return };
     // The floating panel is what this holds, and it is off by default since the owner's trial.
-    app.floating_panel = true;
+    app.tools.floating_panel = true;
     frame(&mut app, Vec::new());
     app.invoke_command(by("create.sphere"));
     frame(&mut app, Vec::new());
@@ -1297,7 +1368,7 @@ fn shift_r_repeats_the_last_command_with_its_kept_values() {
     };
     assert_eq!(spheres(&app), 1);
     frame(&mut app, vec![chord_event(egui::Key::R, false, true, false)]);
-    assert!(app.session.is_some(), "a repeated session command is pending, Esc-able as any is");
+    assert!(app.tools.session.is_some(), "a repeated session command is pending, Esc-able as any is");
     frame(&mut app, vec![key_event(egui::Key::Enter)]);
     assert_eq!(spheres(&app), 2, "the second starts from the radius the first was kept with");
 
@@ -1306,12 +1377,12 @@ fn shift_r_repeats_the_last_command_with_its_kept_values() {
     let at = in_viewport(&mut app);
     let nodes = app.part_graph().nodes().count();
     right_click(&mut app, at);
-    assert!(app.marking.is_some(), "the menu opened");
+    assert!(app.tools.marking.is_some(), "the menu opened");
     left_click(&mut app, at);
-    assert!(app.marking.is_none() && app.session.is_none(), "a click at the centre closes it");
+    assert!(app.tools.marking.is_none() && app.tools.session.is_none(), "a click at the centre closes it");
     right_click(&mut app, at);
     right_click(&mut app, at);
-    assert!(app.marking.is_none() && app.session.is_none(), "so does a second right-click");
+    assert!(app.tools.marking.is_none() && app.tools.session.is_none(), "so does a second right-click");
     assert_eq!(app.part_graph().nodes().count(), nodes, "and nothing ran");
 }
 
@@ -1324,19 +1395,19 @@ fn shift_r_repeats_the_last_command_with_its_kept_values() {
 fn the_shelf_starts_empty_and_runs_what_is_put_on_it() {
     let Some(mut app) = headless_app() else { return };
     frame(&mut app, Vec::new());
-    assert!(app.shelf.is_empty() && app.shelf_drawn.is_empty(), "no default toolbar");
+    assert!(app.tools.shelf.is_empty() && app.tools.shelf_drawn.is_empty(), "no default toolbar");
     app.shelf_add("create.sphere");
     app.shelf_add("create.sphere");
-    assert_eq!(app.shelf, vec!["create.sphere"], "once each");
+    assert_eq!(app.tools.shelf, vec!["create.sphere"], "once each");
     frame(&mut app, Vec::new());
-    let (_, rect) = app.shelf_drawn.first().copied().expect("the shelf draws its button");
+    let (_, rect) = app.tools.shelf_drawn.first().copied().expect("the shelf draws its button");
     left_click(&mut app, rect.center());
-    let pending = app.session.as_ref().expect("the shelf's sphere is pending");
+    let pending = app.tools.session.as_ref().expect("the shelf's sphere is pending");
     assert!(matches!(app.part_graph().node(pending.block), Some(Node::Sphere { .. })));
     frame(&mut app, vec![key_event(egui::Key::Enter)]);
     app.shelf_remove("create.sphere");
     frame(&mut app, Vec::new());
-    assert!(app.shelf.is_empty() && app.shelf_drawn.is_empty());
+    assert!(app.tools.shelf.is_empty() && app.tools.shelf_drawn.is_empty());
 }
 
 /// **The first-run hint shows on an empty document until the palette has been opened three times**
@@ -1358,7 +1429,7 @@ fn the_first_run_hint_goes_after_three_palette_openings() {
     frame(&mut app, vec![key_event(egui::Key::Space), egui::Event::Text(" ".into())]);
     frame(&mut app, vec![key_event(egui::Key::Escape)]);
     assert!(!app.first_run_hint_due(), "the third opening ends it for good");
-    assert_eq!(app.palette_opens, 3);
+    assert_eq!(app.tools.palette_opens, 3);
 }
 
 // ------------------------------------------------------------------------------ rename
@@ -1375,23 +1446,23 @@ fn rename_names_any_row_and_warns_what_it_refuses() {
         app.run_command(line);
     }
     for line in ["rename 'ball' to=orb", "rename 'rail' to=spine", "rename 'wall' to=thickness"] {
-        let warned = app.console_warnings;
+        let warned = app.console.warnings;
         app.run_command(line);
-        assert_eq!(app.console_warnings, warned, "`{line}` was refused");
+        assert_eq!(app.console.warnings, warned, "`{line}` was refused");
     }
     assert!(app.node_named("orb").is_some() && app.node_named("ball").is_none());
     assert!(app.curve_named("spine").is_some());
     assert!(app.doc.parameter_named("thickness").is_some());
     for line in ["rename 'orb' to=box", "rename 'nothing' to=x", "rename 'orb'"] {
-        let warned = app.console_warnings;
+        let warned = app.console.warnings;
         app.run_command(line);
-        assert!(app.console_warnings > warned, "`{line}` was not refused");
+        assert!(app.console.warnings > warned, "`{line}` was not refused");
     }
     assert!(app.node_named("orb").is_some(), "a refused rename leaves the name it had");
     select(&mut app, "orb");
     frame(&mut app, vec![key_event(egui::Key::F2)]);
     assert!(
-        matches!(&app.renaming, Some((crate::blocks::list::RowKey::Node(_), text)) if text == "orb"),
+        matches!(&app.notebook.renaming, Some((crate::blocks::list::RowKey::Node(_), text)) if text == "orb"),
         "F2 opens the selected row's name"
     );
 }
@@ -1405,12 +1476,12 @@ fn a_gui_rename_echoes_from_the_label_or_name_the_row_had() {
     app.run_command("sphere");
     frame(&mut app, Vec::new());
     let sphere = app.node_named("Sphere").expect("an unnamed sphere, by its label");
-    let written = app.echo_log.len();
+    let written = app.console.echo_log.len();
     assert!(app.set_body_name(sphere, "ball"));
     frame(&mut app, Vec::new());
     assert!(app.set_body_name(sphere, ""));
     frame(&mut app, Vec::new());
-    let lines = app.echo_log[written..].to_vec();
+    let lines = app.console.echo_log[written..].to_vec();
     assert_eq!(lines, vec!["rename 'Sphere' to=ball".to_string(), "rename 'ball' to=\"\"".to_string()]);
     let mut all = vec!["sphere".to_string()];
     all.extend(lines.iter().cloned());
@@ -1425,14 +1496,14 @@ fn a_gui_rename_echoes_from_the_label_or_name_the_row_had() {
 fn the_tool_panel_opens_clear_of_the_block_it_is_making() {
     let Some(mut app) = headless_app() else { return };
     // The floating panel is what this holds, and it is off by default since the owner's trial.
-    app.floating_panel = true;
+    app.tools.floating_panel = true;
     frame(&mut app, Vec::new());
     let middle = app.viewport_rect.expect("the viewport was drawn").center();
     frame(&mut app, vec![egui::Event::PointerMoved(middle)]);
     app.invoke_command(by("create.sphere"));
     frame(&mut app, Vec::new());
     frame(&mut app, Vec::new());
-    let block = app.session.as_ref().expect("a pending sphere").block;
+    let block = app.tools.session.as_ref().expect("a pending sphere").block;
     let extent = app.screen_extent(block).expect("the sphere is on screen");
     let beside_pointer = egui::Rect::from_min_size(middle + egui::vec2(28.0, 28.0), egui::vec2(300.0, 100.0));
     assert!(extent.intersects(beside_pointer), "the test means something only if the pointer's place would cover the sphere");
@@ -1464,13 +1535,13 @@ fn ctrl_makes_a_number_field_s_drag_coarse() {
 fn with_no_floating_panel_the_pending_block_waits_in_the_list() {
     let Some(mut app) = headless_app() else { return };
     frame(&mut app, Vec::new());
-    assert!(!app.floating_panel, "off by default");
+    assert!(!app.tools.floating_panel, "off by default");
     let depth = app.stack.history().0.len();
     app.invoke_command(by("create.sphere"));
     for _ in 0..4 {
         frame(&mut app, Vec::new());
     }
-    assert!(app.session.as_ref().is_some_and(|s| !s.awaiting), "the block opened and took the keyboard");
+    assert!(app.tools.session.as_ref().is_some_and(|s| !s.awaiting), "the block opened and took the keyboard");
     assert!(app.egui_ctx.memory(|m| m.focused()).is_some(), "its first number has the keyboard");
     assert!(
         app.egui_ctx.memory(|m| m.area_rect(egui::Id::new(("tool panel", "create.sphere")))).is_none(),
@@ -1485,7 +1556,7 @@ fn with_no_floating_panel_the_pending_block_waits_in_the_list() {
     }
     frame(&mut app, vec![key_event(egui::Key::Enter)]);
     frame(&mut app, Vec::new());
-    assert!(app.session.is_none(), "Enter in one of its numbers keeps the block");
+    assert!(app.tools.session.is_none(), "Enter in one of its numbers keeps the block");
     let sphere = app
         .part_graph()
         .nodes()
@@ -1625,7 +1696,7 @@ fn a_block_two_readers_declared_is_already_out_of_every_slot() {
 /// §7.1 and §7.2 — plain moves, Ctrl shares). One gesture, so **one** undo step.
 ///
 /// The drop arms the move and `replace_node` completes it in the same graph edit, which is what
-/// this drives: `completing_a_move` set exactly as the release sets it, then the destination write
+/// this drives: `notebook.completing_a_move` set exactly as the release sets it, then the destination write
 /// the panel row makes. **What it does not reach** is the release itself — that the payload
 /// carries the row's holder, and that Ctrl is read off the frame the button came up in. Those live
 /// in the egui drag plumbing, which no test here drives.
@@ -1644,7 +1715,7 @@ fn a_block_dragged_from_one_input_to_another_leaves_the_slot_it_came_from_empty(
     let depth = app.stack.history().0.len();
 
     // The release: the ball, out of the union's slot, onto the shell's empty one, no Ctrl.
-    app.completing_a_move = Some((joined, ball));
+    app.notebook.completing_a_move = Some((joined, ball));
     let mut node = app.part_graph().node(hollow).cloned().expect("the shell's node");
     match &mut node {
         Node::Shell { input, .. } => *input = ball.into(),
@@ -1665,7 +1736,7 @@ fn a_block_dragged_from_one_input_to_another_leaves_the_slot_it_came_from_empty(
         "it is nested in its new reader, not left at the top level",
     );
     assert_eq!(app.stack.history().0.len(), depth + 1, "one undo step for the move");
-    assert!(app.completing_a_move.is_none(), "and the pending half is spent");
+    assert!(app.notebook.completing_a_move.is_none(), "and the pending half is spent");
 
     app.run_command("undo");
     frame(&mut app, Vec::new());
@@ -1736,7 +1807,7 @@ fn a_block_moved_to_a_sibling_slot_empties_only_the_slot_it_left() {
     assert_eq!(slots_of(&app, "cut")[0].source(), Some(ball), "the ball is the first operand");
 
     // Dragged from the first slot onto the second, within the one block.
-    app.completing_a_move = Some((cut, ball));
+    app.notebook.completing_a_move = Some((cut, ball));
     let mut node = app.part_graph().node(cut).cloned().expect("the node");
     match &mut node {
         Node::Boolean { inputs, .. } | Node::Blend { inputs, .. } => inputs[1] = ball.into(),
@@ -1859,12 +1930,12 @@ fn a_cut_through_line_across_the_view_cuts_the_cube_in_one_loop() {
     if let Some((path, Err((why, faces)))) = app.cage_tool.as_ref().and_then(|t| t.knife.through_paths.first()) {
         panic!("the loop's plan was refused: {why} at {faces:?}; path {path:?}");
     }
-    let history = app.console_history.len();
+    let history = app.console.history.len();
     let faces_before = app.cage().face_count();
     frame(&mut app, vec![key(egui::Key::Enter)]);
     // A typed line is its own record, in the console's history rather than the echo.
-    let lines: Vec<&String> = app.console_history[history..].iter().filter(|l| l.starts_with("knife points=")).collect();
-    let said = app.console_log.len();
+    let lines: Vec<&String> = app.console.history[history..].iter().filter(|l| l.starts_with("knife points=")).collect();
+    let said = app.console.log.len();
     assert_eq!(lines.len(), 1, "one knife line: {lines:?}; the console has {said} lines");
     assert!(app.cage().face_count() > faces_before, "the loop split every face it crossed");
     assert!(!app.doc.cage_is_red(app.active_cage), "and left the cage closed");
@@ -1891,13 +1962,13 @@ fn crease_and_uncrease_from_the_menu_run_as_lines_on_the_selected_edges() {
     frame(&mut app, Vec::new());
     assert!(app.cage().is_creased(a, b));
     let line = format!("crease edges={}-{}", a.index(), b.index());
-    assert_eq!(app.console_history.last(), Some(&line), "run as its line");
+    assert_eq!(app.console.history.last(), Some(&line), "run as its line");
     assert!(app.selection.parts().contains(&Selection::Edge(a, b)), "the edge stays picked");
 
     app.invoke_command(by("cage.uncrease"));
     frame(&mut app, Vec::new());
     assert!(!app.cage().is_creased(a, b));
-    assert_eq!(app.console_history.last(), Some(&format!("uncrease edges={}-{}", a.index(), b.index())));
+    assert_eq!(app.console.history.last(), Some(&format!("uncrease edges={}-{}", a.index(), b.index())));
     app.run_command("undo");
     frame(&mut app, Vec::new());
     assert!(app.cage().is_creased(a, b), "undo puts the crease back");
@@ -2032,9 +2103,9 @@ fn an_extrude_in_vertex_normals_lands_where_the_primitive_puts_it() {
     expected.sort();
     assert_eq!(got, expected, "the cap stands where the primitive's extrude puts it");
 
-    let echoed = app.echo_log.len();
+    let echoed = app.console.echo_log.len();
     frame(&mut app, vec![key(egui::Key::Enter)]);
-    assert_eq!(&app.echo_log[echoed..], &["cageextrude faces=0,2 distance=10 direction=vertex_normals".to_string()]);
+    assert_eq!(&app.console.echo_log[echoed..], &["cageextrude faces=0,2 distance=10 direction=vertex_normals".to_string()]);
 
     fn key_of(p: nalgebra::Point3<f64>) -> [i64; 3] {
         [(p.x * 1e6).round() as i64, (p.y * 1e6).round() as i64, (p.z * 1e6).round() as i64]
@@ -2193,21 +2264,21 @@ fn space_with_an_extrude_pending_keeps_it_and_extrudes_again() {
     frame(&mut app, Vec::new());
     app.cage_panel_set("distance", "10").expect("a number");
     frame(&mut app, Vec::new());
-    let echoed = app.echo_log.len();
+    let echoed = app.console.echo_log.len();
     frame(&mut app, space());
     frame(&mut app, Vec::new());
-    assert!(app.palette.is_none(), "Space did not open the palette");
+    assert!(app.tools.palette.is_none(), "Space did not open the palette");
     assert!(app.cage_session.is_some(), "the next lift is pending");
-    assert_eq!(&app.echo_log[echoed..], &["cageextrude faces=1 distance=10".to_string()], "the first was kept");
+    assert_eq!(&app.console.echo_log[echoed..], &["cageextrude faces=1 distance=10".to_string()], "the first was kept");
 
     // Typed straight into the panel, then Space: the number is taken before the cap is kept.
-    let echoed = app.echo_log.len();
+    let echoed = app.console.echo_log.len();
     type_text(&mut app, "5");
     frame(&mut app, space());
     frame(&mut app, Vec::new());
-    assert!(app.palette.is_none());
+    assert!(app.tools.palette.is_none());
     assert!(app.cage_session.is_some(), "and the one after that");
-    assert_eq!(&app.echo_log[echoed..], &["cageextrude faces=1 distance=5".to_string()], "the second, at the number typed");
+    assert_eq!(&app.console.echo_log[echoed..], &["cageextrude faces=1 distance=5".to_string()], "the second, at the number typed");
 
     // The third never moved: Esc puts it back, and two extrusions of one face are eight walls.
     frame(&mut app, vec![key(egui::Key::Escape)]);
@@ -2221,7 +2292,7 @@ fn space_with_an_extrude_pending_keeps_it_and_extrudes_again() {
 
     app.selection.clear();
     frame(&mut app, space());
-    assert!(app.palette.is_some(), "with nothing pending Space is the palette");
+    assert!(app.tools.palette.is_some(), "with nothing pending Space is the palette");
 }
 
 /// **An extrude's panel: a typed distance places the cap, a typed direction re-places it, and the
@@ -2263,10 +2334,10 @@ fn a_cage_session_s_panel_places_the_cap_and_the_kept_line_says_the_distance() {
         assert!((mesh.vertex_position(v) - (b + nalgebra::Vector3::z() * 10.0)).norm() < 1e-9, "the same distance, along z");
     }
 
-    let echoed = app.echo_log.len();
+    let echoed = app.console.echo_log.len();
     frame(&mut app, vec![key(egui::Key::Enter)]);
     assert!(app.cage_session.is_none(), "Enter keeps");
-    let lines = &app.echo_log[echoed..];
+    let lines = &app.console.echo_log[echoed..];
     assert_eq!(lines, &["cageextrude faces=1 distance=10 direction=z".to_string()], "the line says the numbers, not positions");
     assert!(!app.doc.cage_is_red(cage), "kept at a height, the cage is a solid");
     app.run_command("undo");
@@ -2282,9 +2353,9 @@ fn a_cage_session_s_panel_places_the_cap_and_the_kept_line_says_the_distance() {
     app.cage_panel_set("thickness", "2.5").expect("a number");
     app.cage_panel_set("depth", "-1").expect("a number");
     frame(&mut app, Vec::new());
-    let echoed = app.echo_log.len();
+    let echoed = app.console.echo_log.len();
     frame(&mut app, vec![key(egui::Key::Enter)]);
-    let lines = &app.echo_log[echoed..];
+    let lines = &app.console.echo_log[echoed..];
     assert_eq!(lines, &["cageinset faces=1 thickness=2.5 depth=-1".to_string()]);
 }
 
@@ -2393,8 +2464,8 @@ fn a_closed_loop_of_curves_is_one_node_wired_to_the_extrude_that_reads_it() {
     let list = app.list_readings();
     let nesting = &list.nesting;
     let curve_row = |c| match app.folded_curve_row(c, nesting) {
-        Some(crate::blocks::list::Block::Profile(key)) => CurveRow::Profile(app.profiles.members(key).map_or(0, <[_]>::len)),
-        None => app.profiles.key_of(c).map_or(CurveRow::Own, CurveRow::Inside),
+        Some(crate::blocks::list::Block::Profile(key)) => CurveRow::Profile(app.curve_ui.profiles.members(key).map_or(0, <[_]>::len)),
+        None => app.curve_ui.profiles.key_of(c).map_or(CurveRow::Own, CurveRow::Inside),
         Some(_) => CurveRow::Own,
     };
     let sources = crate::graph_view::sources(
@@ -2561,10 +2632,10 @@ fn a_draft_past_the_section_s_room_is_refused_when_typed_and_said_beside_the_dra
     assert_eq!(draft(&app), Some(-5.0));
     assert_eq!(app.compile_error(), None, "5\u{b0} fits");
 
-    let said = app.console_log.len();
+    let said = app.console.log.len();
     app.run_command("set slot.draft=-6.5");
     let refused: Vec<&str> =
-        app.console_log[said..].iter().filter(|l| !l.ok).map(|l| l.text.as_str()).collect();
+        app.console.log[said..].iter().filter(|l| !l.ok).map(|l| l.text.as_str()).collect();
     assert!(
         refused.iter().any(|l| l.contains("cross itself") && l.contains("2.00 mm") && l.contains("5.7\u{b0}")),
         "the console names the room and the draft that fits: {refused:?}"
@@ -2664,9 +2735,9 @@ fn a_line_the_block_cannot_mean_makes_nothing() {
         "infill target=box cell=nothing_of_the_kind",
         "infill target=box phase=strut cell=gyroid",
     ] {
-        let warned = app.console_warnings;
+        let warned = app.console.warnings;
         app.run_command(line);
-        assert!(app.console_warnings > warned, "{line} was not refused");
+        assert!(app.console.warnings > warned, "{line} was not refused");
         assert_eq!(app.part_graph().nodes().count(), before, "{line} left something behind");
     }
 }
@@ -2772,9 +2843,9 @@ fn reveal_arrives(app: &mut App) -> bool {
     let mut reached = false;
     for _ in 0..200 {
         frame(app, Vec::new());
-        reached |= app.reveal.as_ref().is_some_and(|r| r.reached);
+        reached |= app.notebook.reveal.as_ref().is_some_and(|r| r.reached);
     }
-    assert!(app.reveal.is_none(), "the list lets go once it is there");
+    assert!(app.notebook.reveal.is_none(), "the list lets go once it is there");
     reached
 }
 
@@ -2836,7 +2907,7 @@ fn a_row_chosen_in_the_list_is_not_scrolled_to() {
     app.select_body(Some(ball));
     app.chose_from_list(RowKey::Node(ball));
     frame(&mut app, Vec::new());
-    assert!(app.reveal.is_none());
+    assert!(app.notebook.reveal.is_none());
 }
 
 /// **A selection made while the graph is up is found in the notebook when you go there**, which is
@@ -2860,8 +2931,8 @@ fn a_selection_made_in_the_graph_opens_the_notebook_down_to_it() {
     let deep = app.node_named("deep").expect("the plane");
     app.select_body(Some(deep));
     frame(&mut app, Vec::new());
-    assert_eq!(app.graph_followed, Some(deep), "the graph has followed it");
-    assert!(app.reveal.is_none(), "the notebook is not drawn, so it has not moved");
+    assert_eq!(app.notebook.graph_followed, Some(deep), "the graph has followed it");
+    assert!(app.notebook.reveal.is_none(), "the notebook is not drawn, so it has not moved");
     app.run_command("view show=notebook");
     assert!(reveal_arrives(&mut app), "the plane's row was never drawn");
 }
@@ -2898,7 +2969,7 @@ fn shift_lands_a_dragged_selection_on_the_drawn_grid() {
     app.use_drawing_plane(DrawingPlane::World { normal: Axis::Z, offset_mm: 0.0 }, Swing::Yes);
     // The swing is animated over frames; a tick past its whole duration lands it.
     app.camera.tick_snap(60.0);
-    app.show_grid = true;
+    app.view.show_grid = true;
     app.camera.projection = Projection::Orthographic;
     let (aspect, rect) = (1400.0 / 900.0, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0)));
     let pitch = app.drawing_grid(aspect, rect).expect("an orthographic view with a plane has a grid").pitch;
@@ -3237,15 +3308,15 @@ fn an_open_chains_join_takes_g1_g2_and_g0_each_as_one_step() {
 fn continuity_is_refused_where_two_ends_do_not_meet() {
     let Some(mut app) = headless_app() else { return };
     line_then_cubic(&mut app);
-    let warned = app.console_warnings;
+    let warned = app.console.warnings;
     app.run_command("continuity at=a.start g=1");
-    assert_eq!(app.console_warnings, warned + 1, "a's start meets nothing");
+    assert_eq!(app.console.warnings, warned + 1, "a's start meets nothing");
     app.run_command("line p0=40,0,0 p1=40,-30,0 'stray'");
-    let warned = app.console_warnings;
+    let warned = app.console.warnings;
     app.run_command("continuity at=a.end g=1");
-    assert_eq!(app.console_warnings, warned + 1, "three ends meet there");
+    assert_eq!(app.console.warnings, warned + 1, "three ends meet there");
     app.run_command("continuity at=a.end g=3");
-    assert_eq!(app.console_warnings, warned + 2, "G3 is not on offer");
+    assert_eq!(app.console.warnings, warned + 2, "G3 is not on offer");
     assert!(joint_continuity(&app).is_empty());
 }
 
@@ -3271,7 +3342,7 @@ fn open_lead_list(app: &mut App) -> (CurveId, CurveId, egui::Pos2) {
     let at = on_screen(app, Point3::new(40.0, 0.0, 0.0));
     frame(app, vec![egui::Event::PointerMoved(at)]);
     right_click(app, at);
-    let menu = app.marking.as_ref().expect("the right-click opened a menu");
+    let menu = app.tools.marking.as_ref().expect("the right-click opened a menu");
     assert_eq!(menu.subject, marking::Subject::Joint, "the join's ring, with nothing selected");
     assert!(menu.join.is_some_and(|j| j.iter().any(|e| e.curve == a)), "on the join of a and b");
     let (dx, dy) = marking::slot_offset(0, 84.0);
@@ -3291,7 +3362,7 @@ fn lead_rows(app: &mut App) -> Vec<(CurveId, egui::Pos2)> {
         // Down the middle: the rows' left edge is inside the frame's margin.
         let p = egui::pos2(area.center().x, y);
         frame(app, vec![egui::Event::PointerMoved(p)]);
-        if let Some(fieldform_scene::Relation::Joint { master, .. }) = app.join_preview.as_ref().map(|p| p.relation.clone())
+        if let Some(fieldform_scene::Relation::Joint { master, .. }) = app.tools.join_preview.as_ref().map(|p| p.relation.clone())
             && rows.last().is_none_or(|(m, _)| *m != master.curve)
         {
             rows.push((master.curve, p));
@@ -3310,7 +3381,7 @@ fn lead_rows(app: &mut App) -> Vec<(CurveId, egui::Pos2)> {
 fn g1_on_a_join_lists_each_lead_shows_it_on_hover_and_keeps_the_one_clicked() {
     let Some(mut app) = headless_app() else { return };
     let (a, b, _) = open_lead_list(&mut app);
-    assert_eq!(app.marking.as_ref().and_then(|m| m.lead_for), Some(fieldform_scene::JointContinuity::G1));
+    assert_eq!(app.tools.marking.as_ref().and_then(|m| m.lead_for), Some(fieldform_scene::JointContinuity::G1));
     assert!(joint_continuity(&app).is_empty(), "nothing is kept by opening the list");
     let points = |app: &App, id: CurveId| app.doc.curve(id).expect("curve").control_points().to_vec();
     let (a_before, b_before, history) = (points(&app, a), points(&app, b), app.stack.history());
@@ -3329,18 +3400,18 @@ fn g1_on_a_join_lists_each_lead_shows_it_on_hover_and_keeps_the_one_clicked() {
 
     let area = app.egui_ctx.memory(|m| m.area_rect(egui::Id::new("join lead list"))).expect("still open");
     frame(&mut app, vec![egui::Event::PointerMoved(area.right_bottom() + egui::vec2(40.0, 40.0))]);
-    assert!(app.join_preview.is_none(), "off the rows, nothing is shown");
+    assert!(app.tools.join_preview.is_none(), "off the rows, nothing is shown");
     assert_eq!((points(&app, a), points(&app, b)), (a_before.clone(), b_before.clone()), "and everything is back");
 
     left_click(&mut app, a_leads);
-    assert!(app.marking.is_none() && app.join_preview.is_none(), "kept, and the list is gone");
+    assert!(app.tools.marking.is_none() && app.tools.join_preview.is_none(), "kept, and the list is gone");
     let kept: Vec<_> = app.doc.relations.values().map(|r| r.relation.clone()).collect();
     assert!(
         matches!(kept.as_slice(), [fieldform_scene::Relation::Joint { master, continuity: fieldform_scene::JointContinuity::G1, .. }] if master.curve == a),
         "{kept:?}"
     );
     assert_ne!(points(&app, b), b_before, "kept as it was shown");
-    let echoed = app.echo_log.iter().rev().find(|l| l.starts_with("continuity")).cloned().expect("echoed");
+    let echoed = app.console.echo_log.iter().rev().find(|l| l.starts_with("continuity")).cloned().expect("echoed");
     assert_eq!(echoed, "continuity at=\"a.end\" g=1 lead=\"a\"");
     app.run_command("undo");
     assert!(joint_continuity(&app).is_empty(), "one undo, one step");
@@ -3362,19 +3433,19 @@ fn leaving_the_lead_list_puts_back_what_its_preview_moved() {
     let before = (points(&app, a), points(&app, b));
     let rows = lead_rows(&mut app);
     frame(&mut app, vec![egui::Event::PointerMoved(rows[1].1)]);
-    assert!(app.join_preview.is_some());
+    assert!(app.tools.join_preview.is_some());
     frame(&mut app, vec![key_event(egui::Key::Escape)]);
-    assert!(app.marking.is_none() && app.join_preview.is_none());
+    assert!(app.tools.marking.is_none() && app.tools.join_preview.is_none());
     assert_eq!((points(&app, a), points(&app, b)), before, "Esc put it back");
     assert!(joint_continuity(&app).is_empty());
 
     let (a, b, _) = (a, b, open_lead_list_again(&mut app));
     let rows = lead_rows(&mut app);
     frame(&mut app, vec![egui::Event::PointerMoved(rows[0].1)]);
-    assert!(app.join_preview.is_some());
+    assert!(app.tools.join_preview.is_some());
     app.invoke_command(by("edit.undo"));
     frame(&mut app, Vec::new());
-    assert!(app.join_preview.is_none(), "the undo ended the preview");
+    assert!(app.tools.join_preview.is_none(), "the undo ended the preview");
     assert!(app.doc.curve(b).is_none() || points(&app, b) == before.1, "and undid the curve, not the preview");
     let _ = a;
 }
@@ -3386,7 +3457,7 @@ fn open_lead_list_again(app: &mut App) -> egui::Pos2 {
     right_click(app, at);
     let (dx, dy) = marking::slot_offset(0, 84.0);
     left_click(app, at + egui::vec2(dx, dy));
-    assert!(app.marking.as_ref().is_some_and(|m| m.lead_for.is_some()));
+    assert!(app.tools.marking.as_ref().is_some_and(|m| m.lead_for.is_some()));
     at
 }
 
@@ -3529,7 +3600,7 @@ fn g0_holds_a_join_with_a_point_that_takes_no_row() {
     assert!(end(&app, a, n - 1).is_some() && end(&app, a, n - 1) == end(&app, b, 0), "both ends on one point");
     assert!(joint_continuity(&app).is_empty(), "positional only");
     let point = end(&app, a, n - 1).expect("held");
-    let joints = crate::blocks::list::held_joint_points(&app.doc, app.active_part, &app.profiles);
+    let joints = crate::blocks::list::held_joint_points(&app.doc, app.active_part, &app.curve_ui.profiles);
     assert!(joints.contains(&point), "the join's point is not listed as a block");
     app.run_command("undo");
     assert_eq!(app.stack.history().0, history.0, "one step");
@@ -3774,13 +3845,13 @@ fn a_click_away_from_the_palette_closes_it_and_runs_nothing() {
     frame(&mut app, vec![key_event(egui::Key::Space), egui::Event::Text(" ".into())]);
     type_text(&mut app, "sph");
     frame(&mut app, Vec::new());
-    assert!(app.palette.is_some(), "Space opened it");
+    assert!(app.tools.palette.is_some(), "Space opened it");
     let area = app.egui_ctx.memory(|m| m.area_rect(egui::Id::new("command palette area"))).expect("drawn");
     left_click(&mut app, area.left_top() + egui::vec2(40.0, 16.0));
-    assert!(app.palette.is_some(), "a click on its own field keeps it");
+    assert!(app.tools.palette.is_some(), "a click on its own field keeps it");
     let nodes = app.part_graph().nodes().count();
     left_click(&mut app, egui::pos2(area.center().x, area.bottom() + 120.0));
-    assert!(app.palette.is_none(), "a click away closes it");
+    assert!(app.tools.palette.is_none(), "a click away closes it");
     assert_eq!(app.part_graph().nodes().count(), nodes, "and nothing ran");
 }
 
@@ -3793,7 +3864,7 @@ fn a_new_document_starts_in_chrome_under_horizon_and_an_older_file_keeps_its_loo
     let Some(mut app) = headless_app() else { return };
     frame(&mut app, Vec::new());
     let look = |app: &App| app.doc.parts.get(&app.active_part).and_then(|p| p.material.as_ref()).and_then(|m| m.preset_name());
-    assert_eq!(app.environment, fieldform_gpu::EnvironmentChoice::Horizon, "on launch");
+    assert_eq!(app.view.environment, fieldform_gpu::EnvironmentChoice::Horizon, "on launch");
     assert_eq!(look(&app), Some("Chrome"));
     app.run_command("material preset=glass");
     assert_eq!(look(&app), Some("Glass"), "changed, so the next line has something to start over from");
@@ -3848,7 +3919,7 @@ fn app_with_a_bend() -> Option<App> {
 
 /// The console's last few lines, newest first, for a failure to say what the app said.
 fn last_said(app: &App) -> String {
-    app.console_log.iter().rev().take(6).map(|l| l.text.clone()).collect::<Vec<_>>().join(" | ")
+    app.console.log.iter().rev().take(6).map(|l| l.text.clone()).collect::<Vec<_>>().join(" | ")
 }
 
 fn the_comb(app: &App) -> fieldform_scene::CurvatureComb {
@@ -3976,9 +4047,9 @@ fn a_hidden_curve_hides_its_comb() {
     assert_eq!(drawn.len(), 1);
     assert_eq!(drawn[0].1.teeth.len(), 10, "ten teeth on a single-span cubic");
     let bend = app.curve_named("bend").unwrap();
-    app.hidden_curves.insert(bend);
+    app.curve_ui.hidden.insert(bend);
     assert!(app.comb_readings().is_empty(), "the curve hidden, so is its comb");
-    app.hidden_curves.remove(&bend);
+    app.curve_ui.hidden.remove(&bend);
     app.run_command("comb block='Curvature Comb' hidden=true");
     assert!(app.comb_readings().is_empty(), "its own eye: {}", last_said(&app));
     app.run_command("undo");
@@ -4033,23 +4104,23 @@ fn touching_open_curves_group_only_once_a_continuity_is_set_at_their_join() {
     let id = |app: &App, n: &str| app.curve_named(n).unwrap();
     let (a, b, c) = (id(&app, "a"), id(&app, "b"), id(&app, "c"));
     app.refresh_profiles();
-    assert!(app.profiles.chains.is_empty() && app.profiles.loops.is_empty(), "touching alone groups nothing");
+    assert!(app.curve_ui.profiles.chains.is_empty() && app.curve_ui.profiles.loops.is_empty(), "touching alone groups nothing");
 
     app.run_command("continuity at=a.end g=0");
     app.refresh_profiles();
-    assert_eq!(app.profiles.chains, vec![(a, vec![a, b])], "{}", last_said(&app));
-    assert!(app.profiles.is_open(a));
+    assert_eq!(app.curve_ui.profiles.chains, vec![(a, vec![a, b])], "{}", last_said(&app));
+    assert!(app.curve_ui.profiles.is_open(a));
     assert_eq!(app.profile_label(a), "Open profile 1");
-    assert_eq!(app.profiles.key_of(b), Some(a));
+    assert_eq!(app.curve_ui.profiles.key_of(b), Some(a));
 
     app.run_command("continuity at=b.end g=0");
     app.refresh_profiles();
-    assert_eq!(app.profiles.chains, vec![(a, vec![a, b, c])], "the third joins when its join is set");
+    assert_eq!(app.curve_ui.profiles.chains, vec![(a, vec![a, b, c])], "the third joins when its join is set");
 
     app.run_command("continuity at=a.end -break");
     app.refresh_profiles();
-    assert_eq!(app.profiles.chains, vec![(b, vec![b, c])], "broken at a: what is left is keyed by its own first");
-    assert_eq!(app.profiles.key_of(a), None);
+    assert_eq!(app.curve_ui.profiles.chains, vec![(b, vec![b, c])], "broken at a: what is left is keyed by its own first");
+    assert_eq!(app.curve_ui.profiles.key_of(a), None);
 }
 
 /// **An open profile is a row**, folding its curves inside it as a closed one does, and a
@@ -4073,8 +4144,8 @@ fn an_open_profile_is_one_row_and_a_closed_loop_is_never_open() {
     app.refresh_profiles();
     let a = app.curve_named("a").unwrap();
     let s1 = app.curve_named("s1").unwrap();
-    assert_eq!(app.profiles.loops.len(), 1);
-    assert!(!app.profiles.is_open(s1) && app.profile_label(s1) == "Profile 1", "the square is closed");
+    assert_eq!(app.curve_ui.profiles.loops.len(), 1);
+    assert!(!app.curve_ui.profiles.is_open(s1) && app.profile_label(s1) == "Profile 1", "the square is closed");
     assert_eq!(app.profile_label(a), "Open profile 1", "counted on its own");
     let list = app.list_readings();
     let rows = app.nested_blocks(&list.nesting);
@@ -4112,7 +4183,7 @@ fn a_comb_on_an_open_profile_reads_every_curve_and_its_joints() {
 
     // Selecting the row and asking is the same request.
     app.run_command("delete");
-    let key = app.profiles.key_of(app.curve_named("arc").unwrap()).unwrap();
+    let key = app.curve_ui.profiles.key_of(app.curve_named("arc").unwrap()).unwrap();
     app.select_block(outputs::BlockRef::Profile(key));
     app.run_command("comb");
     assert!(app.doc.combs.iter().any(|c| c.whole_loop && c.curve == key), "{}", last_said(&app));
@@ -4143,14 +4214,14 @@ fn a_wall_from_an_open_profile_stops_where_its_row_does() {
     let id = |app: &App, n: &str| app.curve_named(n).unwrap();
     let (a, b, c) = (id(&app, "a"), id(&app, "b"), id(&app, "c"));
     app.refresh_profiles();
-    let row = app.profiles.members(app.profiles.key_of(a).unwrap()).unwrap().to_vec();
+    let row = app.curve_ui.profiles.members(app.curve_ui.profiles.key_of(a).unwrap()).unwrap().to_vec();
     assert_eq!(row, vec![a, b]);
     let wall = fieldform_field::outline_chain(&app.doc, a, None).unwrap();
     assert_eq!(wall.curves, row, "the wall is the row, not the touching third: {}", last_said(&app));
 
     app.run_command("continuity at=b.end g=0");
     app.refresh_profiles();
-    let row = app.profiles.members(app.profiles.key_of(a).unwrap()).unwrap().to_vec();
+    let row = app.curve_ui.profiles.members(app.curve_ui.profiles.key_of(a).unwrap()).unwrap().to_vec();
     assert_eq!(row, vec![a, b, c]);
     assert_eq!(fieldform_field::outline_chain(&app.doc, a, None).unwrap().curves, row);
 }

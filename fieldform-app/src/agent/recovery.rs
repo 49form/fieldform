@@ -69,22 +69,22 @@ pub(crate) fn newest_left_behind(
 impl App {
     /// Where this host keeps its unsaved document, or `None` with no root to keep it in.
     fn checkpoint_path(&self) -> Option<std::path::PathBuf> {
-        Some(self.agent.roots.first()?.join(checkpoint_name(std::process::id())))
+        Some(self.agent_link.state.roots.first()?.join(checkpoint_name(std::process::id())))
     }
 
     /// Writes the document to this host's checkpoint after a call that kept something, or removes
     /// the checkpoint once nothing is unsaved. Only while an agent host is running.
     pub(crate) fn keep_agent_checkpoint(&mut self) {
-        if self.agent_host.is_none() || cfg!(test) {
+        if self.agent_link.host.is_none() || cfg!(test) {
             return;
         }
         let Some(path) = self.checkpoint_path() else { return };
         if !self.is_dirty() {
             let _ = std::fs::remove_file(&path);
-            self.agent.checkpoint_revision = None;
+            self.agent_link.state.checkpoint_revision = None;
             return;
         }
-        if self.agent.checkpoint_revision == Some(self.revision) {
+        if self.agent_link.state.checkpoint_revision == Some(self.saving.revision) {
             return;
         }
         // A variable a settle made is named before the file is written, as every save does.
@@ -92,7 +92,7 @@ impl App {
         let started = std::time::Instant::now();
         match fieldform_io::to_archive(&self.doc).and_then(|archive| archive.write(&path)) {
             Ok(()) => {
-                self.agent.checkpoint_revision = Some(self.revision);
+                self.agent_link.state.checkpoint_revision = Some(self.saving.revision);
                 log::info!("agent checkpoint {} in {:.0} ms", path.display(), started.elapsed().as_secs_f64() * 1000.0);
             }
             Err(e) => log::warn!("agent checkpoint to {} failed: {e}", path.display()),
@@ -110,9 +110,9 @@ impl App {
     /// first root, and says where. Looks in every root and in the temp folder's agent folders,
     /// since a host started without `--root` had a folder of its own named by its process.
     pub(crate) fn recover_agent_checkpoint(&mut self) {
-        let Some(root) = self.agent.roots.first().cloned() else { return };
-        let mut folders: Vec<std::path::PathBuf> = self.agent.roots.clone();
-        if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+        let Some(root) = self.agent_link.state.roots.first().cloned() else { return };
+        let mut folders: Vec<std::path::PathBuf> = self.agent_link.state.roots.clone();
+        if let Ok(entries) = std::fs::read_dir(crate::recovery_dir()) {
             for entry in entries.flatten() {
                 if entry.file_name().to_string_lossy().starts_with("fieldform-agent-") && entry.path().is_dir() {
                     folders.push(entry.path());
@@ -143,7 +143,7 @@ impl App {
             file.display(),
             file.to_string_lossy().replace('\\', "/"),
         ));
-        self.agent.recovered = Some(Recovered { file, from, age });
+        self.agent_link.state.recovered = Some(Recovered { file, from, age });
     }
 }
 

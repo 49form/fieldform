@@ -3,6 +3,7 @@
 //! New, open and save, and the autosave: the ways a document reaches and leaves a file.
 
 use crate::*;
+use crate::file_picker::Ask;
 
 impl App {
     /// Starts an empty document, after asking about anything unsaved.
@@ -12,7 +13,7 @@ impl App {
     /// two lines `new` uses rather than by a fresh path, because "what a new document is" must
     /// have exactly one answer; two of them drift the first time either is changed.
     pub(crate) fn new_document(&mut self) {
-        if !self.may_discard("starting a new document") {
+        if !self.may_discard("starting a new document", AfterDiscard::New) {
             return;
         }
         let cage = Cage::cube_of(DEFAULT_BODY_MM);
@@ -34,11 +35,11 @@ impl App {
         self.doc = doc;
         // No path, so the next Save asks for one. Carrying the old document's path forward
         // would make Save overwrite a file this document was never opened from.
-        self.file = None;
+        self.saving.file = None;
         self.selection.clear();
         self.hover = Selection::None;
         self.move_state = None;
-        self.pending_curve = None;
+        self.curve_ui.pending = None;
         // Undo describes edits to the document that was just replaced; reversing one against
         // this one would apply it to geometry that is not there. Same reason `open_document`
         // clears it.
@@ -49,9 +50,9 @@ impl App {
         // Nothing carried over: a new document's bodies are its own, and the slot that
         // remembers what is hidden travels with the document rather than with the session.
         self.selected_body = None;
-        self.boolean_a = None;
-        self.boolean_b = None;
-        self.profiles = ProfileRows::default();
+        self.next.boolean_a = None;
+        self.next.boolean_b = None;
+        self.curve_ui.profiles = ProfileRows::default();
         self.rebuild_curve_display();
         self.rebuild_render_resources();
         // Clean rather than dirty: an empty document has nothing worth saving, and marking it
@@ -66,7 +67,7 @@ impl App {
     /// Opens `asked`, or asks for a path when nothing names one — `open file="C:/p.fform"`
     /// opens it without the dialog, as `saveas file=` writes without one.
     pub(crate) fn open_document(&mut self, asked: Option<std::path::PathBuf>) {
-        if !self.may_discard("opening another document") {
+        if !self.may_discard("opening another document", AfterDiscard::Open(asked.clone())) {
             return;
         }
         let path = match asked {
@@ -75,13 +76,15 @@ impl App {
                 if !self.may_open_a_dialog("open", "open file=<path>") {
                     return;
                 }
-                let Some(path) = rfd::FileDialog::new()
-                    .add_filter("fieldform document", DOCUMENT_EXTENSIONS)
-                    .pick_file()
-                else {
-                    return; // user cancelled
-                };
-                path
+                let dialog = rfd::FileDialog::new().add_filter("fieldform document", DOCUMENT_EXTENSIONS);
+                // The unsaved-changes question was answered above, and the answer covers the
+                // open that follows the picker rather than being asked a second time.
+                self.ask_for_path(dialog, Ask::Open, |app, path| {
+                    app.saving.discard_answered = true;
+                    app.open_document(Some(path));
+                    app.saving.discard_answered = false;
+                });
+                return;
             }
         };
 
@@ -110,18 +113,18 @@ impl App {
                 // After the active part is this document's, since naming a block can fall back
                 // to describing it by the active part's graph.
                 self.drain_ownership_changes(true);
-                self.file = Some((path.clone(), archive));
+                self.saving.file = Some((path.clone(), archive));
                 self.selection.clear();
                 self.hover = Selection::None;
                 self.move_state = None;
-                self.pending_curve = None;
+                self.curve_ui.pending = None;
                 // The undo stack describes edits to the document that was just replaced, and
                 // reversing one against this one would apply it to unrelated geometry.
                 self.stack.clear();
                 self.selected_curve = self.doc.curves.keys().next().copied();
                 // The loops this file holds were closed before it was opened, so the first
                 // partition is computed quietly rather than reported as edits.
-                self.profiles = ProfileRows::default();
+                self.curve_ui.profiles = ProfileRows::default();
                 // **Relations are checked, not enforced** (`profile-group-spec.md` §5.4): one
                 // that does not hold -- the file was edited by a build that could not keep it
                 // true -- is kept, marked with why, and not applied. A file that opened with a
@@ -143,7 +146,7 @@ impl App {
                 // an empty viewport, ignored the camera, and came back only after some
                 // unrelated edit happened to switch modes. Every Create command already sets
                 // this; Open was the one that did not.
-                self.view_mode = if self.part_graph().roots().is_empty()
+                self.view.mode = if self.part_graph().roots().is_empty()
                     && self.visible_cage_node().is_some()
                 {
                     // Nothing to trace but a cage to edit: the one case Polygon is right for.
@@ -206,20 +209,20 @@ impl App {
             return;
         }
         // Points a join's preview moved are not the document's; a crash now should not keep them.
-        if self.join_preview.is_some() {
+        if self.tools.join_preview.is_some() {
             return;
         }
         if !autosave_due(
-            self.revision,
-            self.autosaved_revision,
+            self.saving.revision,
+            self.saving.autosaved_revision,
             self.is_dirty(),
-            self.autosaved_at.elapsed(),
+            self.saving.autosaved_at.elapsed(),
         ) {
             return;
         }
         // The clock restarts either way, so a failing disk is retried on the same cadence
         // rather than on every frame.
-        self.autosaved_at = std::time::Instant::now();
+        self.saving.autosaved_at = std::time::Instant::now();
         // Before any save, this one included (`block-ownership-spec.md` §4.2): a variable a settle
         // made since the frame began is named before the file is written, as `save_document`
         // does, so not even an autosave holds one that cannot be typed (I4).
@@ -232,7 +235,7 @@ impl App {
             // that a minute's insurance costs a visible stutter. In the log, not the console:
             // it is a fact about the machinery, not about the model.
             Ok(()) => {
-                self.autosaved_revision = self.revision;
+                self.saving.autosaved_revision = self.saving.revision;
                 log::info!(
                     "autosaved to {} in {:.0} ms",
                     path.display(),
@@ -266,7 +269,7 @@ impl App {
         let said = if !self.is_dirty() {
             // Nothing unsaved, so the document's own file is already all of it, and a copy
             // beside it would only be a second file to wonder about.
-            match &self.file {
+            match &self.saving.file {
                 Some((path, _)) => format!(
                     "The GPU was lost with nothing unsaved: {} is the whole document.",
                     path.display()
@@ -277,7 +280,7 @@ impl App {
             // A variable a settle made since the frame began is named first, as every save does,
             // so the kept file holds none that cannot be typed (`block-ownership-spec.md` I4).
             self.drain_ownership_changes(false);
-            match write_recovered(&self.doc, self.file.as_ref()) {
+            match write_recovered(&self.doc, self.saving.file.as_ref()) {
                 // Forward slashes, so the line can be typed back as it reads: see
                 // `offer_the_autosave`.
                 Ok(kept) => format!(
@@ -317,7 +320,7 @@ impl App {
     /// instance that is still running, so this neither removes nor moves it, and its own session
     /// is the only one that ever does.
     pub(crate) fn offer_the_autosave(&mut self) {
-        let dir = std::env::temp_dir();
+        let dir = recovery_dir();
         let own = autosave_path()
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -345,7 +348,7 @@ impl App {
             "An autosave{when} from another session is waiting — if that session crashed or was \
              closed, press Enter to open it, or clear the line to start fresh{more}."
         ));
-        self.console_input = format!("open file=\"{}\"", path.to_string_lossy().replace('\\', "/"));
+        self.console.input = format!("open file=\"{}\"", path.to_string_lossy().replace('\\', "/"));
     }
 
     /// Removes **this session's** autosave, which a clean exit does so that its presence means
@@ -365,8 +368,17 @@ impl App {
     ///
     /// Returns whether the document reached disk, which the discard prompts need: "save, then
     /// close" must not close when the save was cancelled at the file dialog or failed.
+    ///
+    /// **A save that has to ask answers `false` now and saves later**, when the picker answers
+    /// (`ask_for_path`). What was waiting on the save is passed as `then` and runs once the
+    /// document is on disk, wherever that happens.
     pub(crate) fn save_document(&mut self, mode: SaveAs) -> bool {
-        let existing = match (mode, &self.file) {
+        self.save_document_then(mode, None)
+    }
+
+    /// [`Self::save_document`], then what an unsaved-changes prompt was standing in front of.
+    pub(crate) fn save_document_then(&mut self, mode: SaveAs, then: Option<AfterDiscard>) -> bool {
+        let existing = match (mode, &self.saving.file) {
             (SaveAs::SamePath, Some((path, _))) => Some(path.clone()),
             (SaveAs::To(path), _) => Some(if path.extension().is_none() {
                 path.with_extension(DOCUMENT_EXTENSION)
@@ -381,24 +393,39 @@ impl App {
                 if !self.may_open_a_dialog("saveas", "saveas file=<path>") {
                     return false;
                 }
-                let Some(path) = rfd::FileDialog::new()
+                let dialog = rfd::FileDialog::new()
                     // Saving offers the current extension only. Opening accepts both; writing
                     // is where a format stops accumulating names.
                     .add_filter("fieldform document", &[DOCUMENT_EXTENSION])
-                    .set_file_name(format!("untitled.{DOCUMENT_EXTENSION}"))
-                    .save_file()
-                else {
-                    return false; // user cancelled
-                };
-                // A name typed without one gets the extension; a name typed *with* one keeps
-                // it, so "save over this .fieldform" saves over that file rather than beside it.
-                if path.extension().is_none() {
-                    path.with_extension(DOCUMENT_EXTENSION)
-                } else {
-                    path
-                }
+                    .set_file_name(format!("untitled.{DOCUMENT_EXTENSION}"));
+                self.ask_for_path(dialog, Ask::Save, move |app, path| {
+                    // A name typed without one gets the extension; a name typed *with* one
+                    // keeps it, so "save over this .fieldform" saves over that file rather
+                    // than beside it.
+                    let path = if path.extension().is_none() {
+                        path.with_extension(DOCUMENT_EXTENSION)
+                    } else {
+                        path
+                    };
+                    if app.write_document(path)
+                        && let Some(then) = then
+                    {
+                        app.carry_on_after_discard(then);
+                    }
+                });
+                // Not on disk yet; a cancel at the picker leaves it that way and runs nothing.
+                return false;
             }
         };
+        let saved = self.write_document(path);
+        if saved && let Some(then) = then {
+            self.carry_on_after_discard(then);
+        }
+        saved
+    }
+
+    /// Writes the document to `path` and says so, answering whether it reached disk.
+    fn write_document(&mut self, path: std::path::PathBuf) -> bool {
 
         // Saving over a document that was opened goes through *its* archive, so the entries
         // this build does not interpret — a plugin's data, the file an import came from —
@@ -412,7 +439,7 @@ impl App {
         // one that cannot be typed (`block-ownership-spec.md` I4).
         self.drain_ownership_changes(false);
         self.prune_profile_names();
-        let result = match &mut self.file {
+        let result = match &mut self.saving.file {
             Some((previous, archive)) if *previous == path => {
                 fieldform_io::update_archive(archive, &self.doc)
                     .and_then(|()| archive.write(&path))
@@ -420,7 +447,7 @@ impl App {
             _ => fieldform_io::to_archive(&self.doc).and_then(|archive| {
                 let written = archive.write(&path);
                 if written.is_ok() {
-                    self.file = Some((path.clone(), archive));
+                    self.saving.file = Some((path.clone(), archive));
                 }
                 written
             }),
@@ -451,24 +478,41 @@ impl App {
     /// So a command that would ask is refused by name instead, with the key that replaces it.
     /// The refusal is what a `--keep-going` run carries on past and what `--exit` counts.
     pub(crate) fn may_open_a_dialog(&mut self, verb: &str, instead: &str) -> bool {
-        // `script_running` as well as `script`: an agent's call is script mode with no script
+        // `scripting.running` as well as `script`: an agent's call is script mode with no script
         // behind it, and asking only about the file left its lines free to open a dialog.
-        if self.script.is_none() && !self.script_running {
-            return true;
+        if self.scripting.script.is_some() || self.scripting.running {
+            self.warn(format!(
+                "`{verb}` would open a dialog, which a script cannot answer — say `{instead}`"
+            ));
+            return false;
         }
-        self.warn(format!(
-            "`{verb}` would open a dialog, which a script cannot answer — say `{instead}`"
-        ));
-        false
+        // A picker that cannot appear answers as a cancel, so without this the click does
+        // nothing at all. See `saving.file_picker`.
+        if let Some(why) = crate::file_picker::unavailable() {
+            self.warn(format!("`{verb}` needs a file picker, and {why} — or say `{instead}`"));
+            return false;
+        }
+        true
     }
 
-    /// Asks what to do about unsaved changes before something discards them, and returns
-    /// whether to go ahead.
+    /// Whether something that discards the document may go ahead now, asking about unsaved
+    /// changes first.
     ///
     /// Every path that replaces the document goes through here — starting a new one, opening
     /// another, closing the window. Saving exists now, so losing an hour of cage work to a
     /// misclicked menu item is a thing that can happen, and only a prompt stops it.
-    pub(crate) fn may_discard(&mut self, before: &str) -> bool {
+    ///
+    /// **The prompt is the application's own, and it does not block.** It used to be a native
+    /// message box, which on Linux is not native at all but an external program the dialog
+    /// library runs, and where that program was missing the library answered *Cancel* without
+    /// showing anything — so New, Open and Quit silently did nothing for as long as the document
+    /// had changes. Drawn here it cannot be missing. So this returns `false` and opens the
+    /// prompt, and the prompt's answer runs `then` itself (`show_discard_prompt`).
+    pub(crate) fn may_discard(&mut self, before: &str, then: AfterDiscard) -> bool {
+        // The prompt already answered for this very call: it is `then`, coming back through.
+        if std::mem::take(&mut self.saving.discard_answered) {
+            return true;
+        }
         if !self.is_dirty() {
             return true;
         }
@@ -476,11 +520,11 @@ impl App {
         // already follows between its benchmarks (`mark_saved` before `new`). There is nobody
         // to answer a prompt during a run, so the alternative to discarding is a stopped run.
         // Said in the log, so the record shows what was dropped rather than only what was done.
-        if self.script.is_some() {
+        if self.scripting.script.is_some() {
             self.say(format!("Discarding unsaved changes before {before}: a script said so."));
             return true;
         }
-        let named = match &self.file {
+        let named = match &self.saving.file {
             Some((path, _)) => file_name(path),
             None => "This document".to_string(),
         };
@@ -488,31 +532,112 @@ impl App {
         // losing it costs nothing. An agent may be working in a person's, in their window, and a
         // dialog there stops the call until somebody happens to answer it, or for good when nobody
         // does. So it is told to save, which it can do without asking anyone anything.
-        if self.script_running {
+        if self.scripting.running {
             self.warn(format!(
                 "{named} has unsaved changes, and nobody can be asked before {before} \u{2014} \
                  save it first with `saveas file=<path>`"
             ));
             return false;
         }
-        // Yes/No/Cancel rather than Save/Discard/Cancel: rfd only relabels buttons on Windows
-        // with its `common-controls-v6` feature, and a dialog that might not appear is worse
-        // than one whose buttons are named by the question. So the question is phrased to make
-        // yes and no unambiguous.
-        let choice = rfd::MessageDialog::new()
-            .set_title("Unsaved changes")
-            .set_description(format!(
-                "{named} has changes that are not saved.\n\nSave them before {before}?"
-            ))
-            .set_buttons(rfd::MessageButtons::YesNoCancel)
-            .set_level(rfd::MessageLevel::Warning)
-            .show();
-        match choice {
-            // Yes: save first, and only continue if it actually got written.
-            rfd::MessageDialogResult::Yes => self.save_document(SaveAs::SamePath),
-            // No: go ahead and lose them, which is what was asked for.
-            rfd::MessageDialogResult::No => true,
-            _ => false,
+        self.saving.discard_prompt = Some(DiscardPrompt { named, before: before.to_string(), then });
+        false
+    }
+
+    /// Draws the unsaved-changes prompt while one is open, and acts on its answer.
+    pub(crate) fn show_discard_prompt(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = &self.saving.discard_prompt else {
+            return;
+        };
+        let mut answer = None;
+        let modal = egui::Modal::new(egui::Id::new("unsaved-changes")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.heading("Unsaved changes");
+            ui.add_space(6.0);
+            ui.label(format!("{} has changes that are not saved.", prompt.named));
+            ui.label(format!("Save them before {}?", prompt.before));
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                let save = ui.button("Save");
+                // Enter saves, which is the answer that cannot lose anything.
+                if save.clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    answer = Some(DiscardAnswer::Save);
+                }
+                // D alone, so a chord that happens to hold it is not read as throwing work away.
+                let d = ui.input(|i| i.modifiers.is_none() && i.key_pressed(egui::Key::D));
+                if ui.button("Don't save").clicked() || d {
+                    answer = Some(DiscardAnswer::Discard);
+                }
+                if ui.button("Cancel").clicked() {
+                    answer = Some(DiscardAnswer::Cancel);
+                }
+            });
+            ui.add_space(6.0);
+            // The keys are said here because nothing else on the dialog shows them.
+            ui.weak("Enter saves \u{00b7} D doesn't save \u{00b7} Esc cancels");
+        });
+        // Escape or a click outside is a cancel, as it is for any dialog.
+        if answer.is_none() && modal.should_close() {
+            answer = Some(DiscardAnswer::Cancel);
+        }
+        let Some(answer) = answer else {
+            return;
+        };
+        let prompt = self.saving.discard_prompt.take().expect("drawn above");
+        match answer {
+            // Save first, and only continue once it is actually written: a Save As that was
+            // cancelled leaves the changes unsaved, and discarding them then is not what was
+            // asked. The save runs `then` itself, since it may have to ask where to write.
+            DiscardAnswer::Save => {
+                self.save_document_then(SaveAs::SamePath, Some(prompt.then));
+            }
+            DiscardAnswer::Discard => self.carry_on_after_discard(prompt.then),
+            DiscardAnswer::Cancel => {}
         }
     }
+
+    /// Does what the prompt was standing in front of.
+    fn carry_on_after_discard(&mut self, then: AfterDiscard) {
+        match then {
+            AfterDiscard::New => {
+                self.saving.discard_answered = true;
+                self.new_document();
+            }
+            AfterDiscard::Open(path) => {
+                self.saving.discard_answered = true;
+                self.open_document(path);
+            }
+            // `closing` rather than `saving.discard_answered`: discarding leaves the document dirty, so
+            // the close arrives back at `guard_close` and must not be asked about again.
+            AfterDiscard::Close => {
+                self.saving.closing = true;
+                self.forget_autosave();
+                self.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+        // Whatever ran consumed it; one that returned before asking must not leave it set for
+        // the next, unrelated, discard.
+        self.saving.discard_answered = false;
+    }
+}
+
+/// What an unsaved-changes prompt is standing in front of, run once it is answered.
+pub(crate) enum AfterDiscard {
+    New,
+    Open(Option<std::path::PathBuf>),
+    Close,
+}
+
+/// An unsaved-changes prompt waiting for its answer.
+pub(crate) struct DiscardPrompt {
+    /// The document, as the question names it.
+    named: String,
+    /// What is about to happen, as the question names it: "closing", "opening another document".
+    before: String,
+    then: AfterDiscard,
+}
+
+enum DiscardAnswer {
+    Save,
+    Discard,
+    Cancel,
 }

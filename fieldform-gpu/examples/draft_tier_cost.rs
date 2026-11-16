@@ -281,7 +281,7 @@ fn spokes(n: usize) -> (Document, Graph) {
             .expect("a bent line"),
         );
         pipes.push(graph.add(Node::Pipe {
-            curve: id,
+            curve: id.into(),
             radius: ParamRef::Literal(9.0),
         }));
     }

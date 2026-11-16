@@ -53,6 +53,109 @@ pub(crate) fn same_block_twice(a: Operand, b: Operand) -> bool {
 }
 
 impl App {
+    /// One curve slot: the curve a block is built from, or the error state while it names none.
+    ///
+    /// **[`Self::operand_row`] for a curve, and one row for every curve slot there is (D9)** — a
+    /// pipe's curve, a sweep's path, the profile an extrude, a revolve and a sweep are each built
+    /// on. They are one question, so the empty state is drawn once, in the words and the colour an
+    /// empty operand's is: the label in the error colour, "empty — not drawn" beside the field,
+    /// and a Clear at the end of the row and on the field's right-click.
+    ///
+    /// **Clear is the way out a curve did not have.** A curve slot could be pointed at another
+    /// curve and never at none, so a curve a block read could not be taken out of it, and Delete
+    /// on that curve was refused with "delete that first": the curve was stuck inside the block
+    /// until the block itself was thrown away. Emptied, the block stays, with its numbers,
+    /// waiting to be told what to read; the curve stays in the document, a row of its own again
+    /// once the edit settles.
+    ///
+    /// `missing` is what the field shows for a curve that is named and not among the choices.
+    pub(crate) fn curve_slot_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        label: &str,
+        salt: impl std::hash::Hash,
+        slot: &mut fieldform_scene::CurveSlot,
+        offered: &[RefChoice<CurveId>],
+        missing: &str,
+    ) {
+        ui.horizontal(|ui| {
+            // The label carries the error colour, not the box, for the reason the operand row's
+            // does: an empty text box already means "nothing typed yet".
+            // In the label column every other row of these panels is laid out in.
+            match slot.is_empty() {
+                true => row_label_in(ui, label, ui.visuals().error_fg_color),
+                false => row_label(ui, label),
+            }
+            self.curve_slot_field(ui, salt, slot, offered, missing);
+        });
+        // The curve itself, under the row that names it (`notebook-spec.md` §7.1, §17).
+        if let Some(read) = slot.source() {
+            self.host_nested_curve(ui, read);
+        }
+    }
+
+    /// The field and the two ends of [`Self::curve_slot_row`], for a row that lays out its own
+    /// label — a loft's section, which has the arrows that are its order beside it.
+    pub(crate) fn curve_slot_field(
+        &mut self,
+        ui: &mut egui::Ui,
+        salt: impl std::hash::Hash,
+        slot: &mut fieldform_scene::CurveSlot,
+        offered: &[RefChoice<CurveId>],
+        missing: &str,
+    ) {
+        let shown = match slot.source() {
+            Some(read) => self.shown_label(offered, read, missing),
+            None => String::new(),
+        };
+        self.notebook.last_reference_field = None;
+        if let Some(picked) = self.reference_field_in(
+            ui,
+            salt,
+            slot.source(),
+            &shown,
+            offered,
+            RefKind::Curve,
+            DropsFrom::curve(|c| c),
+        ) {
+            slot.fill(picked);
+        }
+        // Right-click the field to clear it, where the hand already is — the operand row's rule.
+        if !slot.is_empty()
+            && let Some(field) = self.notebook.last_reference_field.take()
+        {
+            field.context_menu(|ui| {
+                if ui
+                    .button("Clear")
+                    .on_hover_text("Take this curve out of the block. The curve stays in the document.")
+                    .clicked()
+                {
+                    slot.clear();
+                    ui.close();
+                }
+            });
+        }
+        if slot.is_empty() {
+            ui.colored_label(ui.visuals().error_fg_color, "empty — not drawn").on_hover_text(
+                "This block has not been told which curve to build from here, so it cannot be \
+                 worked out: it is left out of the viewport while everything beside it goes on \
+                 being drawn. Type a curve's name or drop a curve on the field to fill it. \
+                 Measure, wall thickness and the promise check decline while a slot is empty, \
+                 rather than answering about a part with a body missing from it.",
+            );
+        } else if ui
+            .add(egui::Button::new("Clear").small())
+            .on_hover_text(
+                "Take this curve out of the block. The curve stays in the document, a row of its \
+                 own again, and the block stays where it is, with its numbers, waiting to be \
+                 told which curve to build from instead.",
+            )
+            .clicked()
+        {
+            slot.clear();
+        }
+    }
+
     /// The blocks a slot of `consumer` may read, each carrying its own refusal.
     ///
     /// The addresses from [`Self::block_choices`] and the eligibility from [`operand_refusal`] in
@@ -121,7 +224,7 @@ impl App {
                 Some(read) => self.shown_label(offered, read, "none"),
                 None => String::new(),
             };
-            self.last_reference_field = None;
+            self.notebook.last_reference_field = None;
             if let Some(picked) = self.reference_field_in(
                 ui,
                 salt,
@@ -137,7 +240,7 @@ impl App {
             // click on it and CLEAR should be an option"): the same edit as the Clear beside it,
             // where the hand already is.
             if !slot.is_empty()
-                && let Some(field) = self.last_reference_field.take()
+                && let Some(field) = self.notebook.last_reference_field.take()
             {
                 field.context_menu(|ui| {
                     if ui

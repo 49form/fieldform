@@ -322,8 +322,14 @@ pub struct Outcome {
 /// miss it, so the two coarse levels agree on the wrong answer and the error estimate reads zero.
 /// Size alone cannot see that; only the block's own numbers can.
 pub fn first_spacing_with_feature(longest_mm: f64, feature_mm: Option<f64>) -> f64 {
+    spacing(longest_mm, feature_mm, h_min(longest_mm))
+}
+
+/// The rule above with its floor given, so a thin wall's own limit can be read against the floor
+/// of the body it belongs to rather than of a body of no size.
+fn spacing(longest_mm: f64, feature_mm: Option<f64>, floor: f64) -> f64 {
     let by_feature = feature_mm.filter(|f| *f > 0.0).map_or(f64::INFINITY, |f| f / 4.0);
-    let limit = (longest_mm / 32.0).min(1.0).min(by_feature).max(H_MIN);
+    let limit = (longest_mm / 32.0).min(1.0).min(by_feature).max(floor);
     2f64.powf(limit.log2().floor())
 }
 
@@ -359,7 +365,7 @@ pub fn first_spacing_that_fits(longest_mm: f64, features: Features, fits: &dyn F
     let coarsest = features
         .thin
         .filter(|t| *t > 0.0 && t.is_finite())
-        .map_or(f64::INFINITY, |t| first_spacing_with_feature(f64::INFINITY, Some(t)));
+        .map_or(f64::INFINITY, |t| spacing(f64::INFINITY, Some(t), h_min(longest_mm)));
     while !fits(h / 2.0) {
         if h * 2.0 > coarsest {
             return Err(format!(
@@ -376,8 +382,31 @@ pub fn first_spacing_that_fits(longest_mm: f64, features: Features, fits: &dyn F
     Ok(h)
 }
 
-/// The finest grid any expect measures at (§3.3's `h_min`).
-pub const H_MIN: f64 = 1.0 / 64.0;
+/// The finest grid a body is measured at (§3.3's `h_min`): a 4096th of its longest side on the
+/// power-of-two ladder, and never coarser than 1/64 mm, which is what it was for every body
+/// before it followed the body's size.
+///
+/// **A fraction of the part, because a floor in millimetres is a limit on size.** At 1/64 mm a
+/// ball half a millimetre across was measured at two cells on the coarse level and had no finer
+/// one, so every tolerance on it was unresolved, and a 2 mm ball was the smallest that passed at
+/// 0.1%. What one measurement may cost is held elsewhere and in the right unit, the corners of
+/// its grid (`ANCHORED_CORNERS_MAX`), and it stops refinement long before a 4096th is reached on
+/// anything but the smallest bodies; the fraction is only there so a body of no size cannot ask
+/// for a grid of no size. Bodies 64 mm and larger keep exactly the floor they had.
+pub fn h_min(longest_mm: f64) -> f64 {
+    let relative = longest_mm / FINEST_FRACTION;
+    if !(relative.is_finite() && relative > 0.0) {
+        return H_MIN_AT_MOST;
+    }
+    H_MIN_AT_MOST.min(2f64.powf(relative.log2().floor())).max(H_MIN_AT_LEAST)
+}
+
+/// The coarsest [`h_min`] is: a body's finest grid is never coarser than this.
+pub const H_MIN_AT_MOST: f64 = 1.0 / 64.0;
+/// How many of the finest grid's cells span a body's longest side.
+const FINEST_FRACTION: f64 = 4096.0;
+/// Below any length a document holds: a guard against a body that reports no size.
+const H_MIN_AT_LEAST: f64 = 1.0 / (1u64 << 40) as f64;
 
 /// Measures `quantity` of `of` at successive grids from `h0` until the verdict is decided.
 ///
@@ -389,6 +418,7 @@ pub fn decide(
     quantity: Quantity,
     wanted: &Wanted,
     h0: f64,
+    h_min: f64,
     measure: &mut dyn FnMut(NodeId, f64) -> Result<Measured, String>,
 ) -> Outcome {
     let level = |h: f64, measure: &mut dyn FnMut(NodeId, f64) -> Result<Measured, String>| -> Result<Vec<f64>, String> {
@@ -414,7 +444,7 @@ pub fn decide(
     };
     loop {
         let fine_h = h / 2.0;
-        let fine = if fine_h < H_MIN {
+        let fine = if fine_h < h_min {
             Err(format!("the grid is at its finest, {} mm", h))
         } else {
             level(fine_h, measure)
@@ -595,11 +625,11 @@ mod tests {
             other => Err(format!("{other:?}")),
         };
         let truth = 4.0 / 3.0 * std::f64::consts::PI * 1000.0;
-        let ok = decide(Of::One(id), Quantity::Volume, &Wanted::Near { values: vec![truth], tol: truth * 0.01 }, 1.0, &mut measure);
+        let ok = decide(Of::One(id), Quantity::Volume, &Wanted::Near { values: vec![truth], tol: truth * 0.01 }, 1.0, H_MIN_AT_MOST, &mut measure);
         assert_eq!(ok.verdict, Verdict::Pass, "{ok:?}");
-        let wrong = decide(Of::One(id), Quantity::Volume, &Wanted::Near { values: vec![truth * 1.1], tol: truth * 0.01 }, 1.0, &mut measure);
+        let wrong = decide(Of::One(id), Quantity::Volume, &Wanted::Near { values: vec![truth * 1.1], tol: truth * 0.01 }, 1.0, H_MIN_AT_MOST, &mut measure);
         assert_eq!(wrong.verdict, Verdict::Fail, "{wrong:?}");
-        let unreachable = decide(Of::One(id), Quantity::Volume, &Wanted::Near { values: vec![truth], tol: 1e-9 }, 1.0, &mut measure);
+        let unreachable = decide(Of::One(id), Quantity::Volume, &Wanted::Near { values: vec![truth], tol: 1e-9 }, 1.0, H_MIN_AT_MOST, &mut measure);
         assert_eq!(unreachable.verdict, Verdict::Unresolved, "{unreachable:?}");
     }
 
@@ -609,6 +639,44 @@ mod tests {
         assert_eq!(first_spacing(20.0), 0.5);
         assert_eq!(first_spacing(3.0), 1.0 / 16.0);
         assert_eq!(first_spacing(1000.0), 1.0);
+    }
+
+    /// The finest grid is a fraction of the body, and no body 64 mm or larger loses or gains a
+    /// level by that: they keep the 1/64 mm they always had.
+    #[test]
+    fn the_finest_grid_follows_the_body_below_sixty_four_millimetres_and_nowhere_else() {
+        for longest in [64.0, 100.0, 1000.0, 1e7] {
+            assert_eq!(h_min(longest), 1.0 / 64.0, "{longest} mm");
+        }
+        assert_eq!(h_min(32.0), 1.0 / 128.0);
+        assert_eq!(h_min(1.0), 1.0 / 4096.0);
+        assert_eq!(h_min(0.5), 1.0 / 8192.0);
+        // A body that reports no size, or nonsense, gets the old floor rather than none.
+        for nonsense in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(h_min(nonsense), 1.0 / 64.0, "{nonsense}");
+        }
+    }
+
+    /// A ball half a millimetre across is decided now. Under a floor of 1/64 mm its first grid was
+    /// the floor itself, so there was no second level to estimate an error from and a tolerance of
+    /// 0.1% could only be unresolved; the control arm holds the old floor to show that it was.
+    #[test]
+    fn a_ball_half_a_millimetre_across_is_measured_to_a_tenth_of_a_percent() {
+        let radius = 0.25;
+        let ball = fieldform_field::Sphere { centre: Point3::new(0.0, 0.0, 0.0), radius };
+        let bounds = (Point3::new(-radius, -radius, -radius), Point3::new(radius, radius, radius));
+        let id = NodeId::new();
+        let mut measure = |_: NodeId, h: f64| match MassProperties::anchored(&ball, bounds, h) {
+            fieldform_field::Anchored::Measured(m) => Ok(m),
+            other => Err(format!("{other:?}")),
+        };
+        let truth = 4.0 / 3.0 * std::f64::consts::PI * radius.powi(3);
+        let wanted = Wanted::Near { values: vec![truth], tol: truth * 1e-3 };
+        let h0 = first_spacing(2.0 * radius);
+        let now = decide(Of::One(id), Quantity::Volume, &wanted, h0, h_min(2.0 * radius), &mut measure);
+        assert_eq!(now.verdict, Verdict::Pass, "{now:?}");
+        let before = decide(Of::One(id), Quantity::Volume, &wanted, h0.max(1.0 / 64.0), 1.0 / 64.0, &mut measure);
+        assert_eq!(before.verdict, Verdict::Unresolved, "{before:?}");
     }
 
     /// A body too large for two levels of the rule's grid is measured coarser rather than not at
@@ -642,8 +710,8 @@ mod tests {
         assert_eq!(first_spacing_with_feature(40.0, Some(0.5)), 0.125);
         // A feature bigger than the size's own limit changes nothing.
         assert_eq!(first_spacing_with_feature(40.0, Some(100.0)), 1.0);
-        // And the floor still holds: nothing starts finer than the finest grid there is.
-        assert_eq!(first_spacing_with_feature(40.0, Some(1e-6)), H_MIN);
+        // And the floor still holds: nothing starts finer than the finest grid the body has.
+        assert_eq!(first_spacing_with_feature(40.0, Some(1e-6)), h_min(40.0));
         // Nonsense is ignored rather than taken as a floor of nought.
         assert_eq!(first_spacing_with_feature(40.0, Some(0.0)), 1.0);
         assert_eq!(first_spacing_with_feature(40.0, Some(f64::NAN)), 1.0);

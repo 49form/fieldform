@@ -83,7 +83,7 @@ fn every_kind_with_every_edge() -> Vec<Case> {
         cases.push(Case { what, node, inputs });
     };
     let wall = |thickness: ParamRef| Outline::Wall {
-        curve: CurveId::new(),
+        curve: CurveId::new().into(),
         thickness,
         side: WallSide::Centre,
         ends: WallEnds::Square,
@@ -275,14 +275,14 @@ fn every_kind_with_every_edge() -> Vec<Case> {
     case("a point at a driven place", Node::Point { at: [lit(0.0), driven(p), lit(0.0)] }, vec![p]);
 
     let r = n();
-    case("a pipe", Node::Pipe { curve: curve(), radius: driven(r) }, vec![r]);
+    case("a pipe", Node::Pipe { curve: curve().into(), radius: driven(r) }, vec![r]);
 
     let (t, sc, tw, ex) = (n(), n(), n(), n());
     case(
         "a sweep of a wall, scaled and twisted",
         Node::Sweep { rims: Default::default(),
             outline: wall(driven(t)),
-            spine: curve(),
+            spine: curve().into(),
             section: Section::Square,
             law: SweepLaw {
                 taper: Taper::Scale(driven(sc)),

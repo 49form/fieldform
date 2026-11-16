@@ -72,7 +72,7 @@ fn main() {
             )
             .expect("a bent line"),
         );
-        pipes.push(graph.add(Node::Pipe { curve: id, radius: ParamRef::Named(radius) }));
+        pipes.push(graph.add(Node::Pipe { curve: id.into(), radius: ParamRef::Named(radius) }));
     }
     graph.add(Node::Boolean { op: BooleanOp::Union, inputs: pipes.into_iter().map(Into::into).collect() });
 

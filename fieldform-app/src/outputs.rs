@@ -29,7 +29,8 @@ use fieldform_scene::{
 use eframe::egui;
 use nalgebra::Point3;
 
-use fieldform_ops::{Args, Command};
+use fieldform_ops::{Args, Command, Value};
+use crate::file_picker::Ask;
 
 use super::{
     App, GESTURE_WINDOW, LengthUnit, ObjReading, RowKey, file_name, row_label,
@@ -430,10 +431,10 @@ impl App {
     /// Re-fingerprints every tessellation when the document has changed, and cancels any run
     /// whose inputs moved under it.
     fn refresh_reads(&mut self) {
-        if self.outputs.reads_at == Some(self.revision) {
+        if self.outputs.reads_at == Some(self.saving.revision) {
             return;
         }
-        self.outputs.reads_at = Some(self.revision);
+        self.outputs.reads_at = Some(self.saving.revision);
         let blocks = self.doc.tessellations.clone();
         for t in &blocks {
             let key = self.tessellation_input(t).map(|input| input.key);
@@ -1098,18 +1099,20 @@ impl App {
                     return;
                 }
                 let name = self
-                    .file
+                    .saving.file
                     .as_ref()
                     .and_then(|(p, _)| p.file_stem().map(|s| s.to_string_lossy().to_string()))
                     .unwrap_or_else(|| "part".to_string());
-                let Some(path) = rfd::FileDialog::new()
-                    .add_filter("STL", &["stl"])
-                    .set_file_name(format!("{name}.stl"))
-                    .save_file()
-                else {
-                    return;
-                };
-                path
+                let dialog =
+                    rfd::FileDialog::new().add_filter("STL", &["stl"]).set_file_name(format!("{name}.stl"));
+                // The same command again with the answer as its `file=`, so a picked path and a
+                // typed one are one path through everything below.
+                let args = args.clone();
+                self.ask_for_path(dialog, Ask::Save, move |app, path| {
+                    let file = Value::Str(path.to_string_lossy().to_string());
+                    app.export_command(&args.with("file", file));
+                });
+                return;
             }
         };
 
@@ -1117,7 +1120,7 @@ impl App {
         // The selected body when there is one, the whole part otherwise — what a person means
         // by "export this" in each case.
         let body = self.selected_body.filter(|b| self.part_graph().roots().contains(b));
-        let (improve, reduce) = (self.export_relax, self.export_simplify);
+        let (improve, reduce) = (self.next.export_relax, self.next.export_simplify);
         let selected = match self.selected_block {
             Some(BlockRef::Tessellation(id)) => Some(id),
             _ => None,
@@ -1125,8 +1128,8 @@ impl App {
         let mut tessellations = self.doc.tessellations.clone();
         let mut exports = self.doc.exports.clone();
         let existing = reusable_tessellation(&tessellations, part, selected, body, asked);
-        let detail = asked.unwrap_or(self.export_detail);
-        self.export_detail = detail;
+        let detail = asked.unwrap_or(self.next.export_detail);
+        self.next.export_detail = detail;
         let source = match existing {
             Some(id) => id,
             None => {
@@ -1198,7 +1201,7 @@ impl App {
             return;
         }
         let detail = match args.get("detail").and_then(|v| v.as_str()) {
-            None => self.export_detail,
+            None => self.next.export_detail,
             Some(word) => match detail_named(word) {
                 Some(d) => d,
                 None => {
@@ -1218,8 +1221,8 @@ impl App {
             part: self.active_part,
             body,
             detail,
-            improve: self.export_relax,
-            reduce: self.export_simplify,
+            improve: self.next.export_relax,
+            reduce: self.next.export_simplify,
             active: true,
         });
         self.set_outputs(tessellations, self.doc.exports.clone(), None);
@@ -1257,7 +1260,7 @@ impl App {
     /// so the next import from the menu starts where the typed one left off.
     pub(crate) fn import_command(&mut self, args: &Args) {
         if let Some(word) = args.get("as").and_then(|v| v.as_str()) {
-            self.obj_as = match word.to_ascii_lowercase().as_str() {
+            self.importing.obj_as = match word.to_ascii_lowercase().as_str() {
                 "cage" => ObjReading::Cage,
                 "model" | "mesh" => ObjReading::Model,
                 "surface" => ObjReading::Surface,
@@ -1268,7 +1271,7 @@ impl App {
             };
         }
         if let Some(word) = args.get("unit").and_then(|v| v.as_str()) {
-            self.obj_import_unit = match word.to_ascii_lowercase().as_str() {
+            self.importing.obj_unit = match word.to_ascii_lowercase().as_str() {
                 "mm" => LengthUnit::Millimetre,
                 "cm" => LengthUnit::Centimetre,
                 "m" => LengthUnit::Metre,
@@ -1566,9 +1569,9 @@ impl App {
             BlockRef::Import(_) => {}
             // An open profile is held by the continuity at each join, so Join and Ungroup -- a
             // loop's corners all at once -- have nothing to say about it; Break at a join does.
-            BlockRef::Profile(key) if self.profiles.is_open(key) => {}
+            BlockRef::Profile(key) if self.curve_ui.profiles.is_open(key) => {}
             BlockRef::Profile(key) => {
-                let members = self.profiles.members(key).map(|m| m.to_vec()).unwrap_or_default();
+                let members = self.curve_ui.profiles.members(key).map(|m| m.to_vec()).unwrap_or_default();
                 let (held, total) = self.profile_hold(&members);
                 if ui
                     .add_enabled(held < total, egui::Button::new("Join"))
@@ -1594,6 +1597,27 @@ impl App {
                     self.ungroup_row(key);
                     ui.close();
                 }
+            }
+        }
+        // **Out of the block that reads it, the curves kept** -- a curve row's own item
+        // (`App::row_menu`), for the row a loop is drawn as. Delete on a row a block reads
+        // separates the row and leaves the block built on the loop, so without this there was
+        // no way to say "this block, not this profile" short of deleting the block.
+        if let BlockRef::Profile(key) = block {
+            let members = self.curve_ui.profiles.members(key).map(|m| m.to_vec()).unwrap_or_default();
+            let holders = self.built_from_any(&members);
+            if !holders.is_empty()
+                && ui
+                    .button(format!("Take out of {}", holders.join(" and ")))
+                    .on_hover_text(
+                        "The block lets go of this profile and waits to be told which to build \
+                         from instead; it is not drawn until then. The curves stay where they are.",
+                    )
+                    .clicked()
+            {
+                let label = self.profile_label(key);
+                self.release_curves(&members, &label);
+                ui.close();
             }
         }
         if ui.button("Rename").clicked() {
@@ -1630,7 +1654,7 @@ impl App {
                     self.doc.profile_names.get(&key).cloned().unwrap_or_default(),
                 ),
             };
-            self.renaming = Some((key, current));
+            self.notebook.renaming = Some((key, current));
             ui.close();
         }
         ui.separator();
@@ -1883,9 +1907,9 @@ impl App {
         if t != before && self.doc.tessellations.iter().any(|x| x.id == id) {
             // Remembered as the setting the next File → Export starts from, so the menu keeps
             // offering what was last chosen rather than resetting to Normal.
-            self.export_detail = t.detail;
-            self.export_relax = t.improve;
-            self.export_simplify = t.reduce;
+            self.next.export_detail = t.detail;
+            self.next.export_relax = t.improve;
+            self.next.export_simplify = t.reduce;
             let tessellations = self
                 .doc
                 .tessellations
@@ -1960,9 +1984,9 @@ impl App {
                         if let Some(name) = current.file_name() {
                             dialog = dialog.set_file_name(name.to_string_lossy());
                         }
-                        if let Some(path) = dialog.save_file() {
-                            e.path = path.to_string_lossy().to_string();
-                        }
+                        self.ask_for_path(dialog, Ask::Save, move |app, path| {
+                            app.set_export_path(id, path.to_string_lossy().to_string());
+                        });
                     }
                 });
             });
@@ -1987,6 +2011,23 @@ impl App {
         if run {
             self.start_write(id);
         }
+    }
+
+    /// Points an Export block at another file, as its *Choose…* does once the picker answers.
+    fn set_export_path(&mut self, id: ExportId, path: String) {
+        if !self.doc.exports.iter().any(|x| x.id == id && x.path != path) {
+            return;
+        }
+        // A new destination is a file that has not been written: forget what the old one
+        // wrote, so an active export writes to the new place.
+        self.outputs.written.remove(&id);
+        let exports = self
+            .doc
+            .exports
+            .iter()
+            .map(|x| if x.id == id { Export { path: path.clone(), ..x.clone() } } else { x.clone() })
+            .collect();
+        self.set_outputs(self.doc.tessellations.clone(), exports, Some(BlockRef::Export(id)));
     }
 
     /// The output blocks belonging to the part being edited, in the order they were made:
@@ -2225,10 +2266,10 @@ mod tests {
 
         // A machine with a megabyte to give: the estimate's own floor is more than that.
         app.outputs.memory_override = Some(1 << 20);
-        let said = app.console_log.len();
+        let said = app.console.log.len();
         app.run_command("tess detail=coarse");
         let id = app.doc.tessellations.last().expect("the verb made a block").id;
-        let refusal = app.console_log[said..]
+        let refusal = app.console.log[said..]
             .iter()
             .find(|l| !l.ok)
             .map(|l| l.text.clone())
@@ -2248,10 +2289,10 @@ mod tests {
         // The control: the same block on a machine with a gigabyte starts, and says what it
         // expects to hold rather than refusing.
         app.outputs.memory_override = Some(1 << 30);
-        let said = app.console_log.len();
+        let said = app.console.log.len();
         app.start_tessellation(id);
         assert!(app.outputs.tessellating.contains_key(&id), "a run that fits did not start");
-        assert!(app.console_log[said..].iter().all(|l| l.ok), "a run that fits was warned about");
+        assert!(app.console.log[said..].iter().all(|l| l.ok), "a run that fits was warned about");
         let (reading, too_much) = app.memory_reading(id);
         assert!(!too_much && reading.starts_with("about"), "{reading}");
         app.stop_tessellation(id);
@@ -2265,9 +2306,9 @@ mod tests {
         app.run_command("sphere radius=20");
         crate::app_tests::frame(&mut app, Vec::new());
         app.outputs.memory_override = Some(1 << 30);
-        let said = app.console_log.len();
+        let said = app.console.log.len();
         app.run_command("tess detail=normal");
-        let line = app.console_log[said..]
+        let line = app.console.log[said..]
             .iter()
             .find(|l| l.text.starts_with("Tessellating"))
             .map(|l| (l.ok, l.text.clone()))

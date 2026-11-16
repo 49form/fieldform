@@ -451,6 +451,45 @@ mod tests {
         );
     }
 
+    /// **A block waiting for a curve is not drawn, and what is beside it still is** -- the test
+    /// above, for the other kind of hole. A sweep made before its path, or left without one when
+    /// the path was deleted, must not take the viewport with it.
+    #[test]
+    fn a_block_waiting_for_a_curve_is_not_drawn_and_its_siblings_still_are() {
+        let doc = Document::new();
+        let mut part = Graph::empty();
+        let fine = part.add(Node::Sphere {
+            centre: Place::At([ParamRef::Literal(0.0); 3]),
+            radius: ParamRef::Literal(10.0),
+        });
+        let waiting = part.add(Node::Pipe {
+            curve: fieldform_scene::CurveSlot::empty(),
+            radius: ParamRef::Literal(1.0),
+        });
+        let loft = part.add(Node::Loft {
+            sections: Vec::new(),
+            spine: None,
+            smooth: Default::default(),
+            rims: Default::default(),
+        });
+        let above = part.add(Node::Offset {
+            input: waiting.into(),
+            distance: ParamRef::Literal(1.0),
+        });
+
+        let (display, _) = display_graph_with_stand_ins(&doc, &part, &|_| false);
+        let drawn: Vec<NodeId> = display.nodes().map(|(id, _)| id).collect();
+        assert!(drawn.contains(&fine), "the body with nothing wrong with it is still drawn");
+        assert!(!drawn.contains(&waiting), "the pipe with no curve is not");
+        assert!(!drawn.contains(&loft), "nor the loft with no sections");
+        assert!(!drawn.contains(&above), "nor what reads the pipe");
+        // And what is drawn compiles, which is the point of leaving them out.
+        assert!(
+            crate::GraphField::compile_graph(&doc, &display, 0.01).is_ok(),
+            "the part without its waiting blocks is a part that builds",
+        );
+    }
+
     fn old_point_positions(
         doc: &Document,
         part: &Graph,

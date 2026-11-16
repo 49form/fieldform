@@ -1838,6 +1838,7 @@ dependencies = [
  "fieldform-scene",
  "fieldform-subd",
  "image",
+ "libc",
  "log",
  "naga",
  "nalgebra",
@@ -1850,6 +1851,7 @@ dependencies = [
  "tokio",
  "wgpu",
  "winresource",
+ "zbus",
 ]
 
 [[package]]

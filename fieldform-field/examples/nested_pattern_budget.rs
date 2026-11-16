@@ -121,28 +121,28 @@ fn shapes() -> Vec<(&'static str, Box<dyn Fn(&mut Document, &mut Graph)>)> {
     vec![
         ("a pipe", Box::new(|doc: &mut Document, g: &mut Graph| {
             let c = spine(doc, "spine");
-            g.add(Node::Pipe { curve: c, radius: lit(3.0) });
+            g.add(Node::Pipe { curve: c.into(), radius: lit(3.0) });
         })),
         ("a pattern of a pipe", Box::new(|doc: &mut Document, g: &mut Graph| {
             let c = spine(doc, "spine");
-            let p = g.add(Node::Pipe { curve: c, radius: lit(3.0) });
+            let p = g.add(Node::Pipe { curve: c.into(), radius: lit(3.0) });
             pattern(g, p, 6, 0.0);
         })),
         ("a pattern of a pattern of a pipe", Box::new(|doc: &mut Document, g: &mut Graph| {
             let c = spine(doc, "spine");
-            let p = g.add(Node::Pipe { curve: c, radius: lit(3.0) });
+            let p = g.add(Node::Pipe { curve: c.into(), radius: lit(3.0) });
             let one = pattern(g, p, 6, 0.0);
             pattern(g, one, 6, 0.0);
         })),
         // The same two, rounded, which is where the divisor actually comes from.
         ("a rounded pattern of a pipe", Box::new(|doc: &mut Document, g: &mut Graph| {
             let c = spine(doc, "spine");
-            let p = g.add(Node::Pipe { curve: c, radius: lit(3.0) });
+            let p = g.add(Node::Pipe { curve: c.into(), radius: lit(3.0) });
             pattern(g, p, 6, 2.0);
         })),
         ("a rounded pattern of a rounded pattern of a pipe", Box::new(|doc: &mut Document, g: &mut Graph| {
             let c = spine(doc, "spine");
-            let p = g.add(Node::Pipe { curve: c, radius: lit(3.0) });
+            let p = g.add(Node::Pipe { curve: c.into(), radius: lit(3.0) });
             let one = pattern(g, p, 6, 2.0);
             pattern(g, one, 6, 2.0);
         })),
@@ -151,7 +151,7 @@ fn shapes() -> Vec<(&'static str, Box<dyn Fn(&mut Document, &mut Graph)>)> {
             let sp = spine(doc, "path");
             g.add(Node::Sweep { rims: Default::default(),
                 outline: fieldform_scene::Outline::closed(sec),
-                spine: sp,
+                spine: sp.into(),
                 section: fieldform_scene::Section::Square,
                 law: Default::default(),
             });
@@ -161,7 +161,7 @@ fn shapes() -> Vec<(&'static str, Box<dyn Fn(&mut Document, &mut Graph)>)> {
             let sp = spine(doc, "path");
             let s = g.add(Node::Sweep { rims: Default::default(),
                 outline: fieldform_scene::Outline::closed(sec),
-                spine: sp,
+                spine: sp.into(),
                 section: fieldform_scene::Section::Square,
                 law: Default::default(),
             });
@@ -171,27 +171,27 @@ fn shapes() -> Vec<(&'static str, Box<dyn Fn(&mut Document, &mut Graph)>)> {
         // "while there is a sweep active" means -- a part's budget is the worst of its roots.
         ("a pattern of a pattern of a pipe, and a sweep", Box::new(|doc: &mut Document, g: &mut Graph| {
             let c = spine(doc, "spine");
-            let p = g.add(Node::Pipe { curve: c, radius: lit(3.0) });
+            let p = g.add(Node::Pipe { curve: c.into(), radius: lit(3.0) });
             let one = pattern(g, p, 6, 0.0);
             pattern(g, one, 6, 0.0);
             let sec = section(doc);
             let sp = spine(doc, "path");
             g.add(Node::Sweep { rims: Default::default(),
                 outline: fieldform_scene::Outline::closed(sec),
-                spine: sp,
+                spine: sp.into(),
                 section: fieldform_scene::Section::Square,
                 law: Default::default(),
             });
         })),
         ("a pattern of a sweep, and a pattern of a pipe", Box::new(|doc: &mut Document, g: &mut Graph| {
             let c = spine(doc, "spine");
-            let p = g.add(Node::Pipe { curve: c, radius: lit(3.0) });
+            let p = g.add(Node::Pipe { curve: c.into(), radius: lit(3.0) });
             pattern(g, p, 6, 0.0);
             let sec = section(doc);
             let sp = spine(doc, "path");
             let s = g.add(Node::Sweep { rims: Default::default(),
                 outline: fieldform_scene::Outline::closed(sec),
-                spine: sp,
+                spine: sp.into(),
                 section: fieldform_scene::Section::Square,
                 law: Default::default(),
             });
@@ -201,17 +201,17 @@ fn shapes() -> Vec<(&'static str, Box<dyn Fn(&mut Document, &mut Graph)>)> {
         // window has somewhere to cut.
         ("control: a pattern of a pipe off the axis", Box::new(|doc: &mut Document, g: &mut Graph| {
             let c = offset_spine(doc, "spine");
-            let p = g.add(Node::Pipe { curve: c, radius: lit(3.0) });
+            let p = g.add(Node::Pipe { curve: c.into(), radius: lit(3.0) });
             pattern(g, p, 6, 0.0);
         })),
         ("control: 24 copies of a pipe off the axis", Box::new(|doc: &mut Document, g: &mut Graph| {
             let c = offset_spine(doc, "spine");
-            let p = g.add(Node::Pipe { curve: c, radius: lit(3.0) });
+            let p = g.add(Node::Pipe { curve: c.into(), radius: lit(3.0) });
             pattern(g, p, 24, 0.0);
         })),
         ("control: a pattern of a pattern of a pipe off the axis", Box::new(|doc: &mut Document, g: &mut Graph| {
             let c = offset_spine(doc, "spine");
-            let p = g.add(Node::Pipe { curve: c, radius: lit(3.0) });
+            let p = g.add(Node::Pipe { curve: c.into(), radius: lit(3.0) });
             let one = pattern(g, p, 6, 0.0);
             pattern(g, one, 6, 0.0);
         })),
@@ -220,7 +220,7 @@ fn shapes() -> Vec<(&'static str, Box<dyn Fn(&mut Document, &mut Graph)>)> {
             let sp = spine(doc, "path");
             let s = g.add(Node::Sweep { rims: Default::default(),
                 outline: fieldform_scene::Outline::closed(sec),
-                spine: sp,
+                spine: sp.into(),
                 section: fieldform_scene::Section::Square,
                 law: Default::default(),
             });

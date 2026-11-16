@@ -77,7 +77,7 @@ fn scene(driven: bool, count: u32, how: How) -> (Document, Graph) {
     } else {
         lit(5.0)
     };
-    let pipe = graph.add(Node::Pipe { curve, radius });
+    let pipe = graph.add(Node::Pipe { curve: curve.into(), radius });
 
     if how == How::Block && count > 1 {
         // What the menu actually builds.

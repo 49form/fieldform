@@ -59,10 +59,10 @@ fn main() {
                 }
                 fieldform_gpu::CurveUse::Frame(node) => match graph.node(node) {
                     Some(Node::Sweep { outline, spine, .. }) => {
-                        let path = doc.curves[spine].tessellate(fieldform_field::DEFAULT_TOLERANCE_MM);
-                        stretch = fieldform_field::sweep_stretch(&doc, outline, *spine, &Default::default());
+                        let path = doc.curves[&spine.source().expect("a block that names its curve")].tessellate(fieldform_field::DEFAULT_TOLERANCE_MM);
+                        stretch = fieldform_field::sweep_stretch(&doc, outline, spine.source().expect("a block that names its curve"), &Default::default());
                         (
-                            fieldform_field::sweep_frame(&doc, outline, *spine, &path)
+                            fieldform_field::sweep_frame(&doc, outline, spine.source().expect("a block that names its curve"), &path)
                                 .expect("a spine with a direction"),
                             None,
                         )
@@ -80,7 +80,7 @@ fn main() {
                     let laid = fieldform_field::sweep_outline_section(
                         &doc,
                         outline,
-                        *spine,
+                        spine.source().expect("a block that names its curve"),
                         fieldform_field::PROFILE_TURN_DEGREES,
                     )
                     .expect("a section");
@@ -311,7 +311,7 @@ fn swept() -> (Document, Graph) {
     let mut graph = Graph::empty();
     graph.add(Node::Sweep { rims: Default::default(),
         outline: fieldform_scene::Outline::closed(ids[0]),
-        spine: path,
+        spine: path.into(),
         section: Default::default(),
         law: Default::default(),
     });

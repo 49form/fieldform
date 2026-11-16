@@ -65,13 +65,13 @@
             ("a mitred extrude", Outline::closed(square), 5.0, "extrude_sharp"),
             (
                 "a wall",
-                Outline::Wall { curve: hook, thickness: lit(3.0), side: WallSide::Left, ends: WallEnds::Round },
+                Outline::Wall { curve: hook.into(), thickness: lit(3.0), side: WallSide::Left, ends: WallEnds::Round },
                 0.0,
                 "wall_extrude",
             ),
             (
                 "a mitred wall round a loop",
-                Outline::Wall { curve: square, thickness: lit(3.0), side: WallSide::Centre, ends: WallEnds::Round },
+                Outline::Wall { curve: square.into(), thickness: lit(3.0), side: WallSide::Centre, ends: WallEnds::Round },
                 5.0,
                 "wall_extrude_sharp",
             ),
@@ -163,7 +163,7 @@
             ("a law'd sweep", Outline::closed(square), taper.clone(), "sweep_law"),
             (
                 "a wall under a law",
-                Outline::Wall { curve: hook, thickness: lit(3.0), side: WallSide::Left, ends: WallEnds::Round },
+                Outline::Wall { curve: hook.into(), thickness: lit(3.0), side: WallSide::Left, ends: WallEnds::Round },
                 taper,
                 "wall_sweep_law",
             ),
@@ -171,7 +171,7 @@
         for (what, outline, law, name) in cases {
             let build = |rims: Rims| {
                 let mut graph = Graph::empty();
-                graph.add(Node::Sweep { outline: outline.clone(), spine: path, section: Default::default(), law: law.clone(), rims });
+                graph.add(Node::Sweep { outline: outline.clone(), spine: path.into(), section: Default::default(), law: law.clone(), rims });
                 generate(&doc, &graph).expect(what)
             };
             let hard = build(Rims::hard());
@@ -301,7 +301,7 @@
             ("a profile", Outline::closed(square), "revolve_wedge"),
             (
                 "a wall",
-                Outline::Wall { curve: hook, thickness: lit(2.0), side: WallSide::Left, ends: WallEnds::Round },
+                Outline::Wall { curve: hook.into(), thickness: lit(2.0), side: WallSide::Left, ends: WallEnds::Round },
                 "wall_revolve_wedge",
             ),
         ];

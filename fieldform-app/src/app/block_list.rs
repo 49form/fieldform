@@ -101,8 +101,8 @@ impl App {
         key: CurveId,
         nesting: &fieldform_scene::Nesting,
     ) {
-        let Some(members) = self.profiles.members(key).map(|m| m.to_vec()) else { return };
-        let open = self.profiles.is_open(key);
+        let Some(members) = self.curve_ui.profiles.members(key).map(|m| m.to_vec()) else { return };
+        let open = self.curve_ui.profiles.is_open(key);
         let flat = fieldform_field::loop_is_flat(&self.doc, &members);
         // Whether the loop is held together by joints (§4): every end on a point, some, or
         // none. Said in the header because it decides what a drag on a corner does. An open
@@ -124,7 +124,7 @@ impl App {
             members.len(),
             if flat { "flat" } else { "3D" }
         );
-        let all_hidden = members.iter().all(|id| self.hidden_curves.contains(id));
+        let all_hidden = members.iter().all(|id| self.curve_ui.hidden.contains(id));
         let selected = self.selected_block == Some(outputs::BlockRef::Profile(key));
 
         let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
@@ -179,9 +179,9 @@ impl App {
                 {
                     for id in &members {
                         if all_hidden {
-                            self.hidden_curves.remove(id);
+                            self.curve_ui.hidden.remove(id);
                         } else {
-                            self.hidden_curves.insert(*id);
+                            self.curve_ui.hidden.insert(*id);
                         }
                     }
                 }
@@ -392,7 +392,7 @@ impl App {
         // A closed loop of open curves collapses into one row, at the place its first curve
         // would have been — before the imports fold, so that a loop whose first curve came from
         // a file folds into that file's row along with it. `folded_curve_row` is the rule.
-        let joints = crate::blocks::list::held_joint_points(&self.doc, self.active_part, &self.profiles);
+        let joints = crate::blocks::list::held_joint_points(&self.doc, self.active_part, &self.curve_ui.profiles);
         out = out
             .into_iter()
             .filter_map(|block| match block {
@@ -469,7 +469,7 @@ impl App {
         fn holds(app: &App, row: &BlockRow, curve: CurveId) -> bool {
             let here = match row.block {
                 Block::Curve(id) => id == curve,
-                Block::Profile(key) => app.profiles.key_of(curve) == Some(key),
+                Block::Profile(key) => app.curve_ui.profiles.key_of(curve) == Some(key),
                 Block::Import(source) => app.doc.sources.get(&source).is_some_and(|s| s.curves.contains(&curve)),
                 _ => false,
             };
@@ -611,7 +611,7 @@ impl App {
         let Some(param) = self.doc.parameters.get(&id) else { return };
         // The draft while one is being typed, else the name the document holds.
         let mut name = self
-            .name_drafts
+            .notebook.name_drafts
             .get(&id)
             .map(|d| d.text.clone())
             .unwrap_or_else(|| param.name.clone());
@@ -666,8 +666,8 @@ impl App {
             );
             // Once, and the whole of it selected, so typing replaces the invented name rather
             // than appending to it.
-            if self.naming_parameter == Some(id) {
-                self.naming_parameter = None;
+            if self.notebook.naming_parameter == Some(id) {
+                self.notebook.naming_parameter = None;
                 field.request_focus();
                 if let Some(mut state) =
                     egui::TextEdit::load_state(ui.ctx(), field.id)
@@ -685,7 +685,7 @@ impl App {
             }
             if field.changed() {
                 let draft = self
-                    .name_drafts
+                    .notebook.name_drafts
                     .entry(id)
                     .or_insert_with(|| NameDraft { text: String::new(), error: None });
                 draft.text = name.clone();
@@ -699,10 +699,10 @@ impl App {
             let escaped = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape));
             if escaped {
                 abandon_name = true;
-            } else if field.lost_focus() && self.name_drafts.contains_key(&id) {
+            } else if field.lost_focus() && self.notebook.name_drafts.contains_key(&id) {
                 rename = Some(name.clone());
             }
-            let editing = literal.is_none() || self.expression_drafts.contains_key(&id);
+            let editing = literal.is_none() || self.notebook.expression_drafts.contains_key(&id);
             if !editing {
                 // A typed number, and nobody is typing an expression over it.
                 let mut value = literal.unwrap_or(0.0);
@@ -726,7 +726,7 @@ impl App {
                     }
             } else {
                 // An expression, stored or being typed.
-                    let draft = self.expression_drafts.entry(id).or_insert_with(|| ExpressionDraft {
+                    let draft = self.notebook.expression_drafts.entry(id).or_insert_with(|| ExpressionDraft {
                         text: source.clone().unwrap_or_default(),
                         error: None,
                         focus: false,
@@ -797,10 +797,10 @@ impl App {
         // Under the row: what stopped the last attempt, or why the stored expression computes
         // nothing. Both in the same place, since either is the thing to fix.
         let stuck = self
-            .name_drafts
+            .notebook.name_drafts
             .get(&id)
             .and_then(|d| d.error.clone())
-            .or_else(|| self.expression_drafts.get(&id).and_then(|d| d.error.clone()))
+            .or_else(|| self.notebook.expression_drafts.get(&id).and_then(|d| d.error.clone()))
             .or_else(|| match (&worth, &source) {
                 (Err(why), Some(_)) => Some(why.to_string()),
                 _ => None,
@@ -813,8 +813,8 @@ impl App {
         }
 
         if remove {
-            self.expression_drafts.remove(&id);
-            self.name_drafts.remove(&id);
+            self.notebook.expression_drafts.remove(&id);
+            self.notebook.name_drafts.remove(&id);
             // On the history, so undoing the delete that left it unread cannot bring back a block
             // reading a parameter that is gone: this undoes first.
             let done = remove_unread_parameter(&mut self.stack, &mut self.doc, &mut self.gesture, id);
@@ -822,19 +822,19 @@ impl App {
             return;
         }
         if abandon_name {
-            self.name_drafts.remove(&id);
+            self.notebook.name_drafts.remove(&id);
         }
         if let Some(name) = rename {
             match self.doc.rename_parameter(id, name.trim()) {
                 Ok(()) => {
-                    self.name_drafts.remove(&id);
+                    self.notebook.name_drafts.remove(&id);
                     self.mark_changed();
                 }
                 // Refused: the draft stays, with the reason under the row, so what was typed
                 // can be fixed rather than typed again.
                 Err(why) => {
                     self.warn(why.to_string());
-                    if let Some(draft) = self.name_drafts.get_mut(&id) {
+                    if let Some(draft) = self.notebook.name_drafts.get_mut(&id) {
                         draft.error = Some(why.to_string());
                     }
                 }
@@ -845,7 +845,7 @@ impl App {
             self.after_parameter_change();
         }
         if start_expression {
-            self.expression_drafts.insert(
+            self.notebook.expression_drafts.insert(
                 id,
                 ExpressionDraft {
                     text: readout(literal.unwrap_or(0.0)),
@@ -855,16 +855,16 @@ impl App {
             );
         }
         if discard {
-            self.expression_drafts.remove(&id);
+            self.notebook.expression_drafts.remove(&id);
         }
         if let Some(text) = commit {
             match self.commit_expression(id, &text) {
                 Ok(()) => {
-                    self.expression_drafts.remove(&id);
+                    self.notebook.expression_drafts.remove(&id);
                 }
                 Err(why) => {
                     self.warn(format!("`{}`: {why}", self.parameter_label(id)));
-                    if let Some(draft) = self.expression_drafts.get_mut(&id) {
+                    if let Some(draft) = self.notebook.expression_drafts.get_mut(&id) {
                         draft.error = Some(why);
                     }
                 }
@@ -907,14 +907,14 @@ impl App {
         self.material_gesture = None;
         // The draft pull is the analysis panel's own, so nothing the history sees reads it: it
         // keeps the number it showed, as it does when an undo takes a parameter it reads.
-        let pull = typed_direction(&self.doc, &self.draft.pull);
+        let pull = typed_direction(&self.doc, &self.view.draft.pull);
         if let Err(e) = self.stack.execute(&mut self.doc, Box::new(cmd)) {
             self.warn(e.to_string());
             return;
         }
-        keep_typed_direction(&self.doc, &mut self.draft.pull, pull);
-        self.expression_drafts.remove(&id);
-        self.name_drafts.remove(&id);
+        keep_typed_direction(&self.doc, &mut self.view.draft.pull, pull);
+        self.notebook.expression_drafts.remove(&id);
+        self.notebook.name_drafts.remove(&id);
         self.mark_changed();
         self.rebuild_render_resources();
         self.say(format!(
@@ -1023,7 +1023,7 @@ impl App {
             // Opened empty and focused, so the next thing typed is the expression. The row
             // shows the hint until then.
             None => {
-                self.expression_drafts.insert(
+                self.notebook.expression_drafts.insert(
                     id,
                     ExpressionDraft { text: String::new(), error: None, focus: true },
                 );
@@ -1217,7 +1217,7 @@ impl App {
             .show_header(ui, |ui| {
                 // A curve is drawn as reference geometry, so it hides like anything else that
                 // is drawn — and the eye sits in the same column as the bodies' below it.
-                let showing = !self.hidden_curves.contains(&id);
+                let showing = !self.curve_ui.hidden.contains(&id);
                 let icon = egui::RichText::new("\u{1f441}").color(if showing {
                     ui.visuals().strong_text_color()
                 } else {
@@ -1264,7 +1264,7 @@ impl App {
                 // row above carries the gesture for the whole loop; this one shows the state and
                 // stops, and the row menu's Variable item does the same.
                 let is_variable = self.doc.ownership(BlockKey::Curve(id)) == Ownership::Variable;
-                let toggle = match curve_v_elsewhere(&self.profiles, id, readers) {
+                let toggle = match curve_v_elsewhere(&self.curve_ui.profiles, id, readers) {
                     Some(why) => Err(why),
                     None => Ok(Declarable::Curve(id)),
                 };
@@ -1272,9 +1272,9 @@ impl App {
                 let size = egui::vec2(18.0, ui.spacing().interact_size.y);
                 if ui.add_sized(size, egui::Button::new(icon).frame(false)).clicked() {
                     if showing {
-                        self.hidden_curves.insert(id);
+                        self.curve_ui.hidden.insert(id);
                     } else {
-                        self.hidden_curves.remove(&id);
+                        self.curve_ui.hidden.remove(&id);
                     }
                 }
                 let selected = self.selected_curve == Some(id);
@@ -1432,8 +1432,8 @@ impl App {
 
                     // Live while dragging, one entry on release — the rule every drag here
                     // follows.
-                    if began && self.weight_edit_before.is_none() {
-                        self.weight_edit_before = Some((id, picked.clone(), weights.clone()));
+                    if began && self.curve_ui.weight_edit_before.is_none() {
+                        self.curve_ui.weight_edit_before = Some((id, picked.clone(), weights.clone()));
                     }
                     if touched {
                         if let Some(c) = self.doc.curve_mut(id) {
@@ -1448,7 +1448,7 @@ impl App {
                         self.mark_changed();
                     }
                     if settled
-                        && let Some((edited, indices, before)) = self.weight_edit_before.take()
+                        && let Some((edited, indices, before)) = self.curve_ui.weight_edit_before.take()
                         && edited == id
                         && before.iter().any(|w| (w - weight).abs() > 1e-12)
                     {
@@ -1678,8 +1678,8 @@ impl App {
                         }
                         self.mark_changed();
                     }
-                    if began && self.curve_edit_before.is_none() {
-                        self.curve_edit_before = Some((id, positions.clone()));
+                    if began && self.curve_ui.edit_before.is_none() {
+                        self.curve_ui.edit_before = Some((id, positions.clone()));
                     }
                     if touched {
                         if let Some(c) = self.doc.curve_mut(id) {
@@ -1696,7 +1696,7 @@ impl App {
                         self.mark_changed();
                     }
                     if settled
-                        && let Some((edited_curve, before)) = self.curve_edit_before.take()
+                        && let Some((edited_curve, before)) = self.curve_ui.edit_before.take()
                         && edited_curve == id
                         && before != edited
                     {
@@ -1808,7 +1808,7 @@ impl App {
         // **A block being made opens here, waiting for its numbers**, when there is no floating
         // panel to type them into (the owner's trial, 2026-10-17): the panel showed the same
         // numbers the block's own rows do, and two places for one value is one too many.
-        let awaiting = !self.floating_panel && self.session.as_ref().is_some_and(|s| s.block == id && s.awaiting);
+        let awaiting = !self.tools.floating_panel && self.tools.session.as_ref().is_some_and(|s| s.block == id && s.awaiting);
         if awaiting {
             state.set_open(true);
             state.store(ui.ctx());
@@ -1816,8 +1816,8 @@ impl App {
         self.open_for_reveal(&mut state, ui.ctx(), RowKey::Node(id));
         // A list collects only while its block is open. Closing the block is the natural end of
         // the act, and a viewport that keeps adding to a list nobody can see is a trap.
-        if self.collecting == Some(id) && !state.is_open() {
-            self.collecting = None;
+        if self.notebook.collecting == Some(id) && !state.is_open() {
+            self.notebook.collecting = None;
         }
         let header_response = state
             .show_header(ui, |ui| {
@@ -1865,6 +1865,17 @@ impl App {
                 let is_variable = self.doc.ownership(BlockKey::Node(id)) == Ownership::Variable;
                 self.variable_marker(ui, is_variable, Ok(Declarable::Block(id)));
                 self.visibility_toggle(ui, id, is_body);
+                // Only on a locked row: a lock is rare, and a mark on every row would say nothing.
+                if self.doc.is_locked(id)
+                    && crate::blocks::list::lock_mark(ui)
+                        .on_hover_text(
+                            "Locked: this block cannot be deleted or used in another block. \
+                             Click to unlock.",
+                        )
+                        .clicked()
+                {
+                    self.set_locked(id, false);
+                }
                 let selected = self.selected_body == Some(id);
                 // Truncated, with the whole thing on hover. A label names what a body is
                 // made of, and what a body is made of grows with every operation applied to
@@ -1894,27 +1905,27 @@ impl App {
                 row.context_menu(|ui| self.row_menu(ui, Row::Node { id, is_body }));
             })
             .body(|ui| {
-                self.focus_first_number = awaiting;
-                self.drawing_pending = self.is_pending(id) && !self.floating_panel;
-                if self.drawing_pending {
-                    self.pending_numbers.clear();
+                self.tools.focus_first_number = awaiting;
+                self.tools.drawing_pending = self.is_pending(id) && !self.tools.floating_panel;
+                if self.tools.drawing_pending {
+                    self.tools.pending_numbers.clear();
                 }
                 // **Its rows go to the fields that read them** (§7.1, §17): each slot draws
                 // the block it holds, in place. Saved and restored, because a hosted block does
                 // the same for its own rows while this one is still being drawn.
                 let kept = std::mem::replace(
-                    &mut self.hosted,
+                    &mut self.notebook.hosted,
                     Some(Hosted { holder: id, rows: inside.to_vec() }),
                 );
                 self.node_block_body(ui, id);
-                let unhosted = std::mem::replace(&mut self.hosted, kept)
+                let unhosted = std::mem::replace(&mut self.notebook.hosted, kept)
                     .map(|hosted| hosted.rows)
                     .unwrap_or_default();
-                self.drawing_pending = false;
+                self.tools.drawing_pending = false;
                 if awaiting {
                     // Done once the first number has the keyboard, or once the block has none.
-                    self.focus_first_number = false;
-                    if let Some(session) = self.session.as_mut() {
+                    self.tools.focus_first_number = false;
+                    if let Some(session) = self.tools.session.as_mut() {
                         session.awaiting = false;
                     }
                     ui.scroll_to_cursor(Some(egui::Align::Center));
@@ -1963,10 +1974,10 @@ impl App {
             .or(self.selected_curve.map(RowKey::Curve));
         // A curve clicked to be edited opens its own row too -- and again when it was already
         // selected and its row has been closed since, since the click is the same request.
-        let picked = self.curve_picked.take().map(RowKey::Curve).filter(|p| Some(*p) == now);
-        if now != self.followed || picked.is_some() {
-            self.followed = now;
-            self.reveal = now.map(|target| {
+        let picked = self.notebook.curve_picked.take().map(RowKey::Curve).filter(|p| Some(*p) == now);
+        if now != self.notebook.followed || picked.is_some() {
+            self.notebook.followed = now;
+            self.notebook.reveal = now.map(|target| {
                 let mut open = self.rows_above(target);
                 if picked == Some(target) {
                     open.insert(target);
@@ -1975,10 +1986,10 @@ impl App {
                 Reveal { target, open, left, reached: false }
             });
         }
-        if let Some(reveal) = self.reveal.as_mut() {
+        if let Some(reveal) = self.notebook.reveal.as_mut() {
             reveal.left = reveal.left.saturating_sub(1);
             if reveal.left == 0 {
-                self.reveal = None;
+                self.notebook.reveal = None;
             } else {
                 // Nothing else may be asking for a frame, and a row is sliding open.
                 ctx.request_repaint();
@@ -1989,8 +2000,8 @@ impl App {
     /// A row in the list was clicked: it is already where the pointer is, so there is nothing to
     /// go to, and scrolling would move the row out from under the hand that chose it.
     pub(crate) fn chose_from_list(&mut self, key: RowKey) {
-        self.followed = Some(key);
-        self.reveal = None;
+        self.notebook.followed = Some(key);
+        self.notebook.reveal = None;
     }
 
     /// Opens `row`, if the list is on its way through it.
@@ -2000,7 +2011,7 @@ impl App {
         ctx: &egui::Context,
         row: RowKey,
     ) {
-        if self.reveal.as_ref().is_some_and(|r| r.open.contains(&row)) {
+        if self.notebook.reveal.as_ref().is_some_and(|r| r.open.contains(&row)) {
             state.set_open(true);
             state.store(ctx);
         }
@@ -2022,9 +2033,9 @@ impl App {
             RowKey::Curve(id) => {
                 curves.push(id);
                 // A loop is one row, so what reads any of its curves holds all of them.
-                if let Some(key) = self.profiles.key_of(id) {
+                if let Some(key) = self.curve_ui.profiles.key_of(id) {
                     open.insert(RowKey::Profile(key));
-                    curves.extend(self.profiles.members(key).unwrap_or_default().iter().copied());
+                    curves.extend(self.curve_ui.profiles.members(key).unwrap_or_default().iter().copied());
                 }
             }
             _ => {}
@@ -2197,11 +2208,11 @@ impl App {
             Block::Node(id) => {
                 (nesting.is_root(id) || self.draws_as_overlay(id)) && !self.is_visible(id)
             }
-            Block::Curve(id) => self.hidden_curves.contains(&id),
+            Block::Curve(id) => self.curve_ui.hidden.contains(&id),
             Block::Profile(key) => self
-                .profiles
+                .curve_ui.profiles
                 .members(key)
-                .is_some_and(|m| !m.is_empty() && m.iter().all(|c| self.hidden_curves.contains(c))),
+                .is_some_and(|m| !m.is_empty() && m.iter().all(|c| self.curve_ui.hidden.contains(c))),
             _ => false,
         }
     }
@@ -2251,7 +2262,7 @@ impl App {
     /// an owner *further down the flat list* and so builds a tree, and each row is removed from
     /// its holder's list as it is drawn. A block can therefore be hosted once, below itself never.
     pub(crate) fn host_nested_block(&mut self, ui: &mut egui::Ui, block: NodeId) {
-        let Some(hosted) = self.hosted.as_mut() else { return };
+        let Some(hosted) = self.notebook.hosted.as_mut() else { return };
         let holder = hosted.holder;
         let Some(at) = hosted.rows.iter().position(|row| row.block == Block::Node(block)) else {
             return;
@@ -2280,8 +2291,8 @@ impl App {
         // be a second answer to the same question, which is how a curve once ended up drawn in
         // neither place (see `folded_curve_row_in`).
         self.refresh_profiles();
-        let key = self.profiles.key_of(curve);
-        let Some(hosted) = self.hosted.as_ref() else { return };
+        let key = self.curve_ui.profiles.key_of(curve);
+        let Some(hosted) = self.notebook.hosted.as_ref() else { return };
         let holder = hosted.holder;
         let at = hosted.rows.iter().position(|row| match row.block {
             Block::Curve(id) => id == curve,
@@ -2289,7 +2300,7 @@ impl App {
             _ => false,
         });
         let Some(at) = at else { return };
-        let row = self.hosted.as_mut().expect("asked a moment ago").rows.remove(at);
+        let row = self.notebook.hosted.as_mut().expect("asked a moment ago").rows.remove(at);
         let list = self.list_readings();
         ui.indent(("hosted curve", curve.raw()), |ui| {
             self.block_row(ui, &row, &list.nesting, Some(holder));
@@ -2420,8 +2431,8 @@ impl App {
         header: &str,
         selected: bool,
     ) -> Option<egui::Response> {
-        if self.renaming.as_ref().is_some_and(|(being, _)| *being == key) {
-            let mut text = self.renaming.take().map(|(_, t)| t).unwrap_or_default();
+        if self.notebook.renaming.as_ref().is_some_and(|(being, _)| *being == key) {
+            let mut text = self.notebook.renaming.take().map(|(_, t)| t).unwrap_or_default();
             let hint = match key {
                 RowKey::Node(id) => self.derived_label(id),
                 RowKey::Curve(_) => "Curve".to_string(),
@@ -2432,7 +2443,7 @@ impl App {
                 RowKey::Comb(_) => fieldform_scene::CurvatureComb::DEFAULT_NAME.to_string(),
                 RowKey::Import(_) => "Import".to_string(),
                 RowKey::Profile(key) => {
-                    format!("Profile {}", self.profiles.number(key).unwrap_or(0))
+                    format!("Profile {}", self.curve_ui.profiles.number(key).unwrap_or(0))
                 }
             };
             // **Salted with the row, not placed by position.** A row can move while it is being
@@ -2491,7 +2502,7 @@ impl App {
                     RowKey::Profile(key) => self.rename_profile(key, text.trim()),
                 }
             } else {
-                self.renaming = Some((key, text));
+                self.notebook.renaming = Some((key, text));
             }
             return None;
         }
@@ -2500,7 +2511,7 @@ impl App {
             egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
             egui::Sense::click(),
         );
-        if let Some(reveal) = self.reveal.as_mut().filter(|r| r.target == key) {
+        if let Some(reveal) = self.notebook.reveal.as_mut().filter(|r| r.target == key) {
             if !reveal.reached {
                 reveal.reached = true;
                 reveal.left = reveal.left.min(REVEAL_SETTLE_FRAMES);
@@ -2564,7 +2575,7 @@ impl App {
                     self.doc.profile_names.get(&key).cloned().unwrap_or_default()
                 }
             };
-            self.renaming = Some((key, current));
+            self.notebook.renaming = Some((key, current));
         }
         Some(row.on_hover_text(header.to_owned()))
     }
@@ -2723,7 +2734,7 @@ impl App {
         kind: RefKind,
         what: &str,
     ) -> Option<K> {
-        self.ref_edit = None;
+        self.notebook.ref_edit = None;
         match choices.iter().find(|c| c.key == as_ref) {
             Some(c) => match c.refusal {
                 Some(why) => {
@@ -2805,7 +2816,7 @@ impl App {
     ) -> Option<K> {
         let fid = ui.make_persistent_id(salt);
         let settled = shown.to_string();
-        let mut text = match self.ref_edit.as_ref().filter(|(at, _)| *at == fid) {
+        let mut text = match self.notebook.ref_edit.as_ref().filter(|(at, _)| *at == fid) {
             Some((_, buffer)) => buffer.clone(),
             None => settled.clone(),
         };
@@ -2825,7 +2836,7 @@ impl App {
             edit = edit.frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(8, 2)));
         }
         let response = ui.add(edit);
-        self.last_reference_field = Some(response.clone());
+        self.notebook.last_reference_field = Some(response.clone());
         if let Some(family) = chip {
             crate::theme::paint_chip(ui.painter(), behind, response.rect, family, ui.visuals().dark_mode);
         }
@@ -2898,7 +2909,7 @@ impl App {
             // leaves it where it was.
             let sharing = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
             if let Some(from) = dropped.from.filter(|_| !sharing && taken.is_some()) {
-                self.completing_a_move = Some((from, dropped.id));
+                self.notebook.completing_a_move = Some((from, dropped.id));
             }
             return taken;
         }
@@ -2914,7 +2925,7 @@ impl App {
         }
 
         if response.changed() {
-            self.ref_edit = Some((fid, text.clone()));
+            self.notebook.ref_edit = Some((fid, text.clone()));
         }
 
         // **The list is drawn while the field has focus, and before anything commits.** Clicking a
@@ -3024,7 +3035,7 @@ impl App {
             d.insert_temp(open_key, reference_list_open_next(drawn, chosen_from_list.is_some()))
         });
         if let Some(key) = chosen_from_list {
-            self.ref_edit = None;
+            self.notebook.ref_edit = None;
             return Some(key);
         }
 
@@ -3034,7 +3045,7 @@ impl App {
             || (response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
         if finished {
             let typed = text.trim().to_string();
-            self.ref_edit = None;
+            self.notebook.ref_edit = None;
             if !typed.is_empty() && typed != settled {
                 match choices.iter().find(|c| {
                     c.address.as_deref().is_some_and(|a| a.eq_ignore_ascii_case(&typed))
@@ -3235,10 +3246,10 @@ impl App {
         let what = match found {
             RowCalled::Block(id) => Declarable::Block(id),
             RowCalled::Parameter(id) => return Some(Err(id)),
-            RowCalled::Curve(id) => match curve_v_elsewhere(&self.profiles, id, nesting.readers_of_curve(id)) {
+            RowCalled::Curve(id) => match curve_v_elsewhere(&self.curve_ui.profiles, id, nesting.readers_of_curve(id)) {
                 None => Declarable::Curve(id),
                 Some(why) => {
-                    let row = self.profiles.key_of(id).map(|key| self.profile_label(key)).unwrap_or_default();
+                    let row = self.curve_ui.profiles.key_of(id).map(|key| self.profile_label(key)).unwrap_or_default();
                     let line = console_keys::line_naming(word, &row);
                     self.warn(format!(
                         "\u{201c}{wanted}\u{201d}: {why} From the console that row is `{line}`."
@@ -3247,7 +3258,7 @@ impl App {
                 }
             },
             RowCalled::Profile(key) => {
-                let members = self.profiles.members(key).map(|m| m.to_vec()).unwrap_or_default();
+                let members = self.curve_ui.profiles.members(key).map(|m| m.to_vec()).unwrap_or_default();
                 let curve = profile_v_curve_in(&self.doc, &nesting, &members).unwrap_or(key);
                 Declarable::Profile { key, curve }
             }
@@ -3263,7 +3274,7 @@ impl App {
         self.refresh_profiles();
         let mut named = Vec::new();
         let mut labelled = Vec::new();
-        let blocks = crate::blocks::list::blocks_a_line_can_call(&self.doc, self.active_part, &self.profiles);
+        let blocks = crate::blocks::list::blocks_a_line_can_call(&self.doc, self.active_part, &self.curve_ui.profiles);
         for id in blocks {
             match self.body_name(id) {
                 Some(n) if n.eq_ignore_ascii_case(&wanted) => named.push(RowCalled::Block(id)),
@@ -3277,7 +3288,7 @@ impl App {
         if let Some(id) = self.curve_named(&wanted) {
             named.push(RowCalled::Curve(id));
         }
-        for key in self.profiles.keys() {
+        for key in self.curve_ui.profiles.keys() {
             match self.doc.profile_names.get(&key) {
                 Some(n) if n.eq_ignore_ascii_case(&wanted) => named.push(RowCalled::Profile(key)),
                 Some(_) => {}
@@ -3334,7 +3345,7 @@ impl App {
             RowCalled::Profile(key) => self.rename_profile(key, &to),
             RowCalled::Parameter(id) => match self.doc.rename_parameter(id, &to) {
                 Ok(()) => {
-                    self.name_drafts.remove(&id);
+                    self.notebook.name_drafts.remove(&id);
                     self.mark_changed();
                 }
                 Err(why) => self.warn(why.to_string()),
@@ -3358,7 +3369,7 @@ impl App {
             RowKey::Curve(id) => self.doc.curve(id).map(|c| c.name.clone()).unwrap_or_default(),
             _ => String::new(),
         };
-        self.renaming = Some((key, current));
+        self.notebook.renaming = Some((key, current));
     }
 
     /// The eye, on every block's row: a body's, a plane's or a point's, and a block's that
@@ -3545,11 +3556,31 @@ impl App {
                 ui.close();
             }
         }
+        // **Out of the block that reads it, the curve kept.** A curve drawn inside a pipe or a
+        // sweep had Delete -- refused, "delete that first" -- and nothing else, so it was stuck
+        // there. This is the same edit as Clear on the block's own row, offered on the curve's
+        // row because that is the row in hand when the wish is "not this curve".
+        if let Row::Curve { id, .. } = row {
+            let holders = self.built_from(id);
+            if !holders.is_empty()
+                && ui
+                    .button(format!("Take out of {}", holders.join(" and ")))
+                    .on_hover_text(
+                        "The block lets go of this curve and waits to be told which to build \
+                         from instead; it is not drawn until then. The curve stays, a row of \
+                         its own again.",
+                    )
+                    .clicked()
+            {
+                self.release_curve(id);
+                ui.close();
+            }
+        }
         let (what, elsewhere) = match row {
             Row::Node { id, .. } => (Declarable::Block(id), None),
             Row::Curve { id, readers } => (
                 Declarable::Curve(id),
-                curve_v_elsewhere(&self.profiles, id, readers),
+                curve_v_elsewhere(&self.curve_ui.profiles, id, readers),
             ),
         };
         let is_variable = self.doc.ownership(what.block()) == Ownership::Variable;
@@ -3564,6 +3595,19 @@ impl App {
 
         ui.separator();
 
+        // Every block's row, a body's and an ingredient's alike: a lock is about the block, not
+        // about whether it draws.
+        if let Row::Node { id, .. } = row {
+            let locked = self.doc.is_locked(id);
+            if ui
+                .button(if locked { "Unlock" } else { "Lock" })
+                .on_hover_text("A locked block cannot be deleted or used in another block.")
+                .clicked()
+            {
+                self.set_locked(id, !locked);
+                ui.close();
+            }
+        }
         // The same toggle the eye on the row runs. Offered here as well because the eye is 18
         // pixels wide and this is the menu you are already in.
         match row {
@@ -3578,15 +3622,15 @@ impl App {
                 }
             }
             Row::Curve { id, .. } => {
-                let showing = !self.hidden_curves.contains(&id);
+                let showing = !self.curve_ui.hidden.contains(&id);
                 if ui
                     .button(if showing { "Hide\tH" } else { "Show\tH" })
                     .clicked()
                 {
                     if showing {
-                        self.hidden_curves.insert(id);
+                        self.curve_ui.hidden.insert(id);
                     } else {
-                        self.hidden_curves.remove(&id);
+                        self.curve_ui.hidden.remove(&id);
                     }
                     ui.close();
                 }

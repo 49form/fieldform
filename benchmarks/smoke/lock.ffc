@@ -1,0 +1,37 @@
+# A locked block cannot be deleted and cannot be taken by a block that does not already read it.
+# What read it before goes on reading it, its own numbers still change, and unlocking gives both
+# back.
+#
+# Run from the repository root, after a build, so target/ is there to save into:
+#   fieldform --run benchmarks/smoke/lock.ffc --keep-going --exit
+# Every refusal here is deliberate, which is why the run keeps going past them. Exit code 0 when
+# every expect passed; the refusals themselves are read in the console log.
+
+new
+sphere radius=10 centre=20,0,0 'ball'
+cube size=40,40,40 centre=0,0,0 'box'
+cube size=10,10,10 centre=60,0,0 'far'
+boolean -u in=ball,box 'joined'
+lock target=ball
+
+# Refused, each by name: the delete, and three ways of taking it.
+delete target=ball
+boolean -u in=ball,far 'second'
+offset target=ball distance=2 'grown'
+move target=ball by=5,0,0
+
+# The union that read it before the lock still does, and nothing above was half done.
+expect target=joined volume=66094.40 tol=0.5%
+expect target=far volume=1000 tol=0.5%
+
+# A locked union keeps its place when asked to go, and goes once unlocked.
+lock target=joined
+delete target=joined
+expect target=joined volume=66094.40 tol=0.5%
+
+unlock target=ball
+boolean -u in=ball,far 'second'
+expect target=second volume=5188.79 tol=0.5%
+unlock target=joined
+delete target=joined
+saveas file=target/lock-smoke.fform

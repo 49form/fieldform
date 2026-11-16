@@ -87,12 +87,12 @@ impl App {
         let id = graph.add(node);
         self.set_part_graph(graph);
         self.select_body(Some(id));
-        self.boolean_b = Some(id);
-        if self.boolean_a.is_none() || self.boolean_a == Some(id) {
-            self.boolean_a = self.doc.listed_bodies(self.part_graph()).into_iter().find(|b| *b != id);
+        self.next.boolean_b = Some(id);
+        if self.next.boolean_a.is_none() || self.next.boolean_a == Some(id) {
+            self.next.boolean_a = self.doc.listed_bodies(self.part_graph()).into_iter().find(|b| *b != id);
         }
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         self.say("Added a written field: edit its text in the panel, and Verify measures what it claims");
     }
@@ -124,7 +124,7 @@ impl App {
         // The text: typed into a draft, committed on Enter, the document unchanged until the
         // text is accepted (§9). The draft is the application's; the node holds the last
         // accepted text.
-        let draft = self.written_drafts.entry(id).or_insert_with(|| text.source().to_string());
+        let draft = self.written.drafts.entry(id).or_insert_with(|| text.source().to_string());
         let mut commit = false;
         ui.horizontal(|ui| {
             row_label(ui, "Text:");
@@ -132,7 +132,7 @@ impl App {
             if response.has_focus()
                 && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(t) if looks_like_radians(t))))
             {
-                self.written_notices.insert(
+                self.written.notices.insert(
                     id,
                     "That paste carries a number near π: angles here are in degrees, so a radian formula draws the wrong shape.".to_string(),
                 );
@@ -141,31 +141,31 @@ impl App {
                 commit = true;
             }
         });
-        if let Some(notice) = self.written_notices.get(&id).cloned() {
+        if let Some(notice) = self.written.notices.get(&id).cloned() {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(notice).small().color(ui.visuals().warn_fg_color));
                 if ui.small_button("Dismiss").clicked() {
-                    self.written_notices.remove(&id);
+                    self.written.notices.remove(&id);
                 }
             });
         }
-        if let Some(error) = self.written_errors.get(&id).cloned() {
+        if let Some(error) = self.written.errors.get(&id).cloned() {
             // The caret where the parser stopped, under the text as the Number block shows it.
             let caret = format!("{}^", " ".repeat(error.0));
             ui.label(egui::RichText::new(caret).monospace().small().color(ui.visuals().error_fg_color));
             ui.label(egui::RichText::new(&error.1).small().color(ui.visuals().error_fg_color));
         }
-        let draft_now = self.written_drafts.get(&id).cloned().unwrap_or_default();
+        let draft_now = self.written.drafts.get(&id).cloned().unwrap_or_default();
         let mut new_text = text.clone();
         if commit && draft_now != text.source() {
             match Written::parse(&draft_now, &|name| self.doc.parameter_named(name)) {
                 Ok(parsed) => {
-                    self.written_errors.remove(&id);
-                    self.written_verdicts.remove(&id);
+                    self.written.errors.remove(&id);
+                    self.written.verdicts.remove(&id);
                     new_text = parsed;
                 }
                 Err(e) => {
-                    self.written_errors.insert(id, (e.offset, e.message.clone()));
+                    self.written.errors.insert(id, (e.offset, e.message.clone()));
                 }
             }
         }
@@ -205,7 +205,7 @@ impl App {
                 Node::Expression { text: new_text, frame: new_frame, size: new_size, divisor: new_divisor, claim: new_claim },
             );
             if new_size != size || new_divisor != divisor || new_claim != claim {
-                self.written_verdicts.remove(&id);
+                self.written.verdicts.remove(&id);
             }
         }
 
@@ -214,7 +214,7 @@ impl App {
             if ui.button("Verify").on_hover_text("Samples the region and measures what the field claims: whether it ever overstates the distance, how far its gradient is from unit, and where the text has no value.").clicked() {
                 self.verify_written(id);
             }
-            match self.written_verdicts.get(&id) {
+            match self.written.verdicts.get(&id) {
                 None => {
                     ui.label(egui::RichText::new("Unverified").small().weak());
                 }
@@ -233,7 +233,7 @@ impl App {
                 }
             }
         });
-        if let Some(v) = self.written_verdicts.get(&id)
+        if let Some(v) = self.written.verdicts.get(&id)
             && let Some(k) = v.suggested
         {
             let now = self.resolve(divisor.clone());
@@ -288,7 +288,7 @@ impl App {
         // `k`, so the rate it reaches times `k` is what `k` should have been.
         let suggested = (overstatement > 1e-9 || deviation > 0.02).then(|| k_now * (1.0 + deviation));
         let when = image_export::now_tokens();
-        self.written_verdicts.insert(
+        self.written.verdicts.insert(
             id,
             WrittenVerdict { overstatement, deviation, missing, probes: probes.len(), suggested, when: format!("{} {}", when.0, when.1) },
         );

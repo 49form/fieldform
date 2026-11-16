@@ -1,7 +1,7 @@
 # Testing against real CAD
 
-Three machined parts, rebuilt in fieldform from their engineering drawings and measured against
-the manufacturer's own STEP model. The parts come from the U.S. National Institute of Standards
+Four parts, rebuilt in fieldform from their engineering drawings and measured against the
+manufacturer's own STEP model. The parts come from the U.S. National Institute of Standards
 and Technology (NIST), which publishes them with drawings for exactly this kind of test. They are
 public domain, and are fetched from NIST rather than kept here.
 
@@ -13,6 +13,7 @@ field model built the way a person would build it lands on a real part.
 | **FTC-07**, an enclosure, 311 × 223 × 136 mm | Drafted walls, filleted corners, pockets, bosses, counterbores, ports | 172 |
 | **D2MI 905**, a shouldered spacer, 25 mm long | Turned geometry, a small fillet, a bore and a drilled hole with a 118° point | 8 |
 | **D2MI 906**, a heatsink top, 103 × 70 mm | Chamfered plate, filleted standoffs, pads, fins with a lead-in, round-topped pins, counterbored drill points | 75 |
+| **AM test artifact**, 141 × 141 × 17 mm, a 100 mm square turned 45° | Pins and holes on two axes, staircases up and down, a 1-in-25 ramp, concentric bosses, side holes in six shapes, and fine features down to 0.25 mm | 85 |
 
 ## Running it
 
@@ -22,7 +23,8 @@ cargo build -p fieldform-app
 cargo build -p fieldform-import
 ```
 
-`fetch.py` downloads two archives from NIST (14 MB together) and keeps six files in `models/`, each
+`fetch.py` downloads three archives and one drawing from NIST (14 MB together) and keeps eight files
+in `models/`, each
 checked against the SHA-256 the results below were measured on. It refuses a file that differs,
 because a comparison against a later revision is not this comparison.
 
@@ -43,6 +45,10 @@ cargo run -p fieldform-io --example compare_to_step -- benchmarks/reference-cad/
 | FTC-07 | `x,-z,y` | `1.0` | `0.76` |
 | D2MI 905 | `x,y,z` | `0.1` | `0.019` |
 | D2MI 906 | `x,y,z` | `0.25` | `0.203` |
+| AM test artifact | `x,y,z` | `0.1` | `0.1` |
+
+The AM artifact's file name has spaces, so quote it:
+`"benchmarks/reference-cad/models/NIST Test Artifact_ver3b.step"`.
 
 `map` says where NIST's axes went: FTC-07 is modelled Z-up, and NIST's file is Y-up. `tolerance` is
 the drawing's own limit, explained per part below. The comparison reads NIST's surface through the
@@ -111,6 +117,26 @@ gives a mean thickness, 0.0017 mm here, which can be held to the 0.02 mm deflect
 The worst places are the four round pin tops, inside NIST's 0.02 mm deflection. The drawing leaves
 the pin diameter, the pad depths and the drill points to the model, so those were read from the
 STEP file.
+
+### AM test artifact, 2026-11-12
+
+NIST's additive manufacturing test artifact (Moylan et al.), rebuilt in 85 console lines in the
+frame NIST's assembly places it: datum A, the top of the base, at z = 0. The drawing gives the
+features and their relationships but writes every tolerance as `xx`, so the limit is the proposed
+0.1 mm. It also leaves the base, the step plan, the pin diameters (`d1`, `d2`) and the positions of
+the side holes and fine features to the model, and those were read from the STEP file.
+
+| Limit | Result | Verdict |
+|---|---|---|
+| Drawing | None given: every tolerance is `xx` | Not applicable |
+| Worst point, 0.1 mm | 0.0095 mm | Pass |
+| 99% of points, 0.05 mm | 0.006 mm | Pass |
+| Solid that differs, 0.1% | 0.005% | Pass |
+
+The worst places are on the dia 20 and dia 15 bosses, inside NIST's 0.02 mm deflection. The fine
+features down to 0.25 mm wide, the six shapes of side hole and the ramp all land within it.
+`expect volume` reads 100,990.2 mm³ against 100,987.06 worked by hand (0.003%), and NIST's own
+mesh holds 100,986.
 
 ## What the tests found
 

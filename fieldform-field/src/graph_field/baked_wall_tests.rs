@@ -21,7 +21,7 @@
 
     fn thin(curve: CurveId, thickness: f64, side: WallSide, height: f64) -> Node {
         Node::Extrude { rims: Default::default(),
-            outline: Outline::Wall { curve, thickness: lit(thickness), side, ends: WallEnds::Square },
+            outline: Outline::Wall { curve: curve.into(), thickness: lit(thickness), side, ends: WallEnds::Square },
             sweep: Sweep::Normal,
             height: lit(height),
             start: lit(0.0),

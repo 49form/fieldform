@@ -105,6 +105,41 @@ fn bake_is_obsolete(
     pending.iter().any(|key| !identities.contains(&shape_of(key)))
 }
 
+/// The cells of the band a settled bake is preceded by, when one is worth making.
+///
+/// **Half the cells, so an eighth of the samples.** A settled band takes seconds a body and the
+/// draft it replaces is 32 cells, which is right for a drag and wrong to look at for long: a
+/// member thinner than a cell is not in it. Half-way costs an eighth as much again and holds
+/// anything two settled cells across, so it is what a scene looks like while the rest is made.
+/// Measured on a chair of five cages at 192 cells (`cage_bake_cost`): 25 s for the settled
+/// bands, 3 s for the ones at 96.
+///
+/// `None` where half would be no finer than the draft: the Fast rung settles at 64 cells and
+/// goes straight there.
+fn stand_in_cells(settled: usize) -> Option<usize> {
+    let half = settled / 2;
+    (half >= 2 * DRAFT_BAKE_RESOLUTION).then_some(half)
+}
+
+/// The bands still owed in each stage once `arrived` more have come in, and whether those
+/// finished a stage -- which is when the view is worth drawing again.
+fn stages_after(stages: &[usize], arrived: usize) -> (Vec<usize>, bool) {
+    let mut owed = stages.to_vec();
+    let mut left = arrived;
+    let mut finished = false;
+    while left > 0 {
+        let Some(first) = owed.first_mut() else { break };
+        let taken = left.min(*first);
+        *first -= taken;
+        left -= taken;
+        if *first == 0 {
+            owed.remove(0);
+            finished = true;
+        }
+    }
+    (owed, finished)
+}
+
 /// Which device made the GPU resources a view is holding, as far as a frame can tell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MadeOn {
@@ -249,6 +284,37 @@ struct Marching {
     value_scale: Option<f64>,
 }
 
+/// Every shader-compile worker that may still be running, so closing can wait for them.
+///
+/// **A worker outliving the window crashed the process.** The threads were detached, and a
+/// superseded or abandoned compile was simply forgotten, still holding the device. Closing tore
+/// the driver down underneath it: the NIST AM artifact's script, run with `--exit`, segfaulted in
+/// `create_pipeline_layout` every time, exiting 139 rather than its count of failures. A worker
+/// cannot be cancelled mid-call into the driver, so the only safe end is to let it finish.
+static SHADER_WORKERS: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> = std::sync::Mutex::new(Vec::new());
+
+/// Keeps a worker's handle until closing joins it, dropping the handles of those already done.
+fn keep_shader_worker(worker: std::thread::JoinHandle<()>) {
+    let mut workers = SHADER_WORKERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    workers.retain(|w| !w.is_finished());
+    workers.push(worker);
+}
+
+/// Waits for every shader-compile worker still running. Called on the way out, before the GPU
+/// device and the driver go; a compile can take seconds, and closing waits that long rather than
+/// crash.
+pub fn join_shader_workers() {
+    let workers = std::mem::take(&mut *SHADER_WORKERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    let running = workers.iter().filter(|w| !w.is_finished()).count();
+    if running > 0 {
+        log::info!("waiting for {running} shader compile(s) to finish before closing");
+    }
+    for worker in workers {
+        // A worker that panicked has nothing left to tear down; its panic was already reported.
+        let _ = worker.join();
+    }
+}
+
 /// A shader being compiled elsewhere, and what it is for.
 struct Compiling {
     /// Which rebuild asked for it. Installed only if that is still the newest.
@@ -305,6 +371,9 @@ struct Baking {
     arrivals: std::sync::mpsc::Receiver<(BakeKey, std::sync::Arc<fieldform_gpu::BakedField>)>,
     /// How many are still to come, so the caller can say what is happening.
     outstanding: usize,
+    /// How many are still to come in each stage, the one being made first: every body's
+    /// half-way band, then every body's settled one. The view is drawn again as each empties.
+    stages: Vec<usize>,
 }
 
 /// Everything a baked narrow band depends on, so one can be reused when none of it changed.
@@ -2029,24 +2098,25 @@ impl TracedView {
         }
         let outstanding = baking.outstanding.saturating_sub(arrived.len());
         let settled = !arrived.is_empty();
+        let (stages, stage_done) = stages_after(&baking.stages, arrived.len());
         let mut pending = baking.pending.clone();
         for (key, band) in arrived {
             pending.retain(|k| *k != key);
             self.bakes.insert(key, band);
         }
         if !done && outstanding > 0 {
-            self.baking = Some(Baking { outstanding, pending, ..baking });
+            self.baking = Some(Baking { outstanding, pending, stages, ..baking });
         }
-        // **Drawn with once they are all in.** A rebuild re-uploads every band the shader binds,
-        // so asking for one per arrival costs an assembly's whole atlas per body — ten bodies at
-        // 128 cells is some three gigabytes of texture traffic to show the same picture ten
-        // times. They arrive in seconds of each other and the last one is what makes the view
-        // settled, so the rebuild waits for it.
-        let all_in = settled && self.baking.is_none();
-        if all_in {
+        // **Drawn with once a stage is all in, not a band at a time.** A rebuild re-uploads
+        // every band the shader binds, so asking for one per arrival costs an assembly's whole
+        // atlas per body — ten bodies at 128 cells is some three gigabytes of texture traffic to
+        // show the same picture ten times. So the view is drawn again twice: when every body
+        // has its half-way band, which is seconds in, and when every body has its settled one.
+        let drawn_again = settled && (stage_done || self.baking.is_none());
+        if drawn_again {
             self.stale = Some(Quality::Final);
         }
-        all_in
+        drawn_again
     }
 
     /// Whether the shader and bake need rebuilding before the next draw.

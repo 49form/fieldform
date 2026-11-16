@@ -3,6 +3,7 @@
 //! Bringing other formats in: the OBJ, STEP and IGES readers, and the rows an import leaves.
 
 use crate::*;
+use crate::file_picker::Ask;
 
 impl App {
     /// Adds an import's solids as bodies of the active part, **in the file's own order**.
@@ -195,7 +196,7 @@ impl App {
                             .clicked()
                         {
                             if let Some(path) = known {
-                                self.step_options = options;
+                                self.importing.step_options = options;
                                 self.import_step_into(&path, Some(source));
                             }
                         }
@@ -237,7 +238,7 @@ impl App {
             .unwrap_or_else(|| "Imported".to_string());
         let settings = match ImportFormat::of(path) {
             Some(ImportFormat::Obj) => fieldform_scene::ImportSettings::Obj {
-                unit_mm: self.obj_import_unit.in_millimetres(),
+                unit_mm: self.importing.obj_unit.in_millimetres(),
             },
             Some(ImportFormat::Iges) => fieldform_scene::ImportSettings::Iges,
             _ => fieldform_scene::ImportSettings::None,
@@ -281,13 +282,14 @@ impl App {
         {
             dialog = dialog.set_directory(dir);
         }
-        let Some(path) = dialog.pick_file() else { return };
-        // The settings the block carries, so a reload repeats how the file was read rather than
-        // however the import dialog happens to be set now.
-        if let fieldform_scene::ImportSettings::Step(options) = record.settings {
-            self.step_options = options;
-        }
-        self.import_step_into(&path, Some(source));
+        self.ask_for_path(dialog, Ask::Open, move |app, path| {
+            // The settings the block carries, so a reload repeats how the file was read rather
+            // than however the import dialog happens to be set now.
+            if let fieldform_scene::ImportSettings::Step(options) = record.settings {
+                app.importing.step_options = options;
+            }
+            app.import_step_into(&path, Some(source));
+        });
     }
 
     /// The B-rep edges of every import currently being shown as original CAD, placed.
@@ -343,17 +345,20 @@ impl App {
         if !self.may_open_a_dialog("import", "import file=<path>") {
             return;
         }
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Geometry", &["stp", "step", "obj", "igs", "iges"])
-            .add_filter("STEP", &["stp", "step"])
-            .add_filter("Wavefront OBJ", &["obj"])
-            .add_filter("IGES", &["igs", "iges"])
-            .pick_file()
-        else {
-            return; // user cancelled
-        };
+        // Both cases of every extension: a Linux file chooser matches a filter exactly, and
+        // other CAD software writes `PART.STP` as readily as `part.stp`.
+        let dialog = rfd::FileDialog::new()
+            .add_filter("Geometry", &["stp", "step", "obj", "igs", "iges", "STP", "STEP", "OBJ", "IGS", "IGES"])
+            .add_filter("STEP", &["stp", "step", "STP", "STEP"])
+            .add_filter("Wavefront OBJ", &["obj", "OBJ"])
+            .add_filter("IGES", &["igs", "iges", "IGS", "IGES"]);
+        self.ask_for_path(dialog, Ask::Open, |app, path| app.import_picked(path));
+    }
+
+    /// Carries on from File › Import's picker: the options for a format that has them.
+    fn import_picked(&mut self, path: std::path::PathBuf) {
         match ImportFormat::of(&path) {
-            Some(format) => self.import_prompt = Some(ImportPrompt { path, format }),
+            Some(format) => self.importing.prompt = Some(ImportPrompt { path, format }),
             None => {
                 let what = path.extension().map(|e| e.to_string_lossy().to_string());
                 self.say(match what {
@@ -372,7 +377,7 @@ impl App {
     /// no opinion about how finely to facet it or how hard to try to close it. Anything a file
     /// does state is read from it and is not offered.
     pub(crate) fn import_options_window(&mut self, ctx: &egui::Context) {
-        let Some(prompt) = &self.import_prompt else { return };
+        let Some(prompt) = &self.importing.prompt else { return };
         let (path, format) = (prompt.path.clone(), prompt.format);
         let mut go = false;
         let mut cancel = false;
@@ -385,7 +390,7 @@ impl App {
                 ui.label(egui::RichText::new(file_name(&path)).strong());
                 ui.separator();
                 match format {
-                    ImportFormat::Step => step_option_controls(ui, &mut self.step_options),
+                    ImportFormat::Step => step_option_controls(ui, &mut self.importing.step_options),
                     ImportFormat::Obj => {
                         ui.horizontal(|ui| {
                             ui.label("Unit:");
@@ -396,7 +401,7 @@ impl App {
                                 LengthUnit::Inch,
                             ] {
                                 ui.selectable_value(
-                                    &mut self.obj_import_unit,
+                                    &mut self.importing.obj_unit,
                                     unit,
                                     unit.abbreviation(),
                                 );
@@ -418,11 +423,11 @@ impl App {
                         ui.horizontal(|ui| {
                             for (reading, label, hover) in ObjReading::ALL {
                                 if ui
-                                    .selectable_label(self.obj_as == reading, label)
+                                    .selectable_label(self.importing.obj_as == reading, label)
                                     .on_hover_text(hover)
                                     .clicked()
                                 {
-                                    self.obj_as = reading;
+                                    self.importing.obj_as = reading;
                                 }
                             }
                         });
@@ -445,7 +450,7 @@ impl App {
             });
 
         if go || cancel {
-            self.import_prompt = None;
+            self.importing.prompt = None;
         }
         if go {
             match format {
@@ -463,13 +468,8 @@ impl App {
         if !self.may_open_a_dialog("importobj", "import file=<path>") {
             return;
         }
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Wavefront OBJ", &["obj"])
-            .pick_file()
-        else {
-            return; // user cancelled
-        };
-        self.import_obj_from(&path);
+        let dialog = rfd::FileDialog::new().add_filter("Wavefront OBJ", &["obj", "OBJ"]);
+        self.ask_for_path(dialog, Ask::Open, |app, path| app.import_obj_from(&path));
     }
 
     /// Imports an OBJ as bodies, beside whatever else the document holds.
@@ -487,12 +487,12 @@ impl App {
     /// Reading one *as a cage* is still possible and is now an explicit choice in the import
     /// options, where the fact that it replaces the document is stated rather than discovered.
     pub(crate) fn import_obj_from(&mut self, path: &std::path::Path) {
-        match self.obj_as {
+        match self.importing.obj_as {
             ObjReading::Cage => return self.import_obj_as_cage(path),
             ObjReading::Surface => return self.import_obj_as_surface(path),
             ObjReading::Model => {}
         }
-        let meshes = match fieldform_io::import_meshes_in(path, self.obj_import_unit) {
+        let meshes = match fieldform_io::import_meshes_in(path, self.importing.obj_unit) {
             Ok(meshes) if !meshes.is_empty() => meshes,
             Ok(_) => {
                 self.say("that OBJ has no geometry in it");
@@ -525,7 +525,7 @@ impl App {
                 // what one unit meant is a reading rather than a fact, and it is the reading a
                 // re-import has to repeat.
                 settings: fieldform_scene::ImportSettings::Obj {
-                    unit_mm: self.obj_import_unit.in_millimetres(),
+                    unit_mm: self.importing.obj_unit.in_millimetres(),
                 },
                 cages: Vec::new(),
                 surfaces: Vec::new(),
@@ -536,7 +536,7 @@ impl App {
         let first = self.add_imported_bodies(meshes, source);
         self.select_body(first);
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         if let Some((center, radius)) = self.scene_bounds() {
             self.camera.frame(center, radius);
@@ -545,7 +545,7 @@ impl App {
         let bodies = if count == 1 { "body".to_owned() } else { format!("{count} bodies") };
         let mut said = format!(
             "Imported {name}: {bodies}, {triangles} triangles (as {})",
-            self.obj_import_unit.abbreviation(),
+            self.importing.obj_unit.abbreviation(),
         );
         // The unit cannot be read from the file, so the only way to know the right one was
         // chosen is to see the size it produced — 1.7 mm and 1679 mm are both plausible cubes.
@@ -580,7 +580,7 @@ impl App {
     /// reinforced and it can never be a cage — an open surface has no inside for a sign to
     /// refer to.
     fn import_obj_as_surface(&mut self, path: &std::path::Path) {
-        let surfaces = match fieldform_io::import_surfaces_in(path, self.obj_import_unit) {
+        let surfaces = match fieldform_io::import_surfaces_in(path, self.importing.obj_unit) {
             Ok(surfaces) if !surfaces.is_empty() => surfaces,
             Ok(_) => {
                 self.say("that OBJ has no objects in it");
@@ -629,7 +629,7 @@ impl App {
         self.say(format!(
             "{what}: {shape} (as {}). Add a lattice and set its tiling to Conformal to lay \
              cells over it.",
-            self.obj_import_unit.abbreviation(),
+            self.importing.obj_unit.abbreviation(),
         ));
     }
 
@@ -646,7 +646,7 @@ impl App {
     /// document by id and bakes it over its own box at its own subdivision depth, which is what
     /// the single-cage assumption had been standing in the way of.
     fn import_obj_as_cage(&mut self, path: &std::path::Path) {
-        let cages = match fieldform_io::import_cages_in(path, self.obj_import_unit) {
+        let cages = match fieldform_io::import_cages_in(path, self.importing.obj_unit) {
             Ok(cages) if !cages.is_empty() => cages,
             Ok(_) => {
                 self.say("that OBJ has no objects in it");
@@ -703,12 +703,12 @@ impl App {
         let mut said = if count == 1 {
             format!(
                 "Imported {name} as a cage: {faces} faces, {points} points (as {})",
-                self.obj_import_unit.abbreviation(),
+                self.importing.obj_unit.abbreviation(),
             )
         } else {
             format!(
                 "Imported {name}: {count} cages, {faces} faces, {points} points (as {})",
-                self.obj_import_unit.abbreviation(),
+                self.importing.obj_unit.abbreviation(),
             )
         };
         let (lo, hi) = cage_box(self.cage());
@@ -731,13 +731,8 @@ impl App {
         if !self.may_open_a_dialog("importstep", "import file=<path>") {
             return;
         }
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("STEP", &["stp", "step"])
-            .pick_file()
-        else {
-            return; // user cancelled
-        };
-        self.import_step_from(&path);
+        let dialog = rfd::FileDialog::new().add_filter("STEP", &["stp", "step", "STP", "STEP"]);
+        self.ask_for_path(dialog, Ask::Open, |app, path| app.import_step_from(&path));
     }
 
     /// Reads a STEP solid in as a body: a mesh in the document, and a node that references it.
@@ -755,7 +750,7 @@ impl App {
         path: &std::path::Path,
         replacing: Option<fieldform_scene::id::SourceId>,
     ) {
-        if self.pending_import.is_some() {
+        if self.importing.pending.is_some() {
             self.say("an import is already running");
             return;
         }
@@ -778,11 +773,11 @@ impl App {
         let child = std::process::Command::new(&worker)
             .arg(format!("in={}", path.display()))
             .arg(format!("out={}", output.display()))
-            .arg(format!("linear={}", self.step_options.linear_deflection_mm))
-            .arg(format!("angular={}", self.step_options.angular_deflection_deg))
-            .arg(format!("sew={}", self.step_options.sew_tolerance_mm))
-            .arg(format!("fix={}", self.step_options.shape_fix))
-            .arg(format!("parallel={}", self.step_options.parallel))
+            .arg(format!("linear={}", self.importing.step_options.linear_deflection_mm))
+            .arg(format!("angular={}", self.importing.step_options.angular_deflection_deg))
+            .arg(format!("sew={}", self.importing.step_options.sew_tolerance_mm))
+            .arg(format!("fix={}", self.importing.step_options.shape_fix))
+            .arg(format!("parallel={}", self.importing.step_options.parallel))
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn();
@@ -790,7 +785,7 @@ impl App {
         match child {
             Ok(child) => {
                 self.say(format!("importing {name}\u{2026}"));
-                self.pending_import = Some(PendingImport {
+                self.importing.pending = Some(PendingImport {
                     name,
                     path: path.to_path_buf(),
                     replacing,
@@ -808,7 +803,7 @@ impl App {
     /// Polled from `update` rather than waited on: the whole point is that the window keeps
     /// drawing, so this must never block. `try_wait` is what makes that true.
     pub(crate) fn poll_import(&mut self, ctx: &egui::Context) {
-        let Some(pending) = &mut self.pending_import else { return };
+        let Some(pending) = &mut self.importing.pending else { return };
 
         match pending.child.try_wait() {
             // Still going. Say how long, because a 30-second import with nothing on screen is
@@ -816,7 +811,7 @@ impl App {
             // a line a second would bury the history the console exists to keep.
             Ok(None) => {
                 let seconds = pending.started.elapsed().as_secs();
-                self.console_progress =
+                self.console.progress =
                     Some(format!("importing {}\u{2026} {seconds}s", pending.name));
                 // Without this the window only redraws on input, so the elapsed time would
                 // freeze and the application would look hung while working perfectly.
@@ -824,13 +819,13 @@ impl App {
                 return;
             }
             Ok(Some(status)) => {
-                self.console_progress = None;
-                let pending = self.pending_import.take().expect("checked above");
+                self.console.progress = None;
+                let pending = self.importing.pending.take().expect("checked above");
                 self.finish_import(pending, status);
             }
             Err(e) => {
-                self.console_progress = None;
-                let pending = self.pending_import.take().expect("checked above");
+                self.console.progress = None;
+                let pending = self.importing.pending.take().expect("checked above");
                 let _ = std::fs::remove_file(&pending.output);
                 self.say(format!("lost track of the importer: {e}"));
             }
@@ -973,10 +968,10 @@ impl App {
             if let Some(record) = self.doc.sources.get_mut(&source) {
                 record.name = pending.name.clone();
                 record.path = Some(pending.path.display().to_string());
-                record.settings = fieldform_scene::ImportSettings::Step(self.step_options);
+                record.settings = fieldform_scene::ImportSettings::Step(self.importing.step_options);
             }
             self.mark_changed();
-            self.view_mode = ViewMode::Field;
+            self.view.mode = ViewMode::Field;
             self.rebuild_render_resources();
 
             let mut said = format!("Reloaded {}: {replaced} replaced", pending.name);
@@ -1006,7 +1001,7 @@ impl App {
                 id: source,
                 name: pending.name.clone(),
                 path: Some(pending.path.display().to_string()),
-                settings: fieldform_scene::ImportSettings::Step(self.step_options),
+                settings: fieldform_scene::ImportSettings::Step(self.importing.step_options),
                 cages: Vec::new(),
                 surfaces: Vec::new(),
                 curves: Vec::new(),
@@ -1043,14 +1038,14 @@ impl App {
         // be a selection of nothing in particular.
         self.select_body(first);
         if let Some(node) = first {
-            self.boolean_b = Some(node);
-            if self.boolean_a.is_none() || self.boolean_a == Some(node) {
-                self.boolean_a =
+            self.next.boolean_b = Some(node);
+            if self.next.boolean_a.is_none() || self.next.boolean_a == Some(node) {
+                self.next.boolean_a =
                     self.doc.listed_bodies(self.part_graph()).into_iter().find(|b| *b != node);
             }
         }
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
 
         // Framed, for the reason the IGES path already gives: a 2000 mm import arriving into a
@@ -1088,13 +1083,8 @@ impl App {
         if !self.may_open_a_dialog("importiges", "import file=<path>") {
             return;
         }
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("IGES", &["igs", "iges"])
-            .pick_file()
-        else {
-            return; // user cancelled
-        };
-        self.import_iges_from(&path);
+        let dialog = rfd::FileDialog::new().add_filter("IGES", &["igs", "iges", "IGS", "IGES"]);
+        self.ask_for_path(dialog, Ask::Open, |app, path| app.import_iges_from(&path));
     }
 
     pub(crate) fn import_iges_from(&mut self, path: &std::path::Path) {
@@ -1131,10 +1121,10 @@ impl App {
                 // generator looks like it does not work when it is only being asked for
                 // something invisible.
                 if let Some(size) = self.selected_curve_size() {
-                    self.set_value(self.pipe_radius, tidy_mm(size * 0.025));
+                    self.set_value(self.next.pipe_radius, tidy_mm(size * 0.025));
                     // A fillet is a detail on a join, so it starts well under the pipe it
                     // fillets — for the same reason the pipe radius is derived at all.
-                    self.set_value(self.blend_radius, tidy_mm(size * 0.005));
+                    self.set_value(self.next.blend_radius, tidy_mm(size * 0.005));
                 }
 
                 self.say(summary);

@@ -118,6 +118,14 @@ pub struct NodeMeta {
     /// never stored. This adds to what is drawn, which is a question about a viewport.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shown: bool,
+    /// Whether the block is locked: it may not be deleted, and nothing that does not already
+    /// read it may start to.
+    ///
+    /// About what the block is *part of*, not about its own numbers: a locked block can still be
+    /// edited, shown and hidden, and whatever read it when it was locked goes on reading it. The
+    /// rule is [`Document::lock_broken_by`], asked of every graph edit.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 impl NodeMeta {
@@ -133,7 +141,7 @@ impl NodeMeta {
     /// dropped it, and clearing a shown variable's name dropped it at once
     /// (`block-ownership-spec.md` §1). A field added here belongs in this test too.
     pub fn is_empty(&self) -> bool {
-        self.name.is_none() && !self.hidden && !self.shown
+        self.name.is_none() && !self.hidden && !self.shown && !self.locked
     }
 
     /// Whether the block draws, as `flag` holds it.
@@ -151,6 +159,15 @@ impl NodeMeta {
             EyeFlag::Shown => self.shown = visible,
         }
     }
+}
+
+/// What an edit would do to a locked block ([`Document::lock_broken_by`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockBroken {
+    /// The locked block would no longer be in the graph.
+    Removed(NodeId),
+    /// `by` would start reading `locked`.
+    Taken { locked: NodeId, by: NodeId },
 }
 
 /// Which of a block's two stored flags its eye means: [`NodeMeta::hidden`] or
@@ -820,6 +837,47 @@ impl Document {
         let cage_id = doc.add_cage(cage);
         doc.add_part(Part::from_cage("Part", cage_id));
         doc
+    }
+
+    /// Whether block `id` is locked ([`NodeMeta::locked`]).
+    pub fn is_locked(&self, id: NodeId) -> bool {
+        self.node_meta.get(&id).is_some_and(|meta| meta.locked)
+    }
+
+    /// What an edit that turns the graph `before` into `after` would do to a locked block, if
+    /// anything: the first one found, in id order so the answer does not depend on a map's.
+    ///
+    /// **Asked of the two graphs rather than of each tool.** A block is taken by a boolean, a
+    /// blend, a pattern, a place that sits on it, a pasted copy's wiring and a typed line, and a
+    /// rule written into each of those is a rule the next one forgets. Every one of them ends as
+    /// a new graph, so the question is put there: a locked block that was in the graph must
+    /// still be in it, and the blocks reading it may be fewer but never one that was not reading
+    /// it before.
+    ///
+    /// Which covers the two ways round the plain reading as well. Deleting the only thing a
+    /// locked block reads takes the locked block with it, since a block left with no operand
+    /// cannot stand, and that is the lock deleted by another name. A block wrapped around a
+    /// locked one is a new reader however it was asked for.
+    pub fn lock_broken_by(&self, before: &Graph, after: &Graph) -> Option<LockBroken> {
+        let mut locked: Vec<NodeId> = self
+            .node_meta
+            .iter()
+            .filter(|(id, meta)| meta.locked && before.node(**id).is_some())
+            .map(|(id, _)| *id)
+            .collect();
+        locked.sort_by_key(|id| id.raw());
+        for id in locked {
+            if after.node(id).is_none() {
+                return Some(LockBroken::Removed(id));
+            }
+            let mut new_readers: Vec<NodeId> =
+                after.consumers_of(id).filter(|reader| before.node(*reader).is_none_or(|node| !node.reads(id))).collect();
+            new_readers.sort_by_key(|reader| reader.raw());
+            if let Some(by) = new_readers.first() {
+                return Some(LockBroken::Taken { locked: id, by: *by });
+            }
+        }
+        None
     }
 
     /// Whether block `id` draws, as `flag` holds it. A block with no entry has both flags at
@@ -1719,6 +1777,49 @@ impl Document {
 mod tests {
     use super::*;
 
+    /// A locked block survives every edit and gains no reader, and is otherwise left alone: its
+    /// numbers change, what already read it goes on reading it, and a reader may let go.
+    #[test]
+    fn a_locked_block_is_neither_removed_nor_taken_by_a_new_reader() {
+        use crate::{BooleanOp, Node, ParamRef, Place};
+        let lit = ParamRef::Literal;
+        let ball = |r: f64| Node::Sphere { centre: Place::At([lit(0.0); 3]), radius: lit(r) };
+        let mut doc = Document::new();
+        let mut before = Graph::empty();
+        let locked = before.add(ball(10.0));
+        let other = before.add(ball(5.0));
+        let third = before.add(ball(2.0));
+        let reader = before.add(Node::Boolean { op: BooleanOp::Union, inputs: vec![locked.into(), other.into()] });
+        doc.node_meta.entry(locked).or_default().locked = true;
+
+        assert_eq!(doc.lock_broken_by(&before, &before), None, "nothing changed");
+
+        let mut edited = before.clone();
+        *edited.node_mut(locked).unwrap() = ball(12.0);
+        assert_eq!(doc.lock_broken_by(&before, &edited), None, "its own numbers are not the lock's business");
+
+        let mut released = before.clone();
+        released.remove_cascading(reader);
+        assert_eq!(doc.lock_broken_by(&before, &released), None, "a reader may let go");
+
+        let mut taken = before.clone();
+        let second = taken.add(Node::Boolean { op: BooleanOp::Union, inputs: vec![locked.into(), third.into()] });
+        assert_eq!(doc.lock_broken_by(&before, &taken), Some(LockBroken::Taken { locked, by: second }));
+
+        let mut removed = before.clone();
+        removed.remove_cascading(locked);
+        assert_eq!(doc.lock_broken_by(&before, &removed), Some(LockBroken::Removed(locked)));
+    }
+
+    /// A lock is a reason to keep an entry, and is written only when set.
+    #[test]
+    fn a_lock_alone_keeps_its_entry_and_an_unlocked_block_writes_nothing() {
+        let locked = NodeMeta { locked: true, ..NodeMeta::default() };
+        assert!(!locked.is_empty());
+        assert!(serde_json::to_string(&locked).unwrap().contains("locked"));
+        assert!(!serde_json::to_string(&NodeMeta::default()).unwrap().contains("locked"));
+    }
+
     /// **A body and the blocks only it reads are next to each other in the list.**
     ///
     /// The property the branch walk exists for, and the one the walk it replaced did not have. That
@@ -2138,7 +2239,7 @@ mod tests {
         let mut doc = Document::new();
         let spine = a_line(&mut doc, "Spine");
         let pipe = |graph: &mut Graph| {
-            graph.add(crate::Node::Pipe { curve: spine, radius: ParamRef::Literal(1.0) })
+            graph.add(crate::Node::Pipe { curve: spine.into(), radius: ParamRef::Literal(1.0) })
         };
         let mut here = Graph::empty();
         let pipe_here = pipe(&mut here);

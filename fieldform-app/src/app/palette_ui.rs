@@ -29,21 +29,21 @@ impl App {
     pub(crate) fn open_palette(&mut self, only: Option<Vec<&'static str>>) {
         // The key that opened it is not the first letter of the search.
         self.egui_ctx.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(_))));
-        self.palette = Some(PaletteState { query: String::new(), highlight: 0, just_opened: true, only });
+        self.tools.palette = Some(PaletteState { query: String::new(), highlight: 0, just_opened: true, only });
         self.count_palette_opening();
     }
 
     /// Notes a command as run, for the palette's recency (§5.2).
     pub(crate) fn note_recent(&mut self, id: &'static str) {
-        self.recent.retain(|r| *r != id);
-        self.recent.insert(0, id);
-        self.recent.truncate(app::palette_ui::RECENT);
+        self.tools.recent.retain(|r| *r != id);
+        self.tools.recent.insert(0, id);
+        self.tools.recent.truncate(app::palette_ui::RECENT);
     }
 
     /// Draws the palette, if it is open, and runs what it is asked to.
     pub(crate) fn palette_ui(&mut self, ctx: &egui::Context) {
-        let Some(mut state) = self.palette.take() else { return };
-        let mut hits = palette::ranked(&state.query, &self.recent, &self.command_context());
+        let Some(mut state) = self.tools.palette.take() else { return };
+        let mut hits = palette::ranked(&state.query, &self.tools.recent, &self.command_context());
         if let Some(only) = &state.only {
             hits.retain(|h| only.contains(&h.command.id));
         }
@@ -158,7 +158,7 @@ impl App {
                 ctx.memory_mut(|m| m.surrender_focus(focused));
             }
         } else {
-            self.palette = Some(state);
+            self.tools.palette = Some(state);
         }
         if let Some(line) = passthrough {
             // The palette and the console are one input path (§5.5).

@@ -179,7 +179,7 @@ fn cases() -> Vec<(&'static str, Build)> {
                     .expect("a cubic"),
                 );
                 let mut g = Graph::empty();
-                g.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine, section: Default::default(), law: Default::default() });
+                g.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine: spine.into(), section: Default::default(), law: Default::default() });
                 (doc, g)
             }),
         ),

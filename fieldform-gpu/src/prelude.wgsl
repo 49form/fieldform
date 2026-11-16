@@ -3927,7 +3927,21 @@ fn nearer(hit: SegmentHit, best: SegmentHit) -> bool {
 // different arithmetic, and a node that is exactly as near as the best segment must still be
 // opened for the tie rule above to see what is in it.
 fn nearest_segment(span: CurveSpan, p: vec3<f32>) -> SegmentHit {
-    var best = SegmentHit(0u, 0.0, curve_points[span.start].xyz, 1e30);
+    return nearest_segment_within(span, p, 1e30);
+}
+
+// The same search, for a caller that only cares about a segment nearer than `cap`, a squared
+// distance: the answer's `d2` is `cap` itself when there is none, and otherwise everything is
+// as the search above finds it -- the same segment, by the same tie rule.
+//
+// **What lets a run of pipes leave most of its members unwalked.** The walk already rules a
+// stretch of curve out once its box is no nearer than the best segment found; started from
+// what the *caller* needs rather than from nothing, it rules out a whole spine at its root and
+// most of any other on the way down. A run asks for a member only as near as could still
+// change its answer, so the cap is usually small and the walk short. `1e30` is the search
+// with no cap, which is what every other caller asks for and what it always did.
+fn nearest_segment_within(span: CurveSpan, p: vec3<f32>, cap: f32) -> SegmentHit {
+    var best = SegmentHit(0u, 0.0, curve_points[span.start].xyz, cap);
     if span.count < 2u {
         return best;
     }
@@ -3950,6 +3964,12 @@ fn nearest_segment(span: CurveSpan, p: vec3<f32>) -> SegmentHit {
     // a node's first child is the node after it, and its second is the node after the first
     // child's subtree, which the first child's `w` already names. The greedy leaf's segments
     // are met again by the walk, where the tie rule leaves them as they are.
+    // Nothing of this spine is as near as the caller cares about: its whole box is further.
+    // With the slack the walk below carries, and for its reason.
+    let whole = max(box_distance(p, curve_points[span.bvh_start].xyz, curve_points[span.bvh_start + 1u].xyz), 0.0);
+    if whole * whole > cap * (1.0 + 1e-6) {
+        return best;
+    }
     var g = 0u;
     loop {
         let ghi = curve_points[span.bvh_start + 2u * g + 1u];
@@ -5711,9 +5731,147 @@ fn pipe_normal(index: u32, p: vec3<f32>) -> vec3<f32> {
 fn pipe_run_distance(first: u32, radius_slot: u32, count: u32, p: vec3<f32>) -> f32 {
     var best = 1e30;
     for (var k = 0u; k < count; k = k + 1u) {
-        best = min(best, pipe_distance(first + k, p, params[radius_slot + k]));
+        best = min(best, pipe_member_within(first + k, p, params[radius_slot + k], 0.0, false, best));
     }
     return best;
+}
+
+// How far `p` stands from a spine, or `1e30` if that is further than `reach` -- further than
+// could matter to whoever asks. The expression `pipe_distance` takes its radius from, so a
+// member a run does walk reads the bits a call of its own would.
+//
+// **What a run's members are ruled out by.** A run gave up the per-operand masks a written-out
+// join has (`looped_run` says why), so every member was walked at every reading however far
+// off it stood: forty spine walks a reading for a mirrored frame of twenty bones, of which two
+// or three could change the answer. The reach goes down into the spine's own tree
+// (`nearest_segment_within`), so a far spine costs one box and a near one only the stretch
+// that is near. Stretched by a millionth, as the tree's pruning is and for its reason: the
+// caller decides by its own arithmetic, and a member exactly at the reach must still be read.
+fn spine_distance_within(index: u32, p: vec3<f32>, reach: f32) -> f32 {
+    let span = curve_spans[index];
+    if span.count == 0u {
+        return 1e30;
+    }
+    if span.count == 1u {
+        return distance(p, curve_points[span.start].xyz);
+    }
+    if (reach <= 0.0) {
+        return 1e30;
+    }
+    // Squared below, so held where its square is still a number: `1e30` is the search's own
+    // "no cap".
+    let within = min(reach * (1.0 + 1e-6), 1e15);
+    let hit = nearest_segment_within(span, p, within * within);
+    if (hit.d2 >= within * within) {
+        return 1e30;
+    }
+    return distance(p, hit.q);
+}
+
+// One member of a run of pipes, or `1e30` where it reads no less than `limit` -- the value past
+// which it cannot change what the run is making. Its radius is given either way: a number in
+// its slot, or `amount` -- the ramp every member shares, read once at `p` by the caller -- with
+// the slot holding the member's divisor. The second is `Node::Pipe`'s driven arm to the letter,
+// `(pipe_distance(c, p, 0.0) - amount) / divisor`, and both take one walk of the spine.
+//
+// The limit is turned into how near the *spine* would have to be: a plain pipe reads `d - r`,
+// so `limit + r`; a driven one reads `(d - amount) / divisor`, so `limit * divisor + amount`.
+fn pipe_member_within(
+    index: u32, p: vec3<f32>, slot: f32, amount: f32, driven: bool, limit: f32,
+) -> f32 {
+    if (driven) {
+        let d = spine_distance_within(index, p, limit * slot + amount);
+        if (d >= 1e29) {
+            return 1e30;
+        }
+        return (d - amount) / slot;
+    }
+    let d = spine_distance_within(index, p, limit + slot);
+    if (d >= 1e29) {
+        return 1e30;
+    }
+    return d - slot;
+}
+
+// **A run of pipes one ramp drives, walked rather than written out.** A driven radius is the
+// offset expression rather than a number, so it used to end a run where it stood; but twenty
+// bones tapered by one ramp differ in exactly what twenty plain ones do -- a spine and a slot
+// -- once the ramp is read outside the loop. The slot is the member's divisor here.
+fn driven_pipe_run_distance(first: u32, slot: u32, count: u32, p: vec3<f32>, amount: f32) -> f32 {
+    var best = 1e30;
+    for (var k = 0u; k < count; k = k + 1u) {
+        best = min(best, pipe_member_within(first + k, p, params[slot + k], amount, true, best));
+    }
+    return best;
+}
+
+fn driven_pipe_run_nearest(first: u32, slot: u32, count: u32, p: vec3<f32>, amount: f32) -> vec4<f32> {
+    var best = vec4<f32>(0.0, 0.0, 1.0, 1e30);
+    for (var k = 0u; k < count; k = k + 1u) {
+        let v = pipe_member_within(first + k, p, params[slot + k], amount, true, best.w);
+        if (v < best.w) {
+            best = vec4<f32>(pipe_normal(first + k, p), v);
+        }
+    }
+    return best;
+}
+
+// **A run of pipes one blend joins, walked rather than written out** -- the union run's fix for
+// the join a frame of bones is actually made with. A blend of a list is a chain, each operand
+// joining what the ones before it made, so the loop is that chain to the letter: `acc` is what
+// was made before the run (`1e30` for a run that starts the list, where the first member is
+// the chain's first operand), and each member joins it in list order.
+//
+// **A member more than the radius beyond what the chain has made is not walked**, and the
+// answer is the same bit for bit: `blend_bound` is the nearer operand itself once the other is
+// more than `k` beyond it (`a_blend_is_its_nearer_operand_once_the_other_is_a_radius_clear`
+// in fieldform-field holds that). Only at the exponents with a closed form, which are the ones
+// a fillet is offered: the divided fallback scales even a lone operand.
+fn pipe_blend_run(
+    first: u32, slot: u32, count: u32, p: vec3<f32>,
+    amount: f32, driven: bool, acc_in: f32, k: f32, n: f32,
+) -> f32 {
+    var acc = acc_in;
+    let prunes = has_closed_form(n) || k <= 0.0;
+    for (var i = 0u; i < count; i = i + 1u) {
+        let limit = select(1e30, acc + k, prunes);
+        let v = pipe_member_within(first + i, p, params[slot + i], amount, driven, limit);
+        if (v >= 1e29) {
+            continue;
+        }
+        // Nothing made yet: the member is the chain's first operand, itself -- said rather
+        // than left to `blend_bound`, whose divided fallback would scale it.
+        if (acc >= 1e29) {
+            acc = v;
+        } else {
+            acc = blend_bound(acc, v, k, n);
+        }
+    }
+    return acc;
+}
+
+// The same chain carrying its gradient, `xyz`, beside its value, `w` -- what the normal pass
+// folds a blend's list by, a `let` pair an operand.
+fn pipe_blend_run_nearest(
+    first: u32, slot: u32, count: u32, p: vec3<f32>,
+    amount: f32, driven: bool, acc_in: vec4<f32>, k: f32, n: f32,
+) -> vec4<f32> {
+    var acc = acc_in;
+    let prunes = has_closed_form(n) || k <= 0.0;
+    for (var i = 0u; i < count; i = i + 1u) {
+        let limit = select(1e30, acc.w + k, prunes);
+        let v = pipe_member_within(first + i, p, params[slot + i], amount, driven, limit);
+        if (v >= 1e29) {
+            continue;
+        }
+        let g = pipe_normal(first + i, p);
+        if (acc.w >= 1e29) {
+            acc = vec4<f32>(g, v);
+        } else {
+            acc = vec4<f32>(blend_bound_normal(acc.w, v, acc.xyz, g, k, n), blend_bound(acc.w, v, k, n));
+        }
+    }
+    return acc;
 }
 
 // The same run, carrying the normal of whichever pipe defined the value, in the `vec4` shape a
@@ -5725,7 +5883,7 @@ fn pipe_run_distance(first: u32, radius_slot: u32, count: u32, p: vec3<f32>) -> 
 fn pipe_run_nearest(first: u32, radius_slot: u32, count: u32, p: vec3<f32>) -> vec4<f32> {
     var best = vec4<f32>(0.0, 0.0, 1.0, 1e30);
     for (var k = 0u; k < count; k = k + 1u) {
-        let v = pipe_distance(first + k, p, params[radius_slot + k]);
+        let v = pipe_member_within(first + k, p, params[radius_slot + k], 0.0, false, best.w);
         if (v < best.w) {
             best = vec4<f32>(pipe_normal(first + k, p), v);
         }

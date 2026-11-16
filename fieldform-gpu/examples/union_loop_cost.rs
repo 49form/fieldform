@@ -263,7 +263,7 @@ fn spokes(n: usize) -> (Document, Graph) {
             .expect("a bent line"),
         );
         pipes.push(graph.add(Node::Pipe {
-            curve: id,
+            curve: id.into(),
             radius: ParamRef::Literal(9.0),
         }));
     }
@@ -374,7 +374,7 @@ fn curves_for(
                 };
                 let world = fieldform_field::profile_loop_turning(
                     doc,
-                    outline.curve(),
+                    outline.curve().expect("a block that names its curve"),
                     SPINE_DEGREES,
                     sweep.source(),
                 )

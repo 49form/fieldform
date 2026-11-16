@@ -93,7 +93,7 @@ fn main() {
                 // this scene, so the node's own curve is what to tessellate.
                 let id = match use_of {
                     fieldform_gpu::CurveUse::Profile(node) => match graph.node(*node) {
-                        Some(Node::Revolve { outline, .. }) => outline.curve(),
+                        Some(Node::Revolve { outline, .. }) => outline.curve().expect("a block that names its curve"),
                         _ => unreachable!("this scene is revolves"),
                     },
                     fieldform_gpu::CurveUse::Spine(curve) => *curve,

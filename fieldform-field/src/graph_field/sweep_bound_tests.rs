@@ -67,7 +67,7 @@
         graph.add(Node::Sweep {
             rims: Default::default(),
             outline: Outline::closed(profile),
-            spine,
+            spine: spine.into(),
             section,
             law,
         });

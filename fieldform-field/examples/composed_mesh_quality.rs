@@ -148,7 +148,7 @@ fn scene() -> (Document, Graph) {
     let mut graph = Graph::from_cage(cage_id);
     let cage_node = graph.roots()[0];
     let pipe = graph.add(Node::Pipe {
-        curve: curve_id,
+        curve: curve_id.into(),
         radius: ParamRef::Literal(PIPE_RADIUS_MM),
     });
     graph.add(Node::Boolean {

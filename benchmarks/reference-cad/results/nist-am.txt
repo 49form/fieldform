@@ -1,0 +1,37 @@
+imported 1 solid(s) from benchmarks/reference-cad/models/NIST Test Artifact_ver3b.step in 0.2 s
+reference: 9568 triangles, volume 100986 mm3, box 141.421 x 141.421 x 17.000 mm
+compiled at 0.001 mm in 0.00 s
+
+the reference's surface, read in our field, 204776 points
+  mean 0.0003  median 0.0000  p99 0.0060  p99.9 0.0094  worst 0.0095 mm
+  worst places, at least 5 mm apart:
+    -0.010 mm at (7.37, -6.75, 1.63)
+    -0.010 mm at (-8.43, 5.37, 1.96)
+    -0.010 mm at (-3.82, -9.23, 0.86)
+    -0.010 mm at (-7.36, -6.75, 3.43)
+    -0.010 mm at (9.98, 0.43, 2.77)
+    -0.010 mm at (-4.62, 8.86, 2.53)
+    -0.010 mm at (2.16, 9.75, 2.60)
+    -0.010 mm at (3.00, -9.53, 3.65)
+
+our surface, read in the reference's field (true distance), 56153 points
+  mean 0.0003  median 0.0000  p99 0.0060  p99.9 0.0095  worst 0.0095 mm
+  worst places, at least 5 mm apart:
+    +0.010 mm at (-3.83, 9.24, 1.59)
+    +0.010 mm at (-9.24, -3.83, 0.84)
+    +0.010 mm at (9.24, -3.83, 1.59)
+    +0.010 mm at (-3.83, -9.24, 1.59)
+    +0.010 mm at (3.83, 9.24, 0.84)
+    +0.010 mm at (9.24, 3.83, 1.59)
+    +0.010 mm at (3.83, -9.24, 3.09)
+    +0.010 mm at (-9.24, 3.83, 2.34)
+
+the solids on a 0.1 mm grid
+  ours 101029, the reference 101029 mm3
+  only ours 2, only the reference 3 mm3: 0.005% of the reference differs
+
+against the limits
+  pass drawing tolerance: worst 0.010 of 0.1 mm
+  pass worst point: 0.010 of 0.1 mm
+  pass 99% of points: 0.006 of 0.05 mm
+  pass volume: 0.005% of 0.1%

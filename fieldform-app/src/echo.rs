@@ -40,6 +40,15 @@ impl Names<'_> {
         self.doc.curve(id).map(|c| c.name.clone()).ok_or_else(|| "it names a curve that is gone".to_string())
     }
 
+    /// The curve a slot names, or the word that empties one -- so a block waiting for its curve
+    /// echoes as the line that makes it waiting (`pipe curve=none`).
+    pub fn curve_slot(&self, slot: &fieldform_scene::CurveSlot) -> Result<String, String> {
+        match slot.source() {
+            Some(id) => self.curve(id),
+            None => Ok(crate::console_keys::NOTHING.to_string()),
+        }
+    }
+
     pub fn param(&self, id: ParamId) -> Result<String, String> {
         self.doc
             .parameters
@@ -172,9 +181,9 @@ pub struct Written {
 /// What a curve-built block is built on, as keys.
 fn outline(o: &Outline, n: &Names, keys: &mut Vec<(&'static str, String)>) -> Result<(), String> {
     match o {
-        Outline::Closed { profile } => keys.push(("profile", n.curve(*profile)?)),
+        Outline::Closed { profile } => keys.push(("profile", n.curve_slot(profile)?)),
         Outline::Wall { curve, thickness, side, ends } => {
-            keys.push(("curve", n.curve(*curve)?));
+            keys.push(("curve", n.curve_slot(curve)?));
             keys.push(("thickness", value(thickness, n)?));
             keys.push((
                 "side",
@@ -560,7 +569,7 @@ pub fn keys_of(node: &Node, n: &Names) -> Result<Written, String> {
         }
         Node::Sweep { outline: o, spine, section, law, rims } => {
             outline(o, n, &mut keys)?;
-            keys.push(("spine", n.curve(*spine)?));
+            keys.push(("spine", n.curve_slot(spine)?));
             keys.push((
                 "section",
                 match section {
@@ -585,11 +594,21 @@ pub fn keys_of(node: &Node, n: &Names) -> Result<Written, String> {
             let named: Result<Vec<String>, String> = sections
                 .iter()
                 .map(|s| match s {
-                    Outline::Closed { profile } => n.curve(*profile),
+                    // A list names curves, so a row naming none has no word in it: `none` is
+                    // the whole list, below, and never one entry of it.
+                    Outline::Closed { profile } => match profile.source() {
+                        Some(id) => n.curve(id),
+                        None => Err("a loft with a section naming no curve has no console spelling".to_string()),
+                    },
                     Outline::Wall { .. } => Err("a loft through a wall has no console spelling".to_string()),
                 })
                 .collect();
-            keys.push(("sections", named?.join(",")));
+            let named = named?;
+            // No sections yet is the loft waiting, written as the word that makes it so.
+            keys.push(("sections", match named.is_empty() {
+                true => crate::console_keys::NOTHING.to_string(),
+                false => named.join(","),
+            }));
             keys.push(("spine", match spine {
                 Some(c) => n.curve(*c)?,
                 None => crate::console_keys::NOTHING.to_string(),
@@ -605,7 +624,7 @@ pub fn keys_of(node: &Node, n: &Names) -> Result<Written, String> {
             rims_keys(rims, n, &mut keys)?;
         }
         Node::Pipe { curve, radius } => {
-            keys.push(("curve", n.curve(*curve)?));
+            keys.push(("curve", n.curve_slot(curve)?));
             keys.push(("radius", value(radius, n)?));
         }
         Node::Mesh(_) | Node::Unknown(_) => unreachable!("verb_of has no verb for these"),
@@ -1291,9 +1310,9 @@ mod tests {
                 rims: fieldform_scene::Rims::hard(),
             },
             Node::Revolve { .. } => Node::Revolve { outline: Outline::closed(curve), frame: Frame::default(), angle: ParamRef::Literal(360.0), sides: AngleSides::One, rims: fieldform_scene::Rims::hard() },
-            Node::Sweep { .. } => Node::Sweep { outline: Outline::closed(curve), spine: curve, section: Section::Square, law: SweepLaw::default(), rims: fieldform_scene::Rims::hard() },
+            Node::Sweep { .. } => Node::Sweep { outline: Outline::closed(curve), spine: curve.into(), section: Section::Square, law: SweepLaw::default(), rims: fieldform_scene::Rims::hard() },
             Node::Loft { .. } => Node::Loft { sections: vec![Outline::closed(curve); 2], spine: None, smooth: LoftSmooth::G0, rims: fieldform_scene::Rims::hard() },
-            Node::Pipe { .. } => Node::Pipe { curve, radius: one },
+            Node::Pipe { .. } => Node::Pipe { curve: curve.into(), radius: one },
             other => other.clone(),
         }
     }

@@ -1,0 +1,118 @@
+# NIST additive manufacturing test artifact (Moylan et al., 2012, STEP ver3b), rebuilt.
+# Millimetres, in the frame NIST's assembly places the part in: the base is a 100 mm square turned
+# 45 degrees, centred on the origin, bottom at z = -10, top (datum A) at z = 0. Pins and 4 mm holes lie
+# on the x and y axes. The part's own B-rep is drawn 10 mm higher and placed down by the assembly;
+# the heights below are written as the B-rep has them and lowered by 10 on the way out.
+#
+# The drawing (NIST EngineeringDrawing.pdf) and the paper give the features and most sizes. The drawing
+# leaves the base, the step plan, the pin diameters (d1, d2) and the lateral and fine-feature positions
+# to the model, so those were read from the STEP file.
+#
+# Run with:
+#   fieldform --run benchmarks/reference-cad/nist-am.ffc --exit
+# from the repository root, on an empty document. It saves the part beside this script.
+
+# base, 100 x 100 x 10, turned 45 degrees
+cube size=100,100,10 centre=0,0,-5 turn=0,0,45 'Base'
+# centre: dia 20 boss to z 14, dia 15 boss to z 17 (concentricity features), dia 10 hole through
+cylinder radius=10 from=0,0,-1 to=0,0,4 'Boss20'
+cylinder radius=7.5 from=0,0,3 to=0,0,7 'Boss15'
+# 16 pins dia 4 (d2), 7 tall, at 20 to 50 along each axis
+cylinder radius=2 from=20,0,-1 to=20,0,7 'PinXp20'
+cylinder radius=2 from=-20,0,-1 to=-20,0,7 'PinXm20'
+cylinder radius=2 from=0,20,-1 to=0,20,7 'PinYp20'
+cylinder radius=2 from=0,-20,-1 to=0,-20,7 'PinYm20'
+cylinder radius=2 from=30,0,-1 to=30,0,7 'PinXp30'
+cylinder radius=2 from=-30,0,-1 to=-30,0,7 'PinXm30'
+cylinder radius=2 from=0,30,-1 to=0,30,7 'PinYp30'
+cylinder radius=2 from=0,-30,-1 to=0,-30,7 'PinYm30'
+cylinder radius=2 from=40,0,-1 to=40,0,7 'PinXp40'
+cylinder radius=2 from=-40,0,-1 to=-40,0,7 'PinXm40'
+cylinder radius=2 from=0,40,-1 to=0,40,7 'PinYp40'
+cylinder radius=2 from=0,-40,-1 to=0,-40,7 'PinYm40'
+cylinder radius=2 from=50,0,-1 to=50,0,7 'PinXp50'
+cylinder radius=2 from=-50,0,-1 to=-50,0,7 'PinXm50'
+cylinder radius=2 from=0,50,-1 to=0,50,7 'PinYp50'
+cylinder radius=2 from=0,-50,-1 to=0,-50,7 'PinYm50'
+boolean in=PinXp20,PinXm20,PinYp20,PinYm20,PinXp30,PinXm30,PinYp30,PinYm30,PinXp40,PinXm40,PinYp40,PinYm40,PinXp50,PinXm50,PinYp50,PinYm50 -u 'Pins'
+# positive staircase: 10 mm steps, 3, 5, 7 then 6, 4 above datum A
+cube size=10,10,4 centre=-37,17,1 'Up1'
+cube size=10,10,6 centre=-27,17,2 'Up2'
+cube size=10,10,8 centre=-17,17,3 'Up3'
+cube size=10,10,7 centre=-17,27,2.5 'Up4'
+cube size=10,10,5 centre=-17,37,1.5 'Up5'
+boolean in=Up1,Up2,Up3,Up4,Up5 -u 'StairUp'
+# ramp: 5 wide, 2.5 flat at z 12, 1 mm fall over 25, 2.5 flat at z 11 (section C-C)
+cube size=30,5,3 centre=21.213203,-21.213203,0.5 turn=0,0,-45 'RampBlock'
+cube size=30,5,2 centre=21.213203,-21.213203,0 turn=0,0,-45 'RampFoot'
+plane origin=12.374369,-12.374369,2 turn=0,2.29061,-45 'RampSlope'
+boolean in=RampBlock,RampSlope -i 'RampTop'
+boolean in=RampTop,RampFoot -u 'Ramp'
+# fine features, set 1 (section E-E): rectangular bosses 2 tall, pairs of width 2, 1.5, 1, 0.5, 0.25,
+# each ending 1 mm inside the edge
+cube size=6,2,3 centre=34.648232,30.405592,0.5 turn=0,0,45 'FB1'
+cube size=6,2,3 centre=37.476659,27.577164,0.5 turn=0,0,45 'FB2'
+cube size=4.5,1.5,3 centre=41.365747,24.748737,0.5 turn=0,0,45 'FB3'
+cube size=4.5,1.5,3 centre=43.487067,22.627417,0.5 turn=0,0,45 'FB4'
+cube size=3,1,3 centre=46.315494,20.85965,0.5 turn=0,0,45 'FB5'
+cube size=3,1,3 centre=47.729708,19.445436,0.5 turn=0,0,45 'FB6'
+cube size=1.5,0.5,3 centre=49.851028,18.384776,0.5 turn=0,0,45 'FB7'
+cube size=1.5,0.5,3 centre=50.558135,17.67767,0.5 turn=0,0,45 'FB8'
+cube size=0.75,0.25,3 centre=51.795572,16.970563,0.5 turn=0,0,45 'FB9'
+cube size=0.75,0.25,3 centre=52.149125,16.617009,0.5 turn=0,0,45 'FB10'
+boolean in=FB1,FB2,FB3,FB4,FB5,FB6,FB7,FB8,FB9,FB10 -u 'FineBosses'
+# fine features, set 2 (section D-D): round pins 2 tall, dia 2, 1.5, 1, 0.5, 0.25
+cylinder radius=1 from=28.284271,21.213203,-1 to=28.284271,21.213203,2 'FP1'
+cylinder radius=0.75 from=31.819805,17.67767,-1 to=31.819805,17.67767,2 'FP2'
+cylinder radius=0.5 from=35.355339,14.142136,-1 to=35.355339,14.142136,2 'FP3'
+cylinder radius=0.25 from=38.890873,10.606602,-1 to=38.890873,10.606602,2 'FP4'
+cylinder radius=0.125 from=42.426407,7.071068,-1 to=42.426407,7.071068,2 'FP5'
+boolean in=FP1,FP2,FP3,FP4,FP5 -u 'FinePins'
+boolean in=Base,Boss20,Boss15,Pins,StairUp,Ramp,FineBosses,FinePins -u 'Solid'
+
+# holes dia 4 (d1) through, at 60 along each axis, and the centre hole dia 10 through
+cylinder radius=2 from=60,0,-11 to=60,0,1 'HoleXp'
+cylinder radius=2 from=-60,0,-11 to=-60,0,1 'HoleXm'
+cylinder radius=2 from=0,60,-11 to=0,60,1 'HoleYp'
+cylinder radius=2 from=0,-60,-11 to=0,-60,1 'HoleYm'
+cylinder radius=5 from=0,0,-11 to=0,0,8 'CentreHole'
+# negative staircase: 10 mm pockets, 3, 5, 7 then 6, 4 below datum A
+cube size=10,10,4 centre=-37,-17,-1 'Down1'
+cube size=10,10,6 centre=-27,-17,-2 'Down2'
+cube size=10,10,8 centre=-17,-17,-3 'Down3'
+cube size=10,10,7 centre=-17,-27,-2.5 'Down4'
+cube size=10,10,5 centre=-17,-37,-1.5 'Down5'
+# lateral features (section A-A), into the -x/+y edge face, centred at z 5; the edge is 50 from the centre
+# 60 degree diamonds 6.93 wide and 6 tall, a 45 degree diamond and a square of 6, and a hole dia 6: 5 deep
+# a 45 degree diamond and a square of 3, and a hole dia 3: 3 deep
+skewedbox centre=-55.507882,13.081475,-5 edges=2.44949,2.44949,2;2.44949,2.44949,-2;-4.949747,4.949747,0 'LatWide'
+skewedbox centre=-48.436815,20.152543,-5 edges=1.224745,1.224745,3;1.224745,1.224745,-3;-4.949747,4.949747,0 'LatTall'
+skewedbox centre=-41.365747,27.223611,-5 edges=2.12132,2.12132,3;2.12132,2.12132,-3;-4.949747,4.949747,0 'LatDiamond6'
+cube size=6,7,6 centre=-34.294679,34.294679,-5 turn=0,0,45 'LatSquare6'
+cylinder radius=3 from=-24.748737,38.890873,-5 to=-29.698485,43.84062,-5 'LatRound6'
+skewedbox centre=-20.85965,49.143921,-5 edges=1.06066,1.06066,1.5;1.06066,1.06066,-1.5;-3.535534,3.535534,0 'LatDiamond3'
+cube size=3,5,3 centre=-13.788582,56.214989,-5 turn=0,0,45 'LatSquare3'
+cylinder radius=1.5 from=-4.949747,61.51829,-5 to=-8.485281,65.053824,-5 'LatRound3'
+# fine features, set 1: rectangular holes 2 deep, mirroring the bosses across the diagonal
+cube size=6,2,3 centre=30.405592,34.648232,-0.5 turn=0,0,45 'FH1'
+cube size=6,2,3 centre=27.577164,37.476659,-0.5 turn=0,0,45 'FH2'
+cube size=4.5,1.5,3 centre=24.748737,41.365747,-0.5 turn=0,0,45 'FH3'
+cube size=4.5,1.5,3 centre=22.627417,43.487067,-0.5 turn=0,0,45 'FH4'
+cube size=3,1,3 centre=20.85965,46.315494,-0.5 turn=0,0,45 'FH5'
+cube size=3,1,3 centre=19.445436,47.729708,-0.5 turn=0,0,45 'FH6'
+cube size=1.5,0.5,3 centre=18.384776,49.851028,-0.5 turn=0,0,45 'FH7'
+cube size=1.5,0.5,3 centre=17.67767,50.558135,-0.5 turn=0,0,45 'FH8'
+cube size=0.75,0.25,3 centre=16.970563,51.795572,-0.5 turn=0,0,45 'FH9'
+cube size=0.75,0.25,3 centre=16.617009,52.149125,-0.5 turn=0,0,45 'FH10'
+# fine features, set 2: round holes 2 deep, dia 2, 1.5, 1, 0.5, 0.25
+cylinder radius=1 from=21.213203,28.284271,-2 to=21.213203,28.284271,1 'FR1'
+cylinder radius=0.75 from=17.67767,31.819805,-2 to=17.67767,31.819805,1 'FR2'
+cylinder radius=0.5 from=14.142136,35.355339,-2 to=14.142136,35.355339,1 'FR3'
+cylinder radius=0.25 from=10.606602,38.890873,-2 to=10.606602,38.890873,1 'FR4'
+cylinder radius=0.125 from=7.071068,42.426407,-2 to=7.071068,42.426407,1 'FR5'
+boolean in=Solid,HoleXp,HoleXm,HoleYp,HoleYm,CentreHole,Down1,Down2,Down3,Down4,Down5,LatWide,LatTall,LatDiamond6,LatSquare6,LatRound6,LatDiamond3,LatSquare3,LatRound3,FH1,FH2,FH3,FH4,FH5,FH6,FH7,FH8,FH9,FH10,FR1,FR2,FR3,FR4,FR5 -s 'NIST-AM'
+
+# 100,987.06 mm3 worked by hand: base 100,000, centre bosses less the hole 451.6, pins less holes 904.8,
+# ramp 225, lateral features -594.3; the staircases and the fine features each add what they take away
+expect target=NIST-AM volume=100987.06 tol=0.1%
+saveas file=benchmarks/reference-cad/nist-am.fform

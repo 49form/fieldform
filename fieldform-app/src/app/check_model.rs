@@ -53,17 +53,17 @@ impl App {
         {
             body.begin_draft();
         }
-        self.amber_until = Some(Instant::now() + AMBER_AFTER_EDIT);
-        self.check_due = Instant::now() + CHECK_DEBOUNCE;
+        self.check.amber_until = Some(Instant::now() + AMBER_AFTER_EDIT);
+        self.check.due = Instant::now() + CHECK_DEBOUNCE;
     }
 
     /// Takes in a finished self-intersection check and starts the next one due. Once a frame.
     pub(crate) fn poll_surface_checks(&mut self) {
-        if let Some(check) = &self.surface_check {
+        if let Some(check) = &self.check.surface_check {
             match check.rx.try_recv() {
                 Ok(crossing) => {
                     let (cage, fingerprint) = (check.cage, check.fingerprint);
-                    self.surface_check = None;
+                    self.check.surface_check = None;
                     let was_red = self.doc.cage_is_red(cage);
                     let taken = self
                         .doc
@@ -75,11 +75,11 @@ impl App {
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => return,
-                Err(mpsc::TryRecvError::Disconnected) => self.surface_check = None,
+                Err(mpsc::TryRecvError::Disconnected) => self.check.surface_check = None,
             }
         }
         // Not during a gesture, and not until the edits have settled.
-        if self.gizmo_drag.is_some() || self.move_state.is_some() || Instant::now() < self.check_due {
+        if self.gizmo_drag.is_some() || self.move_state.is_some() || Instant::now() < self.check.due {
             return;
         }
         let due = self.doc.cages.iter().find(|(_, body)| body.surface_unchecked());
@@ -109,7 +109,7 @@ impl App {
                 let _ = tx.send(found.faces);
             })
             .expect("a thread for the check");
-        self.surface_check = Some(SurfaceCheck { cage, fingerprint, rx });
+        self.check.surface_check = Some(SurfaceCheck { cage, fingerprint, rx });
     }
 
     /// Whether the active cage's surface is still being checked -- the "checking…" state.
@@ -131,14 +131,14 @@ impl App {
         for fault in red.iter().chain(&amber) {
             self.say(format!("{}: {}", if fault.check.is_red() { "error" } else { "warning" }, fault_line(fault)));
         }
-        if !self.script_running {
-            self.show_check_model = true;
+        if !self.scripting.running {
+            self.check.window_open = true;
         }
     }
 
     /// The Check Model window.
     pub(crate) fn check_model_panel(&mut self, ctx: &egui::Context) {
-        if !self.show_check_model {
+        if !self.check.window_open {
             return;
         }
         let mut open = true;
@@ -146,7 +146,7 @@ impl App {
         let checking = self.cage_checking(self.active_cage);
         let mut pick: Option<Fault> = None;
         let mut thresholds = self.doc.validation;
-        let mut only_errors = self.check_only_errors;
+        let mut only_errors = self.check.only_errors;
         egui::Window::new("Check Model").open(&mut open).default_width(380.0).show(ctx, |ui| {
             if checking {
                 ui.label(egui::RichText::new("checking the surface…").weak());
@@ -199,8 +199,8 @@ impl App {
                 ui.end_row();
             });
         });
-        self.show_check_model = open;
-        self.check_only_errors = only_errors;
+        self.check.window_open = open;
+        self.check.only_errors = only_errors;
         if thresholds != self.doc.validation {
             // Stored per document: they are about this model's scale and intent.
             self.doc.validation = thresholds;
@@ -251,7 +251,7 @@ impl App {
         let placement = self.control_placement();
         let mesh = body.mesh();
         let (red, amber) = self.cage_faults();
-        let show_amber = self.show_check_model || self.amber_until.is_some_and(|t| Instant::now() < t);
+        let show_amber = self.check.window_open || self.check.amber_until.is_some_and(|t| Instant::now() < t);
         for (faults, colour, fill, weight) in [
             (&amber, WARNING_COLOR, WARNING_FILL, 2.0f32),
             (&red, ERROR_COLOR, ERROR_FILL, 4.0f32),

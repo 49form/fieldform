@@ -204,7 +204,7 @@
         let path = CurveId::new();
         doc.curves.insert(path, Curve::polyline(path, "path", spine.to_vec(), closed).expect("a path"));
         let mut graph = Graph::empty();
-        graph.add(Node::Sweep { outline: Outline::closed(profile), spine: path, section: Default::default(), law, rims });
+        graph.add(Node::Sweep { outline: Outline::closed(profile), spine: path.into(), section: Default::default(), law, rims });
         GraphField::compile_graph(&doc, &graph, 1e-4)
     }
 

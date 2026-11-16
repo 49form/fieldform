@@ -55,7 +55,7 @@ pub(crate) struct Script {
 #[derive(Default)]
 pub(crate) struct ScriptTally {
     pub(crate) stopped: Option<usize>,
-    /// Line number and index into `expect_results`, for the report.
+    /// Line number and index into `scripting.expect_results`, for the report.
     pub(crate) expects: Vec<(usize, usize)>,
     pub(crate) started: Option<std::time::Instant>,
 }

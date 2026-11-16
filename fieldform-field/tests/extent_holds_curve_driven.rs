@@ -229,7 +229,7 @@ fn closed_cubic(doc: &mut Document, loop_points: Vec<Point3<f64>>) -> CurveId {
 }
 
 fn pipe(graph: &mut Graph, curve: CurveId, radius: f64) -> NodeId {
-    graph.add(Node::Pipe { curve, radius: lit(radius) })
+    graph.add(Node::Pipe { curve: curve.into(), radius: lit(radius) })
 }
 
 // --- Pipe -------------------------------------------------------------------------------------
@@ -344,7 +344,7 @@ fn a_pipe_whose_radius_a_ramp_drives_s_extent_holds_every_solid_point() {
         out_max: lit(10.0),
         shape: RampShape::Linear,
     });
-    let node = graph.add(Node::Pipe { curve, radius: ParamRef::Field(ramp) });
+    let node = graph.add(Node::Pipe { curve: curve.into(), radius: ParamRef::Field(ramp) });
     holds("pipe with a ramp-driven radius", &doc, &graph, node, 0.1);
 }
 
@@ -368,7 +368,7 @@ fn a_pipe_whose_radius_a_reversed_smooth_ramp_drives_s_extent_holds_every_solid_
         out_max: lit(3.0),
         shape: RampShape::Smoother,
     });
-    let node = graph.add(Node::Pipe { curve, radius: ParamRef::Field(ramp) });
+    let node = graph.add(Node::Pipe { curve: curve.into(), radius: ParamRef::Field(ramp) });
     holds("pipe with a reversed smooth ramp-driven radius", &doc, &graph, node, 0.2);
 }
 

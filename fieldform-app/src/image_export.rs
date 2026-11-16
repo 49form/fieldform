@@ -362,7 +362,20 @@ fn local_offset_seconds() -> i64 {
     -(bias as i64) * 60
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn local_offset_seconds() -> i64 {
+    // The C library reads the zone the account is set to, daylight time included.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as libc::time_t);
+    let mut local: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&now, &mut local) }.is_null() {
+        return 0;
+    }
+    local.tm_gmtoff as i64
+}
+
+#[cfg(not(any(windows, unix)))]
 fn local_offset_seconds() -> i64 {
     0
 }
@@ -543,7 +556,7 @@ impl App {
     pub(crate) fn viewport_pixels(&self) -> (u32, u32) {
         let scale = self.egui_ctx.pixels_per_point();
         let rect = self.viewport_rect.unwrap_or(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 720.0)));
-        traced::still_frame_size(rect.width() * scale, rect.height() * scale, self.display_quality.still_pixels())
+        traced::still_frame_size(rect.width() * scale, rect.height() * scale, self.view.quality.still_pixels())
     }
 
     /// The view a Still is drawn from: the camera as it stands or aimed where the request
@@ -577,11 +590,11 @@ impl App {
             orthographic: camera.projection == Projection::Orthographic,
             sections: self.section_half_spaces(),
             material,
-            occlusion: self.idle_occlusion && self.display_quality.occlusion(),
-            reflections: self.idle_reflections && self.display_quality.reflections(),
-            exact_finish: self.display_quality.exact_finish(),
-            environment: self.environment,
-            still_frames: self.display_quality.still_frames(),
+            occlusion: self.view.idle_occlusion && self.view.quality.occlusion(),
+            reflections: self.view.idle_reflections && self.view.quality.reflections(),
+            exact_finish: self.view.quality.exact_finish(),
+            environment: self.view.environment,
+            still_frames: self.view.quality.still_frames(),
         })
     }
 
@@ -723,7 +736,7 @@ impl App {
     /// The document's name for a file's metadata and the `{doc}` token: its file's stem, or
     /// "untitled".
     pub(crate) fn document_name(&self) -> String {
-        self.file
+        self.saving.file
             .as_ref()
             .and_then(|(p, _)| p.file_stem().map(|s| s.to_string_lossy().to_string()))
             .unwrap_or_else(|| "untitled".to_string())
@@ -732,7 +745,7 @@ impl App {
     /// The folder a block's files go into: its folder under the document's, or under the
     /// Pictures folder's `FieldForm` for a document that has no file yet. Made if it is not there.
     pub(crate) fn image_folder(&self, block: &SaveImage) -> Result<PathBuf, String> {
-        let base = match self.file.as_ref().and_then(|(p, _)| p.parent().map(Path::to_path_buf)) {
+        let base = match self.saving.file.as_ref().and_then(|(p, _)| p.parent().map(Path::to_path_buf)) {
             Some(dir) => dir,
             None => pictures_folder().join("FieldForm"),
         };

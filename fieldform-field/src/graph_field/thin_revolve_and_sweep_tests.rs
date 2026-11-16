@@ -21,7 +21,7 @@
     }
 
     fn wall(curve: CurveId, thickness: f64, side: WallSide, ends: WallEnds) -> Outline {
-        Outline::Wall { curve, thickness: lit(thickness), side, ends }
+        Outline::Wall { curve: curve.into(), thickness: lit(thickness), side, ends }
     }
 
     /// The field of a graph holding one block, walked: at a tolerance too fine to bake at.
@@ -159,7 +159,7 @@
                 &doc,
                 Node::Sweep { rims: Default::default(),
                     outline: wall(line, 4.0, side, WallEnds::Square),
-                    spine: path,
+                    spine: path.into(),
                     section: Section::Square,
                     law: Default::default(),
                 },
@@ -214,7 +214,7 @@
                 &doc,
                 Node::Sweep { rims: Default::default(),
                     outline: wall(line, 2.0, WallSide::Centre, WallEnds::Square),
-                    spine: path,
+                    spine: path.into(),
                     section: Section::Square,
                     law: Default::default(),
                 },
@@ -297,7 +297,7 @@
                 "an open-section sweep",
                 Node::Sweep { rims: Default::default(),
                     outline: wall(section, 2.0, WallSide::Right, WallEnds::Square),
-                    spine: path,
+                    spine: path.into(),
                     section: Section::Square,
                     law: Default::default(),
                 },

@@ -183,7 +183,7 @@
                 .unwrap(),
         );
         let wall =
-            Outline::Wall { curve: line, thickness: lit(t), side: WallSide::Centre, ends: WallEnds::Round };
+            Outline::Wall { curve: line.into(), thickness: lit(t), side: WallSide::Centre, ends: WallEnds::Round };
         let full = revolved(&doc, wall, 360.0, AngleSides::One);
         let part = revolved(&doc, wall, 120.0, AngleSides::One);
         // The wall in its half-plane: a stadium, the segment from (R, -h) to (R, h) grown t/2.

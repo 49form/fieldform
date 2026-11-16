@@ -434,7 +434,7 @@ fn spokes(n: usize) -> (Document, Graph) {
             .expect("a bent line"),
         );
         pipes.push(graph.add(Node::Pipe {
-            curve: id,
+            curve: id.into(),
             radius: lit(9.0),
         }));
     }
@@ -627,7 +627,7 @@ fn patterned(n: usize) -> (Document, Graph) {
         .expect("a bent line"),
     );
     let pipe = g.add(Node::Pipe {
-        curve: id,
+        curve: id.into(),
         radius: lit(9.0),
     });
     if n > 1 {

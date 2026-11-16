@@ -192,18 +192,18 @@ fn curves_for(
                 let Some(Node::Sweep { outline, spine, .. }) = graph.node(node) else {
                     unreachable!("a frame belongs to a sweep");
                 };
-                let points = doc.curves[spine].tessellate_to_angle(DEGREES, floor);
-                let frame = fieldform_field::sweep_frame(doc, outline, *spine, &points)
+                let points = doc.curves[&spine.source().expect("a block that names its curve")].tessellate_to_angle(DEGREES, floor);
+                let frame = fieldform_field::sweep_frame(doc, outline, spine.source().expect("a block that names its curve"), &points)
                     .expect("a spine with a direction");
                 (frame, None)
             }
             fieldform_gpu::CurveUse::Profile(node) => {
                 let (curve, ignore) = match graph.node(node) {
                     Some(Node::Extrude { outline, sweep, .. }) => (outline.curve(), sweep.source()),
-                    Some(Node::Sweep { outline, spine, .. }) => (outline.curve(), Some(*spine)),
+                    Some(Node::Sweep { outline, spine, .. }) => (outline.curve(), spine.source()),
                     _ => unreachable!("a profile belongs to an extrude or a sweep"),
                 };
-                let world = fieldform_field::profile_loop_turning(doc, curve, DEGREES, ignore)
+                let world = fieldform_field::profile_loop_turning(doc, curve.expect("a block that names its curve"), DEGREES, ignore)
                     .expect("a closed loop")
                     .points;
                 let (origin, normal) = fieldform_field::plane_of(&world).expect("planar");
@@ -291,7 +291,7 @@ fn wing(stage: Stage) -> (Document, Graph) {
             sides: fieldform_scene::Sides::One,
             corners: Default::default(),
         }),
-        _ => graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(section), spine, section: Default::default(), law: Default::default() }),
+        _ => graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(section), spine: spine.into(), section: Default::default(), law: Default::default() }),
     };
     if matches!(stage, Stage::Alone) {
         return (doc, graph);

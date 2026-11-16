@@ -1477,7 +1477,7 @@
             let mut graph = Graph::from_cage(cage_id);
             let cage_node = graph.roots()[0];
             let pipe = graph.add(Node::Pipe {
-                curve: curve_id,
+                curve: curve_id.into(),
                 radius: ParamRef::Literal(5.0),
             });
             graph.add(Node::Boolean {
@@ -1501,7 +1501,7 @@
         let mut graph = Graph::from_cage(cage_id);
         let cage_node = graph.roots()[0];
         let pipe = graph.add(Node::Pipe {
-            curve: curve_id,
+            curve: curve_id.into(),
             radius: ParamRef::Literal(5.0),
         });
         let _blended = graph.add(Node::Blend {
@@ -1912,7 +1912,7 @@
         let pipe_only = {
             let mut g = Graph::from_cage(cage_id);
             let _p = g.add(Node::Pipe {
-                curve: curve_id,
+                curve: curve_id.into(),
                 radius: ParamRef::Literal(5.0),
             });
             GraphField::compile(&doc, &part_with(g), 0.01).unwrap()
@@ -1923,7 +1923,7 @@
         let mut graph = Graph::from_cage(cage_id);
         let cage_node = graph.roots()[0];
         let pipe = graph.add(Node::Pipe {
-            curve: curve_id,
+            curve: curve_id.into(),
             radius: ParamRef::Literal(5.0),
         });
         let _blended = graph.add(Node::Blend {
@@ -1966,7 +1966,7 @@
         let mut graph = Graph::from_cage(cage_id);
         let cage_node = graph.roots()[0];
         let pipe = graph.add(Node::Pipe {
-            curve: curve_id,
+            curve: curve_id.into(),
             radius: ParamRef::Literal(5.0),
         });
         graph.add(Node::Blend {
@@ -1987,7 +1987,7 @@
         let mut graph = Graph::from_cage(cage_id);
         let cage_node = graph.roots()[0];
         let pipe = graph.add(Node::Pipe {
-            curve: curve_id,
+            curve: curve_id.into(),
             radius: ParamRef::Literal(5.0),
         });
         let _united = graph.add(Node::Boolean {
@@ -2012,7 +2012,7 @@
         let (doc, _, curve_id) = document();
         let mut graph = Graph::empty();
         let _pipe = graph.add(Node::Pipe {
-            curve: curve_id,
+            curve: curve_id.into(),
             radius: ParamRef::Literal(5.0),
         });
 
@@ -2044,7 +2044,7 @@
 
         let mut graph = Graph::empty();
         let _pipe = graph.add(Node::Pipe {
-            curve: curve_id,
+            curve: curve_id.into(),
             radius: ParamRef::Named(param),
         });
 
@@ -2073,7 +2073,7 @@
             let mut graph = Graph::from_cage(cage_id);
             let cage_node = graph.roots()[0];
             let pipe = graph.add(Node::Pipe {
-                curve: curve_id,
+                curve: curve_id.into(),
                 radius: ParamRef::Literal(5.0),
             });
             graph.add(Node::Boolean {
@@ -2116,7 +2116,7 @@
         let mut graph = Graph::from_cage(cage_id);
         let cage_node = graph.roots()[0];
         let pipe = graph.add(Node::Pipe {
-            curve: curve_id,
+            curve: curve_id.into(),
             radius: ParamRef::Literal(5.0),
         });
         let _pipe_minus_cage = graph.add(Node::Boolean {
@@ -5146,7 +5146,7 @@
         let spine = path.id;
         doc.curves.insert(spine, path);
         let mut graph = Graph::empty();
-        let operand = graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine, section: Default::default(), law: Default::default() });
+        let operand = graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine: spine.into(), section: Default::default(), law: Default::default() });
         let walk_says = carries_true_distance(&doc, &graph, operand);
         let compiled = GraphField::compile_graph(&doc, &graph, 1e-3).expect("compiles");
         assert_eq!(
@@ -5443,7 +5443,7 @@
             doc.curves.insert(profile, square);
             doc.curves.insert(spine, path);
             let mut graph = Graph::empty();
-            let node = graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine, section: Default::default(), law: Default::default() });
+            let node = graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine: spine.into(), section: Default::default(), law: Default::default() });
             let field = GraphField::compile_graph(&doc, &graph, 1e-3).expect("compiles");
             let extent = graph_extent(&doc, &graph, node).as_box().expect("a sweep is bounded");
             (field, extent)
@@ -5524,13 +5524,13 @@
         doc.curves.insert(outline, square);
         doc.curves.insert(spine, path);
         let wall = fieldform_scene::Outline::Wall {
-            curve: outline,
+            curve: outline.into(),
             thickness: ParamRef::Literal(4.0),
             side: fieldform_scene::WallSide::Centre,
             ends: fieldform_scene::WallEnds::Square,
         };
         let mut graph = Graph::empty();
-        graph.add(Node::Sweep { rims: Default::default(), outline: wall.clone(), spine, section: Default::default(), law: Default::default() });
+        graph.add(Node::Sweep { rims: Default::default(), outline: wall.clone(), spine: spine.into(), section: Default::default(), law: Default::default() });
         let field = GraphField::compile_graph(&doc, &graph, 1e-3).expect("compiles");
         // The path starts in the section's plane, so nothing carries the solid off it.
         let offset = sweep_offset(&doc, &wall, spine).expect("a section");
@@ -5631,7 +5631,7 @@
             let mut graph = Graph::empty();
             graph.add(Node::Sweep { rims: Default::default(),
                 outline: outline.clone(),
-                spine,
+                spine: spine.into(),
                 section: Default::default(),
                 law: law.clone(),
             });
@@ -5701,7 +5701,7 @@
         let law = fieldform_scene::SweepLaw::default();
         let sweep = |section| {
             let mut graph = Graph::empty();
-            graph.add(Node::Sweep { rims: Default::default(), outline: outline.clone(), spine, section, law: law.clone() });
+            graph.add(Node::Sweep { rims: Default::default(), outline: outline.clone(), spine: spine.into(), section, law: law.clone() });
             graph
         };
         let stretch = sweep_stretch(&doc, &outline, spine, &law);
@@ -5781,7 +5781,7 @@
         assert!((lean - 0.5).abs() < 1e-3, "sixty degrees leans {lean}");
         assert!((sweep_lean(&doc, &outline, spine, &fieldform_scene::Section::Square) - 1.0).abs() < 1e-12);
         let mut graph = Graph::empty();
-        graph.add(Node::Sweep { outline: outline.clone(), spine, section, law, rims: Default::default() });
+        graph.add(Node::Sweep { outline: outline.clone(), spine: spine.into(), section, law, rims: Default::default() });
         let field = GraphField::compile_graph(&doc, &graph, 1e-3).expect("compiles");
         // Five above the top face, halfway along.
         let above = Point3::new(-50.0, -86.6, 7.0);
@@ -5848,7 +5848,7 @@
             sections: vec![
                 fieldform_scene::Outline::closed(a),
                 fieldform_scene::Outline::Wall {
-                    curve: b,
+                    curve: b.into(),
                     thickness: ParamRef::Literal(2.0),
                     side: fieldform_scene::WallSide::Centre,
                     ends: fieldform_scene::WallEnds::Square,
@@ -5956,7 +5956,7 @@
     fn a_sweep_wider_than_its_tightest_bend_is_refused_by_name() {
         let (doc, profile, spine) = sweep_document(20.0);
         let mut graph = Graph::empty();
-        graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine, section: Default::default(), law: Default::default() });
+        graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine: spine.into(), section: Default::default(), law: Default::default() });
         match GraphField::compile_graph(&doc, &graph, 1e-3).map(|_| ()) {
             Err(CompileError::BadSweep(named, crate::SweepError::FoldsThroughItself { .. })) => {
                 assert_eq!(named, spine, "the refusal names the spine that bends too hard")
@@ -5966,7 +5966,7 @@
 
         let (doc, profile, spine) = sweep_document(40.0);
         let mut graph = Graph::empty();
-        graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine, section: Default::default(), law: Default::default() });
+        graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine: spine.into(), section: Default::default(), law: Default::default() });
         assert!(
             GraphField::compile_graph(&doc, &graph, 1e-3).is_ok(),
             "the same square goes round a bend it fits"
@@ -5980,7 +5980,7 @@
     fn a_swept_body_is_bounded_by_its_spine_grown_by_its_profile() {
         let (doc, profile, spine) = sweep_document(40.0);
         let mut graph = Graph::empty();
-        graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine, section: Default::default(), law: Default::default() });
+        graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine: spine.into(), section: Default::default(), law: Default::default() });
         let Extent::Bounded { lo, hi } = part_extent(&doc, &graph) else {
             panic!("a sweep along a finite spine is bounded");
         };
@@ -7297,7 +7297,7 @@
                 let mut g = Graph::empty();
                 g.add(Node::Extrude { rims: Default::default(),
                     outline: fieldform_scene::Outline::Wall {
-                        curve: wall_curve,
+                        curve: wall_curve.into(),
                         thickness: lit(5.0),
                         side: fieldform_scene::WallSide::Left,
                         ends: fieldform_scene::WallEnds::Round,
@@ -7316,7 +7316,7 @@
                 g.add(Node::Sweep {
                     rims: Default::default(),
                     outline: fieldform_scene::Outline::closed(lens_curve),
-                    spine: lens_path,
+                    spine: lens_path.into(),
                     section: fieldform_scene::Section::Skewed,
                     law: Default::default(),
                 });
@@ -8711,7 +8711,7 @@
             out_max: lit(10.0),
             shape: fieldform_scene::RampShape::Linear,
         });
-        let pipe = graph.add(Node::Pipe { curve, radius: ParamRef::Field(ramp) });
+        let pipe = graph.add(Node::Pipe { curve: curve.into(), radius: ParamRef::Field(ramp) });
         assert_eq!(graph.roots(), vec![pipe], "the ramp and its plane are not bodies");
 
         let field = GraphField::compile_graph(&doc, &graph, 1e-4).expect("compiles");
@@ -9264,7 +9264,7 @@
             let (mut doc, profile) = sketch(0.0);
             let spine = spine_along(&mut doc, tip);
             let mut graph = Graph::empty();
-            graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine, section: Default::default(), law: Default::default() });
+            graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine: spine.into(), section: Default::default(), law: Default::default() });
             documents.push((label, doc, graph));
         }
         {
@@ -9272,7 +9272,7 @@
             let (mut doc, profile) = sketch(25.0);
             let spine = spine_along(&mut doc, Point3::new(50.0, 90.0, 0.0));
             let mut graph = Graph::empty();
-            graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine, section: Default::default(), law: Default::default() });
+            graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine: spine.into(), section: Default::default(), law: Default::default() });
             documents.push(("the same sweep, profile moved", doc, graph));
         }
         {
@@ -9368,7 +9368,7 @@
                 .expect("a line"),
             );
             let mut graph = Graph::empty();
-            graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine, section: Default::default(), law: Default::default() });
+            graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine: spine.into(), section: Default::default(), law: Default::default() });
             (doc, graph)
         };
         let _ = lit;
@@ -9435,7 +9435,7 @@
         let (doc, _, _) = document();
         let mut graph = Graph::empty();
         let _pipe = graph.add(Node::Pipe {
-            curve: CurveId::new(),
+            curve: CurveId::new().into(),
             radius: ParamRef::Literal(1.0),
         });
         assert!(matches!(
@@ -9494,6 +9494,51 @@
             ),
             "a body reading an unwired ramp is refused, naming the ramp and its slot",
         );
+    }
+
+    /// **A block waiting for a curve is refused by name, in both of the ways it can be met**:
+    /// on its own, and under something that reads it. `Graph::incomplete` passes over it before
+    /// any arm is reached, so the refusal is the fold's and names the block with the slot to
+    /// fill, rather than "the part has no bodies" or a missing-curve error about no curve at all.
+    #[test]
+    fn a_block_waiting_for_a_curve_is_refused_by_name() {
+        let (doc, _, curve) = document();
+        for block in [
+            Node::Pipe { curve: fieldform_scene::CurveSlot::empty(), radius: ParamRef::Literal(2.0) },
+            Node::Sweep {
+                outline: fieldform_scene::Outline::empty(),
+                spine: curve.into(),
+                section: Default::default(),
+                law: Default::default(),
+                rims: Default::default(),
+            },
+            Node::Loft {
+                sections: Vec::new(),
+                spine: None,
+                smooth: Default::default(),
+                rims: Default::default(),
+            },
+        ] {
+            let mut alone = Graph::empty();
+            let waiting = alone.add(block.clone());
+            assert!(
+                matches!(
+                    GraphField::compile(&doc, &part_with(alone), 0.01),
+                    Err(CompileError::WaitsForCurve { node }) if node == waiting
+                ),
+                "{block:?} alone is refused, naming itself",
+            );
+            let mut read = Graph::empty();
+            let waiting = read.add(block.clone());
+            let _above = read.add(Node::Offset { input: waiting.into(), distance: ParamRef::Literal(1.0) });
+            assert!(
+                matches!(
+                    GraphField::compile(&doc, &part_with(read), 0.01),
+                    Err(CompileError::WaitsForCurve { node }) if node == waiting
+                ),
+                "and read by an offset it is still the waiting block that is named",
+            );
+        }
     }
 
     /// **A ramp with nothing to read is not an error on its own.** It is an error only when

@@ -41,6 +41,23 @@ ARCHIVES = [
             "NIST_MBE_PMI_FTC_Definitions/nist_ftc_07_asme1_rd.pdf": "fcb214aa1aee70040b11eed88b65ebe42104f2ce1d0e94cb06668a75f8ec2456",
         },
     ),
+    (
+        # The additive manufacturing test artifact (Moylan et al.), its STEP model, 75 KB.
+        "https://www.nist.gov/system/files/documents/2017/10/19/nist_test_artifact_ver3b.zip",
+        {
+            "NIST Test Artifact_ver3b.step": "74e88ac8e49031a8708bf201447b9a2f68223afae807d38614b9938cc967f97e",
+        },
+    ),
+]
+
+# Files NIST serves on their own rather than in an archive, with the name each is kept under.
+FILES = [
+    (
+        # The AM test artifact's engineering drawing, two sheets, 70 KB.
+        "https://www.nist.gov/system/files/documents/el/isd/sbm/EngineeringDrawing.pdf",
+        "nist-am-drawing.pdf",
+        "97207b4e2ca11b4cb2b711a2b9665c6fe8fcd3011a334e572196690eaebea009",
+    ),
 ]
 
 
@@ -53,6 +70,13 @@ def have(member: str, expected: str) -> bool:
     return path.is_file() and sha256(path.read_bytes()) == expected
 
 
+def download(url: str) -> bytes:
+    # NIST's server answers 403 to Python's default user agent, so this one names itself.
+    request = urllib.request.Request(url, headers={"User-Agent": "fieldform-reference-cad-fetch/1"})
+    with urllib.request.urlopen(request, timeout=300) as response:
+        return response.read()
+
+
 def main() -> int:
     OUT.mkdir(exist_ok=True)
     failed = 0
@@ -63,10 +87,7 @@ def main() -> int:
             print(f"have {len(members)} file(s) from {url.rsplit('/', 1)[-1]}")
             continue
         print(f"fetching {url}")
-        # NIST's server answers 403 to Python's default user agent, so this one names itself.
-        request = urllib.request.Request(url, headers={"User-Agent": "fieldform-reference-cad-fetch/1"})
-        with urllib.request.urlopen(request, timeout=300) as response:
-            archive = zipfile.ZipFile(io.BytesIO(response.read()))
+        archive = zipfile.ZipFile(io.BytesIO(download(url)))
         for member, expected in wanted.items():
             name = pathlib.PurePosixPath(member).name
             try:
@@ -81,6 +102,18 @@ def main() -> int:
                 continue
             (OUT / name).write_bytes(data)
             print(f"  {name}  {len(data):,} bytes")
+    for url, name, expected in FILES:
+        if have(name, expected):
+            print(f"have {name}")
+            continue
+        print(f"fetching {url}")
+        data = download(url)
+        if sha256(data) != expected:
+            print(f"  REFUSED {name}: SHA-256 {sha256(data)}, the results were measured on {expected}")
+            failed += 1
+            continue
+        (OUT / name).write_bytes(data)
+        print(f"  {name}  {len(data):,} bytes")
     if failed:
         print(f"{failed} file(s) not fetched; the published results do not apply to what NIST serves now")
         return 1

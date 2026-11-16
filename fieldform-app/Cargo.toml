@@ -35,6 +35,13 @@ serde_json.workspace = true
 rmcp.workspace = true
 tokio.workspace = true
 
+# The local time zone and a drive's free space, which the standard library does not answer.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus.workspace = true
+
 [dev-dependencies]
 # To validate the preview's WGSL in a test: wgpu's answer to a shader it cannot compile is to
 # panic the application, so a mistake there has to be caught before anything creates a pipeline.

@@ -101,7 +101,7 @@ mod tests {
     /// then the letters in order** (§5.2).
     #[test]
     fn the_palette_ranks_by_verb_then_name_then_recency_then_fit() {
-        let ctx = Ctx { bodies: 2, pair_candidates: 2, selected: true, ..Default::default() };
+        let ctx = Ctx { bodies: 2, selected: true, ..Default::default() };
         assert_eq!(first("ext", &[], &ctx), "create.extrude", "a verb it begins");
         assert_eq!(first("pull", &[], &ctx), "create.extrude", "an alias it begins");
         assert_eq!(first("sph", &[], &ctx), "create.sphere");
@@ -118,10 +118,10 @@ mod tests {
     #[test]
     fn a_command_not_on_offer_is_listed_after_and_says_why() {
         let none = Ctx::default();
-        let hits = ranked("o", &[], &none);
-        let offset = hits.iter().position(|h| h.command.id == "modify.offset").expect("offset is listed");
-        assert_eq!(hits[offset].available, Err("Needs a body"));
-        assert!(hits[..offset].iter().all(|h| h.available.is_ok() || h.command.id == "modify.offset" || h.available.is_err()));
+        let hits = ranked("s", &[], &none);
+        // Split, the one modifier still gated on a body: the others make their block waiting.
+        let split = hits.iter().position(|h| h.command.id == "modify.split").expect("split is listed");
+        assert_eq!(hits[split].available, Err("Needs a body"));
         let last_available = hits.iter().rposition(|h| h.available.is_ok()).expect("something is on offer");
         let first_unavailable = hits.iter().position(|h| h.available.is_err()).expect("something is not");
         assert!(last_available < first_unavailable, "every available command comes first");

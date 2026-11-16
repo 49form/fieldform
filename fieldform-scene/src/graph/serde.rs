@@ -182,9 +182,21 @@ fn outline_fields<E: serde::ser::Error>(
     outline: &Outline,
 ) -> Result<Vec<(&'static str, Value)>, E> {
     Ok(match outline {
-        Outline::Closed { profile } => vec![("profile", json(profile)?)],
+        // **An empty slot is absence**, as an empty operand is (`slot_field`): a section waiting
+        // for its curve writes no `"profile"` at all.
+        Outline::Closed { profile } => match profile.source() {
+            Some(id) => vec![("profile", json(&id)?)],
+            None => Vec::new(),
+        },
         Outline::Wall { curve, thickness, side, ends } => {
-            let mut fields = vec![("wall", json(curve)?), ("thickness", json(thickness)?)];
+            // **A wall waiting for its curve writes `"wall": null`**, the one null here, because
+            // `"wall"` being present is what says which kind of section this is: left out, the
+            // thickness beside it would be read back onto a closed profile and dropped.
+            let named = match curve.source() {
+                Some(id) => json(&id)?,
+                None => Value::Null,
+            };
+            let mut fields = vec![("wall", named), ("thickness", json(thickness)?)];
             if *side != WallSide::default() {
                 fields.push(("side", json(side)?));
             }
@@ -368,11 +380,20 @@ fn read_outline<E: serde::de::Error>(
     let missing =
         |name: &str| E::custom(format!("{kind} node has no {name:?} field"));
     let Some(curve) = object.get("wall") else {
-        let profile = object.get("profile").ok_or_else(|| missing("profile"))?;
-        return Ok(Outline::Closed { profile: read(kind, "profile", profile)? });
+        // No `"profile"` either is a section waiting for its curve, which is what an empty slot
+        // writes. It was a hard error while a section could not be empty.
+        return Ok(Outline::Closed {
+            profile: match object.get("profile") {
+                Some(profile) => crate::CurveSlot::filled(read(kind, "profile", profile)?),
+                None => crate::CurveSlot::empty(),
+            },
+        });
     };
     Ok(Outline::Wall {
-        curve: read(kind, "wall", curve)?,
+        curve: match curve {
+            Value::Null => crate::CurveSlot::empty(),
+            named => crate::CurveSlot::filled(read(kind, "wall", named)?),
+        },
         // A wall with no thickness is damaged rather than newer, like any other missing field.
         thickness: read(
             kind,
@@ -818,7 +839,9 @@ impl Serialize for Node {
                 [(KIND, json(&"sweep")?)]
                     .into_iter()
                     .chain(outline_fields(outline)?)
-                    .chain([("spine", json(spine)?), ("section", json(section)?)])
+                    // Absent while the path is still to be named, as an empty operand is.
+                    .chain(spine.source().map(|id| json(&id).map(|v| ("spine", v))).transpose()?)
+                    .chain([("section", json(section)?)])
                     .chain(law_fields(law)?)
                     .chain(rim_fields(rims)?),
             ),
@@ -841,11 +864,13 @@ impl Serialize for Node {
                 fields.extend(rim_fields(rims)?);
                 json_fields(fields.into_iter())
             }
-            Node::Pipe { curve, radius } => json_object([
-                (KIND, json(&"pipe")?),
-                ("curve", json(curve)?),
-                ("radius", json(radius)?),
-            ]),
+            Node::Pipe { curve, radius } => json_fields(
+                [(KIND, json(&"pipe")?)]
+                    .into_iter()
+                    // Absent while the pipe waits for its curve, as an empty operand is.
+                    .chain(curve.source().map(|id| json(&id).map(|v| ("curve", v))).transpose()?)
+                    .chain([("radius", json(radius)?)]),
+            ),
             // **The fillet writes flat, as `radius` and `continuity`.** It is a type in the
             // code and two fields on disk, which is deliberate: making it a nested object would
             // move every blend ever saved for no gain, and the format's job is to be stable
@@ -1400,6 +1425,13 @@ impl<'de> Deserialize<'de> for Node {
         };
         // The boolean's list, where an empty slot is `null` so that it keeps its index — see
         // `slots_array` for why position is the information there.
+        // A curve a block is built from: absent is a slot waiting to be told, as `slot` reads it.
+        let curve_slot = |name: &str| -> Result<crate::CurveSlot, D::Error> {
+            match object.get(name) {
+                Some(value) => Ok(crate::CurveSlot::filled(read(kind, name, value)?)),
+                None => Ok(crate::CurveSlot::empty()),
+            }
+        };
         let slot_list = |name: &str| -> Result<Vec<Operand>, D::Error> {
             let mut out = Vec::new();
             for value in read::<Vec<Value>, D::Error>(kind, name, field(name)?)? {
@@ -1701,12 +1733,12 @@ impl<'de> Deserialize<'de> for Node {
                 rims: read_rims(kind, object)?,
             },
             "pipe" => Node::Pipe {
-                curve: read(kind, "curve", field("curve")?)?,
+                curve: curve_slot("curve")?,
                 radius: read(kind, "radius", field("radius")?)?,
             },
             "sweep" => Node::Sweep {
                 outline: read_outline(kind, object)?,
-                spine: read(kind, "spine", field("spine")?)?,
+                spine: curve_slot("spine")?,
                 // Absent in every document written before the choice existed, and square is
                 // what those were.
                 section: match object.get("section") {

@@ -367,15 +367,26 @@ fn field_names(verb: &str, args: &Args, older: &[(&str, &str)]) -> Result<Args, 
 /// What a curve-built block is built on: `profile=` a closed loop, `curve=` a wall on a curve,
 /// and the wall's `thickness=`, `side=` and `ends=`. `wall=true` turns a profile into a wall on
 /// its own curve, and `wall=false` back, which is the block's Wall checkbox typed.
+/// The slot a curve key asks for: the curve named, or -- for `none` -- the slot emptied, which
+/// leaves the block there and waiting (`console_keys::NOTHING`, the word an operand's key takes).
+fn curve_slot_named(
+    name: &str,
+    find: &dyn Fn(&str) -> Option<CurveId>,
+    missing: impl FnOnce() -> String,
+) -> Result<fieldform_scene::CurveSlot, String> {
+    let name = name.trim();
+    if name == crate::console_keys::NOTHING {
+        return Ok(fieldform_scene::CurveSlot::empty());
+    }
+    find(name).map(fieldform_scene::CurveSlot::filled).ok_or_else(missing)
+}
+
 fn outline_with_keys(verb: &str, node: &mut Node, args: &Args, cx: &Context) -> Result<(), String> {
     let lookup = cx.lookup;
     let before = node.clone();
     let Some(outline) = node.outline_mut() else { return Ok(()) };
-    let curve_of = |o: &Outline| match o {
-        Outline::Closed { profile } => *profile,
-        Outline::Wall { curve, .. } => *curve,
-    };
-    let as_wall = |o: &Outline, curve: CurveId| match o {
+    let curve_of = |o: &Outline| *o.slot();
+    let as_wall = |o: &Outline, curve: fieldform_scene::CurveSlot| match o {
         Outline::Wall { thickness, side, ends, .. } => Outline::Wall { curve, thickness: *thickness, side: *side, ends: *ends },
         Outline::Closed { .. } => Outline::Wall {
             curve,
@@ -388,13 +399,13 @@ fn outline_with_keys(verb: &str, node: &mut Node, args: &Args, cx: &Context) -> 
         (Some(_), Some(_)) => return Err(format!("`{verb}` builds on a profile or a curve — profile= or curve=, not both")),
         (Some(v), None) => {
             let name = v.text();
-            let id = (cx.profile)(name.trim()).ok_or_else(|| format!("no curve or profile is called {name:?}"))?;
-            *outline = Outline::Closed { profile: id };
+            let profile = curve_slot_named(&name, cx.profile, || format!("no curve or profile is called {name:?}"))?;
+            *outline = Outline::Closed { profile };
         }
         (None, Some(v)) => {
             let name = v.text();
-            let id = (cx.curve)(name.trim()).ok_or_else(|| format!("no curve is called {name:?}"))?;
-            *outline = as_wall(outline, id);
+            let slot = curve_slot_named(&name, cx.curve, || format!("no curve is called {name:?}"))?;
+            *outline = as_wall(outline, slot);
         }
         (None, None) => {}
     }
@@ -430,7 +441,10 @@ fn outline_with_keys(verb: &str, node: &mut Node, args: &Args, cx: &Context) -> 
         }
     }
     if let Some(v) = args.get("side") {
-        let curve = curve_of(outline);
+        // Which side is inside is read off the curve, so a wall waiting for one has none to name.
+        let curve = curve_of(outline)
+            .source()
+            .ok_or_else(|| format!("`{verb} side=` is read off the wall's curve, and this wall is waiting for one"))?;
         let side = crate::console::side_from_word(&v.text(), (cx.inside)(&before, curve))?;
         match outline {
             Outline::Wall { side: slot, .. } => *slot = side,
@@ -576,7 +590,7 @@ pub fn sweep_with_keys(mut node: Node, args: &Args, cx: &Context) -> Result<Node
     }
     if let Some(v) = args.get("spine") {
         let name = v.text();
-        *spine = (cx.curve)(name.trim()).ok_or_else(|| format!("no curve is called {name:?} for `sweep spine=`"))?;
+        *spine = curve_slot_named(&name, cx.curve, || format!("no curve is called {name:?} for `sweep spine=`"))?;
     }
     if let Some(v) = args.get("section") {
         *section = section_named(v)?;
@@ -622,11 +636,11 @@ pub fn loft_with_keys(mut node: Node, args: &Args, cx: &Context) -> Result<Node,
     if let Some(v) = args.get("sections") {
         let text = v.text();
         let mut found = Vec::new();
-        for name in text.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        // `sections=none` empties the list, and one name is a loft still short of its second:
+        // either leaves the block waiting rather than refusing the line (`waits_for_a_curve`).
+        let listed = text.split(',').map(str::trim).filter(|n| !n.is_empty());
+        for name in listed.filter(|n| !n.eq_ignore_ascii_case(console_keys::NOTHING)) {
             found.push(Outline::closed((cx.profile)(name).ok_or_else(|| format!("no curve or profile is called {name:?}"))?));
-        }
-        if found.len() < 2 {
-            return Err("`loft sections=` names two or more closed curves".to_string());
         }
         *sections = found;
     }
@@ -649,7 +663,7 @@ fn pipe_with_keys(mut node: Node, args: &Args, lookup: &dyn Fn(&str) -> Lookup, 
     let Node::Pipe { curve, radius } = &mut node else { return Err("`pipe` sets a pipe".to_string()) };
     if let Some(v) = args.get("curve") {
         let name = v.text();
-        *curve = (cx.curve)(name.trim()).ok_or_else(|| format!("no curve is called {name:?}"))?;
+        *curve = curve_slot_named(&name, cx.curve, || format!("no curve is called {name:?}"))?;
     }
     if let Some(v) = args.get("radius") {
         *radius = param_one("pipe", "radius", v, Slot::NumberOrField, lookup)?;

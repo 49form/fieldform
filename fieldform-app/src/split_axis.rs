@@ -314,10 +314,10 @@ impl App {
     /// that moves takes its axes with it, and an undo of an edit to U, V or length catches the line
     /// up with no code of its own. Not run mid-drag: a drag skips the rebuild by design, so an axis
     /// follows a dragged body when the hand comes off. An axis whose ray no longer meets its body
-    /// keeps its last good place and says why in its panel (`surface_axis_notes`).
+    /// keeps its last good place and says why in its panel (`curve_ui.surface_axis_notes`).
     pub(crate) fn refresh_surface_axes(&mut self) -> bool {
         if self.doc.surface_axes.is_empty() {
-            self.surface_axis_notes.clear();
+            self.curve_ui.surface_axis_notes.clear();
             return false;
         }
         let axes: Vec<(CurveId, SurfaceAxis)> =
@@ -335,13 +335,13 @@ impl App {
     /// One axis, derived and written. See [`Self::refresh_surface_axes`].
     fn refresh_surface_axis(&mut self, id: CurveId, axis: SurfaceAxis) -> bool {
         let Some(graph) = self.graph_holding(axis.body).cloned() else {
-            self.surface_axis_notes
+            self.curve_ui.surface_axis_notes
                 .insert(id, "the body it stands on is gone — the line keeps its last place".to_string());
             return false;
         };
         match solve_surface_axis(&self.doc, &graph, &axis, &mut self.leaves) {
             Ok(points) => {
-                self.surface_axis_notes.remove(&id);
+                self.curve_ui.surface_axis_notes.remove(&id);
                 let Some(curve) = self.doc.curve_mut(id) else { return false };
                 if curve.control_points().len() != 2 {
                     return false;
@@ -357,7 +357,7 @@ impl App {
                 differs
             }
             Err(why) => {
-                self.surface_axis_notes.insert(id, format!("{why} — the line keeps its last place"));
+                self.curve_ui.surface_axis_notes.insert(id, format!("{why} — the line keeps its last place"));
                 false
             }
         }
@@ -749,15 +749,15 @@ impl App {
             " mm",
             "How far the line reaches from the surface, along the field's direction",
         );
-        if let Some(note) = self.surface_axis_notes.get(&id) {
+        if let Some(note) = self.curve_ui.surface_axis_notes.get(&id) {
             ui.colored_label(ui.visuals().warn_fg_color, note.clone());
         }
 
         // **One history entry per gesture**: the record before the first change of it is kept,
         // and the entry is written when a frame passes with no change and no button held -- the
         // hand has come off the drag, or the typed number has been entered.
-        if touched && self.surface_axis_edit_before.is_none() {
-            self.surface_axis_edit_before = Some((id, axis));
+        if touched && self.curve_ui.surface_axis_edit_before.is_none() {
+            self.curve_ui.surface_axis_edit_before = Some((id, axis));
         }
         let settled = !touched && !ui.input(|i| i.pointer.any_down());
         if edited != axis {
@@ -771,7 +771,7 @@ impl App {
         let commit = if stepped && edited != axis {
             Some(axis)
         } else if settled {
-            self.surface_axis_edit_before.take().filter(|(c, _)| *c == id).map(|(_, before)| before)
+            self.curve_ui.surface_axis_edit_before.take().filter(|(c, _)| *c == id).map(|(_, before)| before)
         } else {
             None
         };
@@ -911,7 +911,7 @@ impl App {
         self.clear_hidden(split.tool);
         self.select_body(Some(split.inside));
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         self.say(if split.made_tool {
             format!(
@@ -1018,7 +1018,7 @@ impl App {
 
     /// Whether the view draws the field, so that clicking a surface means the field's surface.
     pub(crate) fn field_is_drawn(&self) -> bool {
-        self.view_mode != ViewMode::Polygon
+        self.view.mode != ViewMode::Polygon
     }
 
     /// Begins an axis the viewport will finish: two clicks, or one on a surface.
@@ -1035,7 +1035,7 @@ impl App {
             );
             return;
         }
-        self.pending_curve = Some(PendingCurve {
+        self.curve_ui.pending = Some(PendingCurve {
             placed: 0,
             degree: 1,
             first: None,
@@ -1069,12 +1069,12 @@ impl App {
         };
         // The length is the one the axis already has when it is being re-pointed: a restand moves
         // where it stands, and nothing else about it.
-        let restanding = self.pending_curve.as_ref().and_then(|p| p.restanding);
+        let restanding = self.curve_ui.pending.as_ref().and_then(|p| p.restanding);
         let length = restanding
             .and_then(|id| self.doc.surface_axes.get(&id).map(|a| a.length))
             .unwrap_or(ParamRef::Literal(AXIS_NORMAL_LENGTH_MM));
         if self.stand_axis_on_surface_for(at, length, restanding) {
-            self.pending_curve = None;
+            self.curve_ui.pending = None;
         }
     }
 

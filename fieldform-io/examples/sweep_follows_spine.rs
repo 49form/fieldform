@@ -33,7 +33,9 @@ fn main() {
         .graph
         .nodes()
         .find_map(|(id, n)| match n {
-            Node::Sweep { outline, spine, .. } => Some((id, outline.curve(), *spine)),
+            // One that names both its section and its path: a sweep waiting for either has
+            // nothing to follow.
+            Node::Sweep { outline, spine, .. } => Some((id, outline.curve()?, spine.source()?)),
             _ => None,
         })
         .expect("a sweep");
@@ -50,7 +52,7 @@ fn main() {
     );
 
     let wall = Outline::Wall {
-        curve: profile,
+        curve: profile.into(),
         thickness: ParamRef::Literal(6.0),
         side: WallSide::Centre,
         ends: WallEnds::Square,
@@ -64,7 +66,7 @@ fn main() {
     ];
     for (label, outline, section) in cases {
         let mut graph = part.graph.clone();
-        *graph.node_mut(node).expect("the sweep") = Node::Sweep { rims: Default::default(), outline, spine, section, law: Default::default() };
+        *graph.node_mut(node).expect("the sweep") = Node::Sweep { rims: Default::default(), outline, spine: spine.into(), section, law: Default::default() };
         let field = match GraphField::compile_graph(&doc, &graph, 0.5) {
             Ok(f) => f,
             Err(e) => {

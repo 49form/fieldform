@@ -43,12 +43,12 @@ impl App {
         let doc_before = self.doc.clone();
         let mark = self.stack.mark();
         let selected_before = (self.selected_body, self.selected_curve, self.selected_block);
-        let view_mode_before = self.view_mode;
+        let view_mode_before = self.view.mode;
         let moves = self.document_moves;
         // The values it was last kept with, this session of the application (§3.2), over its own
         // fixed arguments; its defaults otherwise.
         let mut args = command.fixed_args();
-        if let Some(last) = self.last_values.get(command.id) {
+        if let Some(last) = self.tools.last_values.get(command.id) {
             for (k, v) in last.iter() {
                 if args.get(k).is_none() {
                     args = args.with(k, v.clone());
@@ -76,9 +76,9 @@ impl App {
                 drop(mark);
                 // What no line spells -- a Tessellate block is an output, not a block of the graph
                 // -- is written as the command that made it, as `invoke_command` does.
-                let written = self.echo_log.len();
+                let written = self.console.echo_log.len();
                 self.echo_settle();
-                if self.echo_log.len() == written {
+                if self.console.echo_log.len() == written {
                     self.echo_line(command.console_line());
                     self.echo_rebase();
                 }
@@ -90,7 +90,7 @@ impl App {
         if self.selected_body != Some(block) {
             self.select_body(Some(block));
         }
-        self.session = Some(Session {
+        self.tools.session = Some(Session {
             command,
             block,
             doc_before,
@@ -105,10 +105,10 @@ impl App {
     /// Keeps the pending session, if there is one: one undo entry for its making and every edit
     /// since, its values remembered for next time, and its line written (§3.4).
     pub(crate) fn commit_session(&mut self) {
-        let Some(session) = self.session.take() else { return };
+        let Some(session) = self.tools.session.take() else { return };
         self.stack.keep_since(session.mark, session.command.display_name.trim_end_matches("..."));
         // Kept, so it is what Shift+R runs next (§8).
-        self.last_command = Some(session.command);
+        self.tools.last_command = Some(session.command);
         // The next edit is an entry of its own, not a continuation of the session's last.
         self.gesture = None;
         if let Some(node) = self.part_graph().node(session.block).cloned()
@@ -119,7 +119,7 @@ impl App {
                 .iter()
                 .filter(|(k, _)| !MADE_FROM.contains(k) && *k != "wrap")
                 .fold(Args::new(), |a, (k, v)| a.with(k, console::parse_value(v)));
-            self.last_values.insert(session.command.id, remembered);
+            self.tools.last_values.insert(session.command.id, remembered);
         }
         self.echo_settle();
     }
@@ -127,7 +127,7 @@ impl App {
     /// Takes the pending session back, if there is one: the document, its names and the history as
     /// they were before it began, and the selection with them (§3.5).
     pub(crate) fn cancel_session(&mut self) {
-        let Some(session) = self.session.take() else { return };
+        let Some(session) = self.tools.session.take() else { return };
         self.doc = session.doc_before;
         self.stack.cancel_to(session.mark);
         self.gesture = None;
@@ -136,22 +136,22 @@ impl App {
         self.selected_body = body;
         self.selected_curve = curve;
         self.selected_block = block;
-        self.view_mode = session.view_mode_before;
+        self.view.mode = session.view_mode_before;
         self.after_document_change();
         // Nothing happened, so the echo has nothing to say about it.
-        self.echo_base.moves = self.document_moves;
+        self.console.echo_base.moves = self.document_moves;
         self.say(format!("{} taken back", session.command.display_name.trim_end_matches("...")));
     }
 
     /// Whether `id` is the block a session is waiting on.
     pub(crate) fn is_pending(&self, id: NodeId) -> bool {
-        self.session.as_ref().is_some_and(|s| s.block == id)
+        self.tools.session.as_ref().is_some_and(|s| s.block == id)
     }
 
     /// Keeps the pending session once its block is no longer what is selected: a click on empty
     /// space, or on something else (§3.4). Asked at the end of a frame, when nothing is mid-drag.
     pub(crate) fn keep_when_selection_moves(&mut self, ctx: &egui::Context) {
-        let Some(session) = &self.session else { return };
+        let Some(session) = &self.tools.session else { return };
         let moved = self.selected_body != Some(session.block);
         let busy = ctx.input(|i| i.pointer.any_down()) || self.gizmo_drag.is_some() || self.move_state.is_some();
         if moved && !busy {

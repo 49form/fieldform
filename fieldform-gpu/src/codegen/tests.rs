@@ -510,7 +510,7 @@
             out_max: lit(6.0),
             shape: fieldform_scene::RampShape::Linear,
         });
-        let pipe = graph.add(Node::Pipe { curve, radius: ParamRef::Field(ramp) });
+        let pipe = graph.add(Node::Pipe { curve: curve.into(), radius: ParamRef::Field(ramp) });
 
         let program = generate(&doc, &graph).expect("the shader compiles");
         let divisor = fieldform_field::driven_pipe_divisor(&doc, &graph, pipe);
@@ -1365,7 +1365,7 @@
         doc.curves.insert(profile, square);
         doc.curves.insert(spine, path);
         let mut graph = Graph::empty();
-        let sweep = graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine, section: Default::default(), law: Default::default() });
+        let sweep = graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine: spine.into(), section: Default::default(), law: Default::default() });
 
         let program = generate(&doc, &graph).expect("a sweep generates a shader");
         assert_eq!(
@@ -1465,7 +1465,7 @@
             graph.add(Node::Sweep {
                 rims: Default::default(),
                 outline: outline.clone(),
-                spine,
+                spine: spine.into(),
                 section: section.clone(),
                 law: law.clone(),
             });
@@ -1718,7 +1718,7 @@
             let mut graph = Graph::empty();
             graph.add(Node::Sweep { rims: Default::default(),
                 outline: fieldform_scene::Outline::closed(profile),
-                spine,
+                spine: spine.into(),
                 section: Default::default(),
                 law,
             });
@@ -1808,6 +1808,37 @@
         };
         assert!(matches!(error, CodegenError::UnreadableNode(_)));
         assert!(error.to_string().contains("acme.lattice"), "names the kind: {error}");
+    }
+
+    /// **A block with an empty curve slot is the same refusal one kind over**: a pipe made
+    /// before its curve, a loft before its sections. `Graph::incomplete` reads both holes, so
+    /// the plan passes over the block and the refusal is the part's, naming the block to fill --
+    /// the same block, under the same name, that the field's compile refuses.
+    #[test]
+    fn the_shader_refuses_a_block_waiting_for_a_curve_by_name() {
+        let doc = fieldform_scene::Document::new();
+        for block in [
+            Node::Pipe { curve: fieldform_scene::CurveSlot::empty(), radius: lit(2.0) },
+            Node::Loft {
+                sections: Vec::new(),
+                spine: None,
+                smooth: Default::default(),
+                rims: Default::default(),
+            },
+        ] {
+            let mut graph = Graph::empty();
+            let waiting = graph.add(block.clone());
+            let _above = graph.add(Node::Offset { input: waiting.into(), distance: lit(1.0) });
+            let error = match generate(&doc, &graph) {
+                Err(error) => error,
+                Ok(program) => panic!("a shader was generated for {block:?}: {}", program.source),
+            };
+            assert_eq!(
+                error,
+                CodegenError::WaitsForCurve(waiting),
+                "the waiting block, named, as the field's compile names it: {error}"
+            );
+        }
     }
 
     /// A part with an empty slot in it generates no shader, and the refusal names the block
@@ -1937,12 +1968,12 @@
 
         let mut graph = Graph::from_cage(cage);
         let cage_node = graph.roots()[0];
-        let pipe = graph.add(Node::Pipe { curve, radius: ParamRef::Literal(5.0) });
+        let pipe = graph.add(Node::Pipe { curve: curve.into(), radius: ParamRef::Literal(5.0) });
         let cut = graph.add(Node::Boolean {
             op: BooleanOp::Difference,
             inputs: vec![cage_node.into(), pipe.into()],
         });
-        let second = graph.add(Node::Pipe { curve, radius: ParamRef::Literal(2.0) });
+        let second = graph.add(Node::Pipe { curve: curve.into(), radius: ParamRef::Literal(2.0) });
         graph.add(Node::Blend {
             op: BooleanOp::Union,
             inputs: vec![cut.into(), second.into()],
@@ -1971,7 +2002,7 @@
         let build = |radius: f64| {
             let mut graph = Graph::from_cage(cage);
             let cage_node = graph.roots()[0];
-            let pipe = graph.add(Node::Pipe { curve, radius: ParamRef::Literal(radius) });
+            let pipe = graph.add(Node::Pipe { curve: curve.into(), radius: ParamRef::Literal(radius) });
             graph.add(Node::Boolean {
                 op: BooleanOp::Union,
                 inputs: vec![cage_node.into(), pipe.into()],
@@ -2206,7 +2237,7 @@
         let build = |op: BooleanOp| {
             let mut graph = Graph::from_cage(cage);
             let cage_node = graph.roots()[0];
-            let pipe = graph.add(Node::Pipe { curve, radius: ParamRef::Literal(5.0) });
+            let pipe = graph.add(Node::Pipe { curve: curve.into(), radius: ParamRef::Literal(5.0) });
             graph.add(Node::Boolean { op, inputs: vec![cage_node.into(), pipe.into()] });
             generate(&fieldform_scene::Document::new(), &graph).unwrap().source
         };
@@ -2222,7 +2253,7 @@
         let mut graph = Graph::from_cage(CageId::new());
         let cage_node = graph.roots()[0];
         let pipe = graph.add(Node::Pipe {
-            curve: CurveId::new(),
+            curve: CurveId::new().into(),
             radius: ParamRef::Named(param),
         });
         graph.add(Node::Boolean {
@@ -2318,7 +2349,7 @@
                 )
                 .expect("a bent line"),
             );
-            pipes.push(graph.add(Node::Pipe { curve: id, radius: lit(9.0) }));
+            pipes.push(graph.add(Node::Pipe { curve: id.into(), radius: lit(9.0) }));
         }
         if pipes.len() > 1 {
             graph.add(Node::Boolean { op: BooleanOp::Union, inputs: pipes.into_iter().map(Into::into).collect() });
@@ -2407,6 +2438,229 @@
             "the generated source grew from {least} to {most} lines over 2 to 32 pipes, so \
              something is still being written out per operand"
         );
+    }
+
+    /// `n` bent pipes on their own spokes, as `spokes` lays them, not yet joined: each radius a
+    /// number, or -- with `ramps` of them to go round -- a ramp's reading, taken turn about, so
+    /// one ramp drives them all and two leave no two neighbours on the same one.
+    fn bone_pipes(n: usize, ramps: usize) -> (fieldform_scene::Document, Graph, Vec<NodeId>) {
+        let mut doc = fieldform_scene::Document::new();
+        let mut graph = Graph::empty();
+        let drivers: Vec<NodeId> = (0..ramps)
+            .map(|i| {
+                let hub = graph.add(Node::Sphere {
+                    centre: fieldform_scene::Place::At([lit(0.0); 3]),
+                    radius: lit(1.0 + i as f64),
+                });
+                graph.add(Node::Ramp {
+                    input: hub.into(),
+                    in_min: lit(0.0),
+                    in_max: lit(140.0),
+                    out_min: lit(11.0),
+                    out_max: lit(5.0),
+                    shape: fieldform_scene::RampShape::Linear,
+                })
+            })
+            .collect();
+        let mut pipes = Vec::new();
+        for i in 0..n {
+            let turn = std::f64::consts::TAU * i as f64 / n.max(1) as f64;
+            let (c, s) = (turn.cos(), turn.sin());
+            let id = fieldform_scene::CurveId::new();
+            let at = |r: f64, z: f64| nalgebra::Point3::new(r * c, r * s, z);
+            doc.curves.insert(
+                id,
+                fieldform_scene::Curve::polyline(
+                    id,
+                    "bone",
+                    vec![at(20.0, 0.0), at(80.0, 25.0), at(140.0, -10.0)],
+                    false,
+                )
+                .expect("a bent line"),
+            );
+            let radius = match drivers.len() {
+                0 => lit(9.0),
+                k => ParamRef::Field(drivers[i % k]),
+            };
+            pipes.push(graph.add(Node::Pipe { curve: id.into(), radius }));
+        }
+        (doc, graph, pipes)
+    }
+
+    /// The fillet a frame of bones is joined with in these tests: G2, reaching 6 mm.
+    fn bone_fillet() -> Fillet {
+        Fillet { radius: lit(6.0), continuity: fieldform_scene::Continuity::G2, second: None }
+    }
+
+    /// Those pipes in one join: a union, or the blend a frame of bones is really made with.
+    fn bones(n: usize, ramps: usize, blended: bool) -> (fieldform_scene::Document, Graph) {
+        let (doc, mut graph, pipes) = bone_pipes(n, ramps);
+        let inputs = pipes.into_iter().map(Into::into).collect();
+        if blended {
+            graph.add(Node::Blend { op: BooleanOp::Union, inputs, fillet: bone_fillet() });
+        } else {
+            graph.add(Node::Boolean { op: BooleanOp::Union, inputs });
+        }
+        (doc, graph)
+    }
+
+    fn blended_bones(n: usize) -> (fieldform_scene::Document, Graph) {
+        bones(n, 0, true)
+    }
+
+    fn tapered_bones(n: usize) -> (fieldform_scene::Document, Graph) {
+        bones(n, 1, false)
+    }
+
+    fn blended_tapered_bones(n: usize) -> (fieldform_scene::Document, Graph) {
+        bones(n, 1, true)
+    }
+
+    /// **The union's loop, for the join a frame of bones is made with.** A blend of a list is a
+    /// chain, and twenty pipes in one were twenty calls -- 505 seconds of the driver's time on
+    /// the chair this was found on, against 2.7 for the same pipes unioned -- so the chain is
+    /// one walk now, and the source stops growing with the count as the union's did. No
+    /// `blend_bound` is left in the body either: every join is inside the walk.
+    #[test]
+    fn a_blend_of_pipes_writes_one_walk_however_many_pipes_it_takes() {
+        let mut sizes = Vec::new();
+        for n in [RUN_FLOOR, 8, 16, 32] {
+            let (doc, graph) = blended_bones(n);
+            let program = generate(&doc, &graph).expect("generates");
+            validate(&program.source).expect("the walked blend parses and validates");
+            let body = field_body(&program.source);
+            assert_eq!(body.matches("pipe_blend_run(").count(), 1, "one loop at {n} pipes");
+            assert_eq!(body.matches("pipe_distance(").count(), 0, "no pipe written out at {n}");
+            assert_eq!(body.matches("blend_bound(").count(), 0, "no join written out at {n}");
+            assert!(body.contains("false, 1e30"), "plain radii, and nothing made before the run");
+            assert_eq!(
+                program.source.matches("pipe_blend_run_nearest(").count(),
+                // The prelude's definition and the normal pass's one call.
+                2,
+                "the normal pass walks the same run at {n}"
+            );
+            sizes.push(program.field_function().lines().count());
+        }
+        // Below the floor it is the chain it always was: a call a pipe and a join a link.
+        for n in 2..RUN_FLOOR {
+            let (doc, graph) = blended_bones(n);
+            let program = generate(&doc, &graph).expect("generates");
+            let body = field_body(&program.source);
+            assert_eq!(body.matches("pipe_blend_run(").count(), 0, "{n} pipes is below the floor");
+            assert_eq!(body.matches("pipe_distance(").count(), n, "one call each at {n}");
+            assert_eq!(body.matches("blend_bound(").count(), n - 1, "one join a link at {n}");
+        }
+        let (least, most) = (sizes[0], *sizes.last().expect("rows"));
+        assert!(
+            most <= least + 2,
+            "the generated source grew from {least} to {most} lines over {RUN_FLOOR} to 32 \
+             blended pipes, so something is still being written out per operand"
+        );
+    }
+
+    /// **Pipes one ramp tapers are a run; pipes two ramps taper are not.** The ramp is read
+    /// once outside the loop, so its members differ by a spine and a divisor -- but that is
+    /// only so while it is *one* reading. Two ramps taken turn about leave no two neighbours
+    /// alike, and every pipe is the call it was.
+    #[test]
+    fn pipes_one_ramp_drives_are_one_walk_and_two_ramps_end_each_others_run() {
+        for blended in [false, true] {
+            let walk = if blended { "pipe_blend_run(" } else { "driven_pipe_run_distance(" };
+            for n in [RUN_FLOOR, 8, 16] {
+                let (doc, graph) = bones(n, 1, blended);
+                let program = generate(&doc, &graph).expect("generates");
+                validate(&program.source).expect("the walked taper parses and validates");
+                let body = field_body(&program.source);
+                assert_eq!(body.matches(walk).count(), 1, "one loop at {n} tapered pipes");
+                assert_eq!(body.matches("pipe_distance(").count(), 0, "none written out at {n}");
+                if blended {
+                    assert!(body.contains("true, 1e30"), "the run is told its radii are driven");
+                }
+            }
+            let (doc, graph) = bones(8, 2, blended);
+            let program = generate(&doc, &graph).expect("generates");
+            validate(&program.source).expect("the written-out taper parses and validates");
+            let body = field_body(&program.source);
+            assert_eq!(body.matches(walk).count(), 0, "two ramps taken turn about are no run");
+            assert_eq!(body.matches("pipe_distance(").count(), 8, "so each pipe is its own call");
+        }
+    }
+
+    /// **A run stands in a blend's list where its first member stood**, because the chain is
+    /// order: what was made before the run goes in as the walk's starting value, and what the
+    /// walk made is joined to whatever follows. A ball, the pipes, a ball -- so the walk is
+    /// handed a name rather than `1e30`, and exactly one join is left written out after it.
+    #[test]
+    fn a_run_in_a_blend_takes_what_was_made_before_it_and_hands_on_what_it_made() {
+        let (doc, mut graph, pipes) = bone_pipes(RUN_FLOOR + 1, 0);
+        let ball = |graph: &mut Graph, x: f64| {
+            graph.add(Node::Sphere {
+                centre: fieldform_scene::Place::At([lit(x), lit(0.0), lit(0.0)]),
+                radius: lit(18.0),
+            })
+        };
+        let (before, after) = (ball(&mut graph, 0.0), ball(&mut graph, 150.0));
+        let mut inputs: Vec<fieldform_scene::Operand> = vec![before.into()];
+        inputs.extend(pipes.into_iter().map(fieldform_scene::Operand::from));
+        inputs.push(after.into());
+        graph.add(Node::Blend { op: BooleanOp::Union, inputs, fillet: bone_fillet() });
+        let program = generate(&doc, &graph).expect("generates");
+        validate(&program.source).expect("parses and validates");
+        let body = field_body(&program.source);
+        assert_eq!(body.matches("pipe_blend_run(").count(), 1);
+        assert_eq!(body.matches("pipe_distance(").count(), 0);
+        assert!(!body.contains("false, 1e30"), "the run starts from the ball before it");
+        assert_eq!(body.matches("blend_bound(").count(), 1, "the ball after it is one join more");
+        // And the two passes still count one buffer between them.
+        let highest = program
+            .source
+            .split("params[")
+            .skip(1)
+            .filter_map(|rest| rest.split(']').next())
+            .filter_map(|s| s.trim().parse::<usize>().ok())
+            .max()
+            .expect("the shader reads parameters");
+        assert!(highest < program.params.len(), "slot {highest} of {}", program.params.len());
+    }
+
+    /// **A blend whose join is a different body keeps its list written out**, each for the
+    /// reason `blend_run` gives: a difference negates, a chamfer of two legs scales its
+    /// operands, and a driven radius divides every step by a bound of its own.
+    #[test]
+    fn a_blend_that_negates_scales_or_drives_its_radius_is_written_out() {
+        let n = RUN_FLOOR + 2;
+        let cases: [(&str, BooleanOp, fn(&mut Graph) -> Fillet); 3] = [
+            ("a difference", BooleanOp::Difference, |_| bone_fillet()),
+            ("a chamfer of two legs", BooleanOp::Union, |_| Fillet {
+                radius: lit(2.0),
+                continuity: fieldform_scene::Continuity::Chamfer,
+                second: Some(lit(5.0)),
+            }),
+            ("a driven radius", BooleanOp::Union, |graph| {
+                let hub = graph.add(Node::Sphere {
+                    centre: fieldform_scene::Place::At([lit(0.0); 3]),
+                    radius: lit(1.0),
+                });
+                let ramp = graph.add(Node::Ramp {
+                    input: hub.into(),
+                    in_min: lit(0.0),
+                    in_max: lit(140.0),
+                    out_min: lit(2.0),
+                    out_max: lit(6.0),
+                    shape: fieldform_scene::RampShape::Linear,
+                });
+                Fillet { radius: ParamRef::Field(ramp), continuity: fieldform_scene::Continuity::G1, second: None }
+            }),
+        ];
+        for (what, op, fillet) in cases {
+            let (doc, mut graph, pipes) = bone_pipes(n, 0);
+            let fillet = fillet(&mut graph);
+            graph.add(Node::Blend { op, inputs: pipes.into_iter().map(Into::into).collect(), fillet });
+            let program = generate(&doc, &graph).expect("generates");
+            let body = field_body(&program.source);
+            assert_eq!(body.matches("pipe_blend_run(").count(), 0, "{what} is no run");
+            assert_eq!(body.matches("pipe_distance(").count(), n, "{what}: each pipe its own call");
+        }
     }
 
     /// A pattern of a lug, then a sphere as a body of its own, so the sphere's slots come after
@@ -2609,8 +2863,14 @@
         // way and the run is only one of the two things they count. An extrude's twelve slots a
         // member is the figure most exposed to this: it is written once in WGSL and once in
         // `RunKind::slots_each`, and nothing but this holds the two to the same number.
-        let builders: [(&str, fn(usize) -> (fieldform_scene::Document, Graph)); 2] =
-            [("pipes", spokes), ("blades", blades)];
+        let builders: [(&str, fn(usize) -> (fieldform_scene::Document, Graph)); 5] = [
+            ("pipes", spokes),
+            ("blades", blades),
+            // The runs a frame of bones takes: joined by a blend, tapered by one ramp, and both.
+            ("blended pipes", blended_bones),
+            ("tapered pipes", tapered_bones),
+            ("blended tapered pipes", blended_tapered_bones),
+        ];
         for (kind, build) in builders {
             for n in [2usize, 3, RUN_FLOOR, 5, 8, 16] {
                 let (doc, graph) = build(n);
@@ -2903,7 +3163,7 @@
                 )
                 .expect("a line"),
             );
-            inputs.push(graph.add(Node::Pipe { curve: id, radius: lit(5.0) }));
+            inputs.push(graph.add(Node::Pipe { curve: id.into(), radius: lit(5.0) }));
         }
         graph.add(Node::Boolean {
             op: BooleanOp::Union,
@@ -3001,8 +3261,8 @@
             .expect("a line"),
         );
         let mut graph = Graph::empty();
-        let a = graph.add(Node::Pipe { curve, radius: lit(5.0) });
-        let b = graph.add(Node::Pipe { curve, radius: lit(9.0) });
+        let a = graph.add(Node::Pipe { curve: curve.into(), radius: lit(5.0) });
+        let b = graph.add(Node::Pipe { curve: curve.into(), radius: lit(9.0) });
         graph.add(Node::Boolean { op: BooleanOp::Union, inputs: vec![a.into(), b.into()] });
         let shared_spine = generate(&doc, &graph).expect("generates");
         assert_eq!(
@@ -3031,7 +3291,7 @@
                 )
                 .expect("a line"),
             );
-            ids.push(graph.add(Node::Pipe { curve: id, radius: lit(5.0) }));
+            ids.push(graph.add(Node::Pipe { curve: id.into(), radius: lit(5.0) }));
         }
         let ball = graph.add(Node::Sphere {
             centre: fieldform_scene::Place::At([lit(0.0); 3]),
@@ -3074,7 +3334,7 @@
                         inputs
                             .iter()
                             .map(|slot| match slot.source().and_then(|id| graph.node(id)) {
-                                Some(Node::Pipe { curve, .. }) => *curve,
+                                Some(Node::Pipe { curve, .. }) => curve.source().expect("a pipe that names its curve"),
                                 _ => panic!("every operand is a pipe"),
                             })
                             .collect(),
@@ -3166,7 +3426,7 @@
         let mut graph = Graph::from_cage(CageId::new());
         let a = graph.roots()[0];
         let b = graph.add(Node::Pipe {
-            curve: CurveId::new(),
+            curve: CurveId::new().into(),
             radius: ParamRef::Literal(1.0),
         });
         graph.add(Node::Boolean {
@@ -4487,7 +4747,7 @@
                 .expect("a bent line"),
             );
             let mut graph = Graph::empty();
-            graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine, section: Default::default(), law: Default::default() });
+            graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine: spine.into(), section: Default::default(), law: Default::default() });
             let program = generate(&doc, &graph).expect("a sweep generates");
             (program.source, fieldform_field::sweep_stretch(&doc, &fieldform_scene::Outline::closed(profile), spine, &Default::default()))
         };
@@ -4543,7 +4803,7 @@
             .expect("a line"),
         );
         let mut graph = Graph::empty();
-        graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine, section: Default::default(), law: Default::default() });
+        graph.add(Node::Sweep { rims: Default::default(), outline: fieldform_scene::Outline::closed(profile), spine: spine.into(), section: Default::default(), law: Default::default() });
         let source = generate(&doc, &graph).expect("a sweep generates").source;
         let cut = source
             .find("// ---- generated from the composition graph ----")
@@ -4654,7 +4914,7 @@
     fn a_program_names_the_node_behind_every_mask_bit() {
         let doc = fieldform_scene::Document::new();
         let mut graph = Graph::empty();
-        let pipe = |graph: &mut Graph| graph.add(Node::Pipe { curve: CurveId::new(), radius: lit(5.0) });
+        let pipe = |graph: &mut Graph| graph.add(Node::Pipe { curve: CurveId::new().into(), radius: lit(5.0) });
         let (a, b) = (pipe(&mut graph), pipe(&mut graph));
         graph.add(Node::Boolean { op: BooleanOp::Union, inputs: vec![a.into(), b.into()] });
         let program = generate_with_masks(&doc, &graph, true).expect("generates");
@@ -4691,7 +4951,7 @@
     fn a_mask_counts_only_the_work_its_own_operand_does() {
         let doc = fieldform_scene::Document::new();
         let pipe = |graph: &mut Graph| {
-            graph.add(Node::Pipe { curve: CurveId::new(), radius: lit(5.0) })
+            graph.add(Node::Pipe { curve: CurveId::new().into(), radius: lit(5.0) })
         };
 
         let mut apart = Graph::empty();
@@ -4721,7 +4981,7 @@
         let doc = fieldform_scene::Document::new();
         let pipes = |graph: &mut Graph| {
             let pipe =
-                || Node::Pipe { curve: CurveId::new(), radius: lit(5.0) };
+                || Node::Pipe { curve: CurveId::new().into(), radius: lit(5.0) };
             (graph.add(pipe()), graph.add(pipe()))
         };
         let masked = |op: BooleanOp| {
@@ -4761,7 +5021,7 @@
         };
         let pipes = |graph: &mut Graph| {
             let pipe = |graph: &mut Graph| {
-                graph.add(Node::Pipe { curve: CurveId::new(), radius: lit(5.0) })
+                graph.add(Node::Pipe { curve: CurveId::new().into(), radius: lit(5.0) })
             };
             (pipe(graph), pipe(graph))
         };

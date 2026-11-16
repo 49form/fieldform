@@ -226,6 +226,22 @@ impl App {
         }
     }
 
+    /// The bodies a tool may pick for itself when the line named none: every listed body that is
+    /// not locked.
+    ///
+    /// **A tool's own guess never reaches for a locked block.** A lock says no other block may
+    /// use this one, so a guess that picked it was refused at the gate and the block was not
+    /// made at all -- reported as a boolean that "is trying to add a locked block to itself and
+    /// won't build without it". The guess is the tool's, so the tool is what steps round the
+    /// lock; a line that *names* a locked block is still refused, and says why.
+    pub(crate) fn bodies_to_start_from(&self) -> Vec<NodeId> {
+        self.doc
+            .listed_bodies(self.part_graph())
+            .into_iter()
+            .filter(|id| !self.doc.is_locked(*id))
+            .collect()
+    }
+
     /// Which block a modifier is made over: the one the line named, or -- where it named none --
     /// the selection, or the first body, or no block at all.
     ///
@@ -270,7 +286,7 @@ impl App {
             ));
             return;
         }
-        let bodies = self.doc.listed_bodies(self.part_graph());
+        let bodies = self.bodies_to_start_from();
         let Some(target) = named
             .and_then(|slot| slot.source())
             .or(self.selected_body.filter(|id| bodies.contains(id)))
@@ -337,7 +353,7 @@ impl App {
         }
         self.select_body(Some(id));
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         let label = self.body_label(target);
         self.say(match placing {
@@ -429,7 +445,7 @@ impl App {
         let mut graph = self.part_graph().clone();
         let read = match wanted_curve {
             Some(curve) => Some(graph.add(Node::Pipe {
-                curve,
+                curve: curve.into(),
                 radius: ParamRef::Literal(*POSITIVE_MM.start()),
             })),
             None => chosen.flatten(),
@@ -754,13 +770,13 @@ impl App {
         self.select_body(Some(id));
         // Same reasoning as a swept pipe: what was just made is nearly always one operand of
         // the next boolean.
-        self.boolean_b = Some(id);
-        if self.boolean_a.is_none() || self.boolean_a == Some(id) {
-            self.boolean_a =
+        self.next.boolean_b = Some(id);
+        if self.next.boolean_a.is_none() || self.next.boolean_a == Some(id) {
+            self.next.boolean_a =
                 self.doc.listed_bodies(self.part_graph()).into_iter().find(|b| *b != id);
         }
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         self.say(format!("Added a {}", kind.label().to_lowercase()));
     }
@@ -817,13 +833,13 @@ impl App {
         self.set_part_graph(graph);
         self.select_body(Some(id));
         // Nearly always one operand of the next boolean, the same as a new solid.
-        self.boolean_b = Some(id);
-        if self.boolean_a.is_none() || self.boolean_a == Some(id) {
-            self.boolean_a =
+        self.next.boolean_b = Some(id);
+        if self.next.boolean_a.is_none() || self.next.boolean_a == Some(id) {
+            self.next.boolean_a =
                 self.doc.listed_bodies(self.part_graph()).into_iter().find(|b| *b != id);
         }
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         self.say(format!(
             "Added a {} — intersect it with a body to infill",
@@ -1562,6 +1578,10 @@ impl App {
     /// shader generator catches what it cannot lower, and the kernel catches what only it
     /// knows -- D8's rule that a blend needs true distances.
     pub(crate) fn refuse_reason(&self, graph: &Graph) -> Option<String> {
+        // A lock first: it is the reason somebody chose, and the most specific one there is.
+        if let Some(why) = self.lock_refusal(graph) {
+            return Some(why);
+        }
         Self::refusal_of(&self.doc, graph, &|e| self.explain_compile(e))
     }
 
@@ -1651,14 +1671,14 @@ impl App {
             || graph.node(id).map(walled) != Some(walled(&node));
         let Some(slot) = graph.node_mut(id) else { return };
         let before = std::mem::replace(slot, node);
-        // **The second half of §7.3's move, in this same edit** -- see `App::completing_a_move`.
+        // **The second half of §7.3's move, in this same edit** -- see `notebook.completing_a_move`.
         // The drop filled a slot of this node and said which block has to let go; doing it here is
         // what makes the pair one undo step, and doing it only when this node now reads that block
         // is what keeps an unrelated edit in the same frame from taking it.
-        if let Some((from, moved)) = self.completing_a_move
+        if let Some((from, moved)) = self.notebook.completing_a_move
             && graph.node(id).is_some_and(|n| n.operands().contains(&moved))
         {
-            self.completing_a_move = None;
+            self.notebook.completing_a_move = None;
             if from == id {
                 // **Out of a sibling slot of the same block**, where "every slot that names it"
                 // would empty the one just filled as well. The destination is the slot that
@@ -1726,8 +1746,11 @@ impl App {
         // Which curve, and why it may not be the selected one, is `profile_seed`'s to explain.
         // Checked before the block is made, so a loop that does not close says why *here*
         // rather than leaving a block that refuses to compile with nothing pointing at the gap.
+        // Nothing to build on is a block waiting, not a refusal (`add_waiting`). The console's
+        // arm asks first; this is the same answer for a caller that did not.
         if self.doc.curves.is_empty() {
-            self.warn("Needs a curve to build from — draw one first");
+            let kind = if revolved { CurveBlock::Revolve } else { CurveBlock::Extrude };
+            self.add_waiting(kind, &Args::new());
             return;
         }
         // The selected curve, or the first curve of a selected profile row — which is the
@@ -1806,7 +1829,7 @@ impl App {
         self.set_part_graph(graph);
         self.select_body(Some(node));
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         // **Named loudly when it is not the curve that was selected.** `profile_seed` falls
         // back past an explicit selection on purpose -- drawing a curve selects it, so a stray
@@ -1846,11 +1869,22 @@ impl App {
     /// block: the side and the ends in the one editor all three share.
     pub(crate) fn add_wall_solid(&mut self, kind: WallBlock, args: &Args) {
         use fieldform_scene::{Outline, WallEnds, WallSide};
+        // A wall with no curve to run along yet is a wall waiting for one (`add_waiting`), with
+        // the thickness asked for.
         if self.doc.curves.is_empty() {
-            self.warn("Needs a curve to give a thickness to — draw one first");
+            let waiting = match kind {
+                WallBlock::Extrude => CurveBlock::Extrude,
+                WallBlock::Revolve => CurveBlock::Revolve,
+                WallBlock::Sweep { .. } => CurveBlock::Sweep,
+            };
+            let asked = match wall_wanted(args) {
+                true => args.clone(),
+                false => args.clone().with("wall", Value::Bool(true)),
+            };
+            self.add_waiting(waiting, &asked);
             return;
         }
-        let thickness = match wall_thickness_asked(args, self.wall_thickness) {
+        let thickness = match wall_thickness_asked(args, self.next.wall_thickness) {
             Ok(thickness) => thickness,
             Err(why) => {
                 self.warn(why);
@@ -1871,7 +1905,7 @@ impl App {
         };
         let Some(curve) = self.wall_seed() else { return };
         let outline = Outline::Wall {
-            curve,
+            curve: curve.into(),
             thickness: ParamRef::Literal(thickness),
             side: WallSide::Centre,
             ends,
@@ -1955,7 +1989,7 @@ impl App {
                 along = Some(spine);
                 Node::Sweep {
                     outline,
-                    spine,
+                    spine: spine.into(),
                     section: Default::default(),
                     law: Default::default(),
                     rims: Default::default(),
@@ -1986,11 +2020,11 @@ impl App {
         }
         let name = |id: CurveId| self.doc.curves.get(&id).map(|c| c.name.clone()).unwrap_or_default();
         let (curve_name, along_name) = (name(curve), along.map(name));
-        self.wall_thickness = thickness;
+        self.next.wall_thickness = thickness;
         self.set_part_graph(graph);
         self.select_body(Some(node));
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         self.say(match along_name {
             Some(path) => format!(
@@ -2095,7 +2129,7 @@ impl App {
         ids.iter()
             .copied()
             .find(|id| {
-                self.profiles.key_of(*id).is_none()
+                self.curve_ui.profiles.key_of(*id).is_none()
                     && self.doc.curves.get(id).is_some_and(|c| !c.is_closed())
             })
             .or_else(|| ids.first().copied())
@@ -2117,7 +2151,7 @@ impl App {
     /// another block held was a second reader of it for an instant (refactor plan 2.22).
     pub(crate) fn add_sweep_body(&mut self, spine: Option<CurveId>) {
         if self.doc.curves.is_empty() {
-            self.warn("Needs a closed profile and a curve to carry it along — draw them first");
+            self.add_waiting(CurveBlock::Sweep, &Args::new());
             return;
         }
         let selected = self.curve_in_hand();
@@ -2157,7 +2191,7 @@ impl App {
         let mut graph = self.part_graph().clone();
         let node = graph.add(Node::Sweep {
             outline: fieldform_scene::Outline::closed(profile),
-            spine,
+            spine: spine.into(),
             section: Default::default(),
             law: Default::default(),
             rims: Default::default(),
@@ -2171,7 +2205,7 @@ impl App {
         self.set_part_graph(graph);
         self.select_body(Some(node));
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         self.say(format!(
             "Swept {profile_name} along {spine_name} — pick either curve in the block"
@@ -2185,20 +2219,18 @@ impl App {
     /// fixed and sections are added or taken out, and the line said afterwards says so.
     pub(crate) fn add_loft_body(&mut self, args: &Args) {
         self.refresh_profiles();
-        let (sections, spine, smooth) = match loft_asked(&self.doc, &self.profiles.loops, args) {
+        let (sections, spine, smooth) = match loft_asked(&self.doc, &self.curve_ui.profiles.loops, args) {
             Ok(asked) => asked,
             Err(why) => {
                 self.warn(why);
                 return;
             }
         };
-        if sections.len() < 2 {
-            self.warn(
-                "Needs two or more closed curves to pass through — draw them first, or name \
-                 them: loft sections=a,b,c",
-            );
-            return;
-        }
+        // **Fewer than two is a loft in the making, not a refusal.** It said "Needs two or more
+        // closed curves to pass through — draw them first", which made the block unreachable
+        // until its sections existed. With none, or one, it is made and waits
+        // (`Node::waits_for_a_curve`): not drawn, and its panel says how many it still wants.
+        let named = args.get("sections").is_some();
         // Read as an edit reads it, so a reach driven by a parameter -- which the rims' V makes and
         // the echo writes -- builds the same loft from its line.
         let rims = match block_edit::rims_read("loft", args, fieldform_scene::Rims::hard(), &|t| self.lookup(t)) {
@@ -2216,7 +2248,20 @@ impl App {
             rims,
         });
         if let Some(why) = self.refuse_reason(&graph) {
-            self.warn(why);
+            // **Sections this picked for itself that cannot be lofted as they stand leave the
+            // block, empty, and the reason.** Nothing named means "every closed curve in the
+            // document", which is a starting point and can be a wrong one -- two that cross
+            // along the centerline, say -- and refusing then left nothing to put the right ones
+            // in. Sections somebody named are theirs, and are refused as they were.
+            if named {
+                self.warn(why);
+                return;
+            }
+            if self.add_waiting(CurveBlock::Loft, &Args::new()).is_some() {
+                self.say(format!(
+                    "The loft is empty: the closed curves here cannot be lofted as they stand — {why}"
+                ));
+            }
             return;
         }
         let along = match spine.and_then(|id| self.doc.curves.get(&id)) {
@@ -2226,12 +2271,16 @@ impl App {
         self.set_part_graph(graph);
         self.select_body(Some(node));
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
-        self.say(format!(
-            "Lofted {} sections {along} — order, add and remove them in the block",
-            sections.len()
-        ));
+        self.say(match sections.len() {
+            0 => {
+                let (what, wants) = CurveBlock::Loft.waiting();
+                format!("Added {what}, waiting for {wants}")
+            }
+            1 => "Added a loft with one section — add another in the block; it is drawn once it has two".to_string(),
+            n => format!("Lofted {n} sections {along} — order, add and remove them in the block"),
+        });
     }
 
     /// What `node`, a loft, reads as built -- from the cache when the node and the curves are
@@ -2240,9 +2289,9 @@ impl App {
     pub(crate) fn loft_readings(&mut self, id: NodeId, node: &Node) -> Option<&LoftReadings> {
         let Node::Loft { sections, spine, smooth, rims: _ } = node else { return None };
         let current = self
-            .loft_readings
+            .curve_ui.loft_readings
             .as_ref()
-            .is_some_and(|(at, was, rev, _)| *at == id && was == node && *rev == self.curve_revision);
+            .is_some_and(|(at, was, rev, _)| *at == id && was == node && *rev == self.curve_ui.revision);
         if !current {
             let readings = fieldform_field::loft_built(&self.doc, sections, *spine, *smooth).map(
                 |built| LoftReadings {
@@ -2259,9 +2308,9 @@ impl App {
                     }),
                 },
             );
-            self.loft_readings = Some((id, node.clone(), self.curve_revision, readings));
+            self.curve_ui.loft_readings = Some((id, node.clone(), self.curve_ui.revision, readings));
         }
-        self.loft_readings.as_ref().and_then(|(_, _, _, readings)| readings.as_ref())
+        self.curve_ui.loft_readings.as_ref().and_then(|(_, _, _, readings)| readings.as_ref())
     }
 
     /// The derived centerline of the selected body, if it is a loft that was given none.
@@ -2359,7 +2408,7 @@ impl App {
             return Some(id);
         }
         self.refresh_profiles();
-        let keys = self.profiles.keys();
+        let keys = self.curve_ui.profiles.keys();
         keys.into_iter().find(|key| self.profile_label(*key).eq_ignore_ascii_case(name.trim()))
     }
 
@@ -2388,6 +2437,9 @@ impl App {
                 self.warn(format!("`{verb}` builds on a profile or a curve — profile= or curve=, not both"));
                 return None;
             }
+            // `profile=none`, `curve=none`: the slot left empty on purpose, which the arm that
+            // builds the block reads for itself (`waiting_asked`). Nothing is put in hand.
+            (Some(name), None) | (None, Some(name)) if names_nothing(&name) => {}
             (Some(name), None) => {
                 let Some(id) = self.curve_or_profile_named(&name) else {
                     self.warn(format!("no curve or profile is called {name:?}"));
@@ -2411,6 +2463,99 @@ impl App {
             (None, None) => {}
         }
         Some(args)
+    }
+
+    /// Whether a create verb is to make its block waiting rather than built on something: the
+    /// line said `profile=none` or `curve=none`, or it named no curve and the document holds none.
+    ///
+    /// **The second half is what was a refusal** -- "Needs a curve to build from — draw one
+    /// first" -- and is the same decision `target_operand` makes for a modifier with no body: a
+    /// block that needs something which is not there yet is made with its slot empty, so a part
+    /// can be laid out top-down and filled in, by hand or by a script.
+    pub(crate) fn waiting_asked(&self, args: &Args) -> bool {
+        let said = |k: &str| args.get(k).map(|v| v.text());
+        match (said("profile"), said("curve")) {
+            (None, None) => self.doc.curves.is_empty(),
+            (profile, curve) => profile.or(curve).is_some_and(|name| names_nothing(&name)),
+        }
+    }
+
+    /// Makes a block that is built from curves with none named: there, selected, and waiting.
+    ///
+    /// **An empty slot rather than a refusal** (`fieldform_scene::CurveSlot`). The block is
+    /// incomplete, so the viewport leaves it out and draws everything beside it, and its panel
+    /// says "empty — not drawn" on the row that fills it. Its numbers are the ones the block
+    /// starts with when it is built on something, and the keys the line carried are applied by
+    /// the caller as they are to any block just made.
+    ///
+    /// `wall=` makes the section a wall waiting for its curve, with the thickness asked for, so
+    /// `extrude curve=none wall=2` is the wall it reads as once a curve is given.
+    pub(crate) fn add_waiting(&mut self, kind: CurveBlock, args: &Args) -> Option<NodeId> {
+        use fieldform_scene::{CurveSlot, Outline, WallEnds, WallSide};
+        let outline = match wall_wanted(args) && kind != CurveBlock::Loft && kind != CurveBlock::Pipe {
+            false => Outline::empty(),
+            true => match wall_thickness_asked(args, self.next.wall_thickness) {
+                Ok(thickness) => Outline::Wall {
+                    curve: CurveSlot::empty(),
+                    thickness: ParamRef::Literal(thickness),
+                    side: WallSide::Centre,
+                    ends: WallEnds::Square,
+                },
+                Err(why) => {
+                    self.warn(why);
+                    return None;
+                }
+            },
+        };
+        let block = match kind {
+            CurveBlock::Extrude => Node::Extrude {
+                outline,
+                sweep: fieldform_scene::Sweep::Normal,
+                height: ParamRef::Literal(DEFAULT_BODY_MM * 0.25),
+                draft: ParamRef::Literal(0.0),
+                start: ParamRef::Literal(0.0),
+                sides: fieldform_scene::Sides::One,
+                corners: Default::default(),
+                rims: Default::default(),
+            },
+            CurveBlock::Revolve => Node::Revolve {
+                outline,
+                frame: Default::default(),
+                angle: ParamRef::Literal(360.0),
+                sides: fieldform_scene::AngleSides::One,
+                rims: Default::default(),
+            },
+            CurveBlock::Sweep => Node::Sweep {
+                outline,
+                spine: CurveSlot::empty(),
+                section: Default::default(),
+                law: Default::default(),
+                rims: Default::default(),
+            },
+            CurveBlock::Loft => Node::Loft {
+                sections: Vec::new(),
+                spine: None,
+                smooth: Default::default(),
+                rims: Default::default(),
+            },
+            CurveBlock::Pipe => Node::Pipe { curve: CurveSlot::empty(), radius: self.next.pipe_radius },
+        };
+        let mut graph = self.part_graph().clone();
+        let node = graph.add(block);
+        // Asked as every graph edit is asked; a waiting block is passed over by the gate, so
+        // this refuses only what would have been refused without it.
+        if let Some(why) = self.refuse_reason(&graph) {
+            self.warn(why);
+            return None;
+        }
+        self.set_part_graph(graph);
+        self.select_body(Some(node));
+        self.mark_changed();
+        self.view.mode = ViewMode::Field;
+        self.rebuild_render_resources();
+        let (what, wants) = kind.waiting();
+        self.say(format!("Added {what}, waiting for {wants}"));
+        Some(node)
     }
 
     /// `line`/`curve` with points: placed now, as one undo step, through the same insert a click
@@ -2479,7 +2624,7 @@ impl App {
             self.warn(e.to_string());
             return;
         }
-        self.pending_curve = None;
+        self.curve_ui.pending = None;
         self.select_curve(id);
         self.rebuild_curve_display();
         self.mark_changed();
@@ -2540,8 +2685,12 @@ impl App {
     /// the block built on the spine it was told by the arm that builds it, then the section.
     pub(crate) fn sweep_with_keys(&mut self, args: &Args) {
         let Some(args) = self.curve_keys_in_hand("sweep", args, &[("thickness", "wall")]) else { return };
+        // `spine=none` leaves the path waiting, as `profile=none` leaves the section: either
+        // makes the sweep by the arm below that fills in what was named and nothing else.
+        let spine_left_empty = args.get("spine").is_some_and(|v| names_nothing(&v.text()));
         let spine = match args.get("spine").and_then(|v| v.as_str()) {
             None => None,
+            Some(_) if spine_left_empty => None,
             Some(name) => match self.curve_named(name) {
                 Some(id) => Some(id),
                 None => {
@@ -2567,6 +2716,24 @@ impl App {
                 return;
             }
         }
+        // **A slot left empty on purpose**: the block is made waiting and what the line did name
+        // is put in it, so `sweep profile=p spine=none` holds its section and waits for a path,
+        // and `sweep profile=none spine=s` the other way round.
+        let section_left_empty = self.waiting_asked(&args);
+        if section_left_empty || spine_left_empty {
+            let named_section = self.selected_curve.filter(|_| !section_left_empty);
+            let Some(id) = self.add_waiting(CurveBlock::Sweep, &args) else { return };
+            if let Some(Node::Sweep { mut outline, spine: _, section: held, law, rims }) =
+                self.part_graph().node(id).cloned()
+                && (named_section.is_some() || spine.is_some())
+            {
+                if let Some(curve) = named_section {
+                    outline.slot_mut().fill(curve);
+                }
+                let spine = spine.map_or_else(fieldform_scene::CurveSlot::empty, Into::into);
+                self.replace_node(id, Node::Sweep { outline, spine, section: held, law, rims });
+            }
+        } else
         // The spine goes in as the block is built (`add_sweep_body` says why), so the line each
         // arm says already names it.
         if wall_wanted(&args) {
@@ -2589,7 +2756,9 @@ impl App {
 
     /// `pipe curve= radius=`: the curve named, and a radius that a ramp may drive.
     pub(crate) fn pipe_with_keys(&mut self, args: &Args) {
-        if let Some(name) = args.get("curve").and_then(|v| v.as_str()) {
+        // `pipe curve=none`: the pipe made, and waiting for its curve (`add_waiting`).
+        let waiting = args.get("curve").is_some_and(|v| names_nothing(&v.text()));
+        if let Some(name) = args.get("curve").and_then(|v| v.as_str()).filter(|_| !waiting) {
             let Some(id) = self.curve_named(name) else {
                 self.warn(format!("no curve is called {name:?}"));
                 return;
@@ -2615,13 +2784,18 @@ impl App {
             return;
         }
         // The tool remembers a number it was given, as it always has; a ramp belongs to this pipe.
-        let remembered = self.pipe_radius;
+        let remembered = self.next.pipe_radius;
         if let Some(r) = radius {
-            self.pipe_radius = r;
+            self.next.pipe_radius = r;
         }
-        self.add_pipe_body();
+        match waiting {
+            true => {
+                self.add_waiting(CurveBlock::Pipe, args);
+            }
+            false => self.add_pipe_body(),
+        }
         if !matches!(radius, Some(ParamRef::Literal(_))) {
-            self.pipe_radius = remembered;
+            self.next.pipe_radius = remembered;
         }
     }
 
@@ -2649,28 +2823,22 @@ impl App {
             },
         };
         let mut graph = self.part_graph().clone();
-        let id = graph.add(Node::Pipe { curve, radius: self.pipe_radius });
+        let id = graph.add(Node::Pipe { curve: curve.into(), radius: self.next.pipe_radius });
         self.set_part_graph(graph);
         self.select_body(Some(id));
         // Point the boolean tool at what was just made, against whatever was already there.
         // Nearly every pipe is swept in order to cut or join with something, and choosing both
         // operands from scratch afterwards is a step with one sensible answer.
-        self.boolean_b = Some(id);
-        if self.boolean_a.is_none() || self.boolean_a == Some(id) {
-            self.boolean_a =
+        self.next.boolean_b = Some(id);
+        if self.next.boolean_a.is_none() || self.next.boolean_a == Some(id) {
+            self.next.boolean_a =
                 self.doc.listed_bodies(self.part_graph()).into_iter().find(|b| *b != id);
         }
         self.mark_changed();
         // The pipe is a field, and field mode is what draws one.
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         self.say("Added a pipe — pick its curve in the block");
-    }
-
-    /// The blocks a pair-taking tool could start from, for the menu that has to know whether
-    /// there are two.
-    pub(crate) fn pair_candidates(&self) -> Vec<NodeId> {
-        pair_candidates_in(self.part_graph(), &|id| self.doc.made_at(id))
     }
 
     /// The two operands a block that takes a pair should start from.
@@ -2695,7 +2863,7 @@ impl App {
     /// same node, since the second pick refuses the first.
     fn starting_pair(&self) -> Option<(NodeId, NodeId)> {
         let graph = self.part_graph();
-        let blending = self.blend_mode.is_some();
+        let blending = self.next.blend_mode.is_some();
         // **Every remembered operand stands for the block it belongs to** — see `outermost_in`.
         // Asked of the nesting the list is drawn from, so a tool starts from the rows the person
         // can see rather than from something a previous tool pointed at before it was wrapped.
@@ -2705,10 +2873,11 @@ impl App {
         starting_pair_among(
             graph,
             |id| self.doc.made_at(id),
-            out(self.boolean_a).or_else(|| out(self.selected_body)),
-            out(self.boolean_b),
-            // A boolean takes no point; a blend may reach to one.
-            |id| blending || !matches!(graph.node(id), Some(Node::Point { .. })),
+            out(self.next.boolean_a).or_else(|| out(self.selected_body)),
+            out(self.next.boolean_b),
+            // A boolean takes no point; a blend may reach to one. Neither takes a locked block
+            // on its own initiative (`bodies_to_start_from`).
+            |id| !self.doc.is_locked(id) && (blending || !matches!(graph.node(id), Some(Node::Point { .. }))),
         )
     }
 
@@ -2733,39 +2902,62 @@ impl App {
             }
         };
         if let Some(op) = asked.op {
-            self.boolean_op = op;
+            self.next.boolean_op = op;
         }
 
         // Slots rather than blocks, because `in=none` is two of them waiting: a boolean a
         // script made before it had the bodies to join (`notebook-spec.md` §7.2). The pair the
         // tool would have picked is still what nothing typed means, and it is always two blocks
         // that exist.
-        let inputs: Vec<fieldform_scene::Operand> = match asked.inputs {
+        let guessed = asked.inputs.is_none();
+        let mut inputs: Vec<fieldform_scene::Operand> = match asked.inputs {
             Some(named) => named,
             None => {
-                let Some((a, b)) = self.starting_pair() else {
-                    self.warn("Needs two bodies to combine");
-                    return;
-                };
-                vec![fieldform_scene::Operand::filled(a), fieldform_scene::Operand::filled(b)]
+                // **No two bodies to start from is two slots waiting, not a refusal** -- what
+                // `in=none` asks for by name, and what `target_operand` does for a modifier with
+                // no body. It said "Needs two bodies to combine", which made a boolean something
+                // that could only be added last.
+                match self.starting_pair() {
+                    Some((a, b)) => {
+                        vec![fieldform_scene::Operand::filled(a), fieldform_scene::Operand::filled(b)]
+                    }
+                    None => vec![fieldform_scene::Operand::empty(); 2],
+                }
             }
         };
         // A radius typed wins over the tool's remembered blend mode; nothing typed, and the
         // tool does what the panel last set it to.
         let fillet = asked.fillet.or_else(|| {
-            self.blend_mode.map(|continuity| fieldform_scene::Fillet { radius: self.blend_radius, continuity, second: None })
+            self.next.blend_mode.map(|continuity| fieldform_scene::Fillet { radius: self.next.blend_radius, continuity, second: None })
         });
-        let mut graph = self.part_graph().clone();
-        let node = match fillet {
-            None => graph.add(Node::Boolean { op: self.boolean_op, inputs: inputs.clone() }),
-            Some(fillet) => graph.add(Node::Blend { op: self.boolean_op, inputs: inputs.clone(), fillet }),
+        let op = self.next.boolean_op;
+        let made = |graph: &mut Graph, inputs: &[fieldform_scene::Operand]| match fillet {
+            None => graph.add(Node::Boolean { op, inputs: inputs.to_vec() }),
+            Some(fillet) => graph.add(Node::Blend { op, inputs: inputs.to_vec(), fillet }),
         };
+        let mut graph = self.part_graph().clone();
+        let mut node = made(&mut graph, &inputs);
         // Checked before it is committed, not after. This is the click that makes a filleted
         // union, so it is the click D8 refuses, and refusing it here leaves the two bodies
         // exactly where they were rather than folding them into a node that draws nothing.
         if let Some(why) = self.refuse_reason(&graph) {
-            self.warn(why);
-            return;
+            // **A pair the tool guessed and the gate refused is no reason to make nothing.** The
+            // person asked for a boolean, not for these two bodies, so the block is made with its
+            // slots waiting and the reason the guess failed is said. A pair the line *named* is
+            // still refused outright: that was asked for, and making something else would be the
+            // console doing other than it was told.
+            if !guessed || inputs.iter().all(|slot| slot.is_empty()) {
+                self.warn(why);
+                return;
+            }
+            inputs = vec![fieldform_scene::Operand::empty(); 2];
+            graph = self.part_graph().clone();
+            node = made(&mut graph, &inputs);
+            if let Some(why) = self.refuse_reason(&graph) {
+                self.warn(why);
+                return;
+            }
+            self.say(format!("{why} \u{2014} so the block is made empty"));
         }
         self.set_part_graph(graph);
         // Both operands stopped being bodies the moment something consumed them, so a
@@ -2778,12 +2970,19 @@ impl App {
             self.clear_hidden(input);
         }
         self.select_body(Some(node));
-        self.boolean_a = Some(node);
-        self.boolean_b = None;
+        self.next.boolean_a = Some(node);
+        self.next.boolean_b = None;
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
-        self.say(format!("{} applied", boolean_label(self.boolean_op)));
+        self.say(match inputs.iter().any(|slot| slot.is_empty()) {
+            false => format!("{} applied", boolean_label(self.next.boolean_op)),
+            // Made before its bodies: said as what it is, since nothing on screen changed.
+            true => format!(
+                "Added a {}, waiting for its bodies — name them in the block; it is drawn once it has them",
+                boolean_label(self.next.boolean_op).to_lowercase()
+            ),
+        });
         // **An approximate blend announces itself where its radius was typed** (the project notes on
         // `LowerBound` operands): the panel marks it ≈ beside the number, and the console line
         // is the console's number.
@@ -2802,9 +3001,9 @@ impl App {
     /// gives the original back.
     pub(crate) fn apply_offset(&mut self, args: &Args) {
         let Ok(named) = self.named_target("offset", args) else { return };
-        let bodies = self.doc.listed_bodies(self.part_graph());
+        let bodies = self.bodies_to_start_from();
         let target = Self::target_operand(named, self.selected_body, &bodies);
-        let node = Node::Offset { input: target, distance: ParamRef::Literal(self.offset_distance) };
+        let node = Node::Offset { input: target, distance: ParamRef::Literal(self.next.offset_distance) };
         let node = match console_keys::offset_with_keys(node, args, &|t| self.lookup(t)) {
             Ok(node) => node,
             Err(why) => {
@@ -2815,7 +3014,7 @@ impl App {
         // The distance is remembered, so `offset` alone repeats the last one -- the number, when
         // it was one; a ramp driving it is this block's and not the tool's.
         if let Node::Offset { distance: ParamRef::Literal(d), .. } = &node {
-            self.offset_distance = *d;
+            self.next.offset_distance = *d;
         }
         let mut graph = self.part_graph().clone();
         let node = graph.add(node);
@@ -2832,14 +3031,14 @@ impl App {
         }
         self.select_body(Some(node));
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         // **A success is said, never warned** (`--run` stops at a warning), so a block made with
         // its slot waiting says so and the script carries on to the line that fills it.
         self.say(if target.is_empty() {
             "An offset with an empty slot \u{2014} put a block in it".to_string()
         } else {
-            format!("Offset by {:.3} mm", self.offset_distance)
+            format!("Offset by {:.3} mm", self.next.offset_distance)
         });
     }
 
@@ -2856,7 +3055,7 @@ impl App {
             .get("axis")
             .and_then(|v| v.as_str())
             .and_then(|name| Axis::ALL.into_iter().find(|a| a.label().eq_ignore_ascii_case(name)))
-            .unwrap_or(self.twist_axis);
+            .unwrap_or(self.next.twist_axis);
         // **A body this block could actually wind**, which is not the same as any body. The part
         // may hold a plane and a point before it holds a solid, and both are bodies by
         // `Node::is_body` -- so a twist made in that part used to arrive wrapped around the plane,
@@ -2868,7 +3067,7 @@ impl App {
         // Asked of the same rule the picker asks, so the two cannot drift. There is no node yet
         // to ask *for*, so the question is put to a twist that does not exist -- which is why
         // `operand_refusal` takes the consumer's node rather than its id alone would allow.
-        let bodies = self.doc.listed_bodies(self.part_graph());
+        let bodies = self.bodies_to_start_from();
         let graph = self.part_graph().clone();
         let windable = |id: &NodeId| twist_would_take(&self.doc, &graph, *id);
         let named_cannot = named
@@ -2889,13 +3088,10 @@ impl App {
                     .selected_body
                     .filter(|id| bodies.contains(id) && windable(id))
                     .or_else(|| bodies.iter().copied().find(|id| windable(id)));
-                let Some(found) = found else {
-                    // Said in the terms of what is missing rather than "needs a body", since a
-                    // part with a plane in it has a body and still cannot be twisted.
-                    self.warn("Needs a bounded solid to twist — a plane or a point cannot be wound");
-                    return;
-                };
-                fieldform_scene::Operand::filled(found)
+                // **Nothing that can be wound is a slot waiting, not a refusal.** A part holding
+                // only a plane has a body and still cannot be twisted, so the twist is made
+                // empty rather than pointed at something it would be refused on.
+                found.map_or_else(fieldform_scene::Operand::empty, fieldform_scene::Operand::filled)
             }
         };
         // A rate that makes a visible quarter turn over whatever the body measures along the
@@ -2927,7 +3123,7 @@ impl App {
                 return;
             }
         };
-        self.twist_axis = axis_asked;
+        self.next.twist_axis = axis_asked;
         // What was done, from the block: a typed rate is said as a rate, and a direction typed
         // as three numbers is not one of the three letters.
         let rate_said = match &node {
@@ -2939,7 +3135,7 @@ impl App {
         };
         let axis_said = match args.get("axis").and_then(|v| v.as_str()) {
             Some(text) if !Axis::ALL.iter().any(|a| a.label().eq_ignore_ascii_case(text)) => "the axis given".to_string(),
-            _ => self.twist_axis.label().to_string(),
+            _ => self.next.twist_axis.label().to_string(),
         };
         let mut graph = self.part_graph().clone();
         let node = graph.add(node);
@@ -2949,7 +3145,7 @@ impl App {
         }
         self.select_body(Some(node));
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         self.say(if target.is_empty() {
             "A twist with an empty slot — put a block in it to wind".to_string()
@@ -2991,19 +3187,17 @@ impl App {
         // same number lives, remembering a value from a previous attractor that this one never
         // showed anybody.
         let strength = DEFAULT_ATTRACT_STRENGTH;
-        let bodies = self.doc.listed_bodies(self.part_graph());
+        let bodies = self.bodies_to_start_from();
         // `target=none` is taken, as every modifier takes it; nothing named still refuses, since
         // the fall-back is a body and there is none to fall back to.
         let target = match named {
             Some(asked) => asked,
             None => {
-                let Some(found) =
-                    self.selected_body.filter(|id| bodies.contains(id)).or(bodies.first().copied())
-                else {
-                    self.warn("Needs a body to attract");
-                    return;
-                };
-                fieldform_scene::Operand::filled(found)
+                // No body to draw is a slot waiting, as every other modifier's is.
+                self.selected_body
+                    .filter(|id| bodies.contains(id))
+                    .or(bodies.first().copied())
+                    .map_or_else(fieldform_scene::Operand::empty, fieldform_scene::Operand::filled)
             }
         };
         // **Found before anything is built, and a point counts.** An attractor is drawn toward
@@ -3098,7 +3292,7 @@ impl App {
         }
         self.select_body(Some(node));
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         self.say(format!(
             "Drawn toward {} — change the target or the pull in the block",
@@ -3171,12 +3365,12 @@ impl App {
             .get("count")
             .and_then(|v| v.as_f64())
             .map(|n| n.round().clamp(2.0, 512.0) as u32)
-            .unwrap_or(self.pattern_count);
+            .unwrap_or(self.next.pattern_count);
         let radial = match args.get("kind").and_then(|v| v.as_str()) {
             Some(kind) => !kind.eq_ignore_ascii_case("linear"),
-            None => self.pattern_radial,
+            None => self.next.pattern_radial,
         };
-        let step_mm = args.get("step").and_then(|v| v.as_f64()).unwrap_or(self.pattern_step_mm);
+        let step_mm = args.get("step").and_then(|v| v.as_f64()).unwrap_or(self.next.pattern_step_mm);
         let options = match pattern_options_from(args) {
             Ok(options) => options,
             Err(why) => {
@@ -3184,7 +3378,7 @@ impl App {
                 return;
             }
         };
-        let bodies = self.doc.listed_bodies(self.part_graph());
+        let bodies = self.bodies_to_start_from();
         // Nothing to repeat is a pattern with its slot waiting rather than a refusal
         // ([`Self::target_operand`]), so a script can say what the part is made of in the order
         // it thinks of it.
@@ -3240,9 +3434,9 @@ impl App {
             self.warn(why);
             return;
         }
-        self.pattern_count = count_asked;
-        self.pattern_radial = radial;
-        self.pattern_step_mm = step_mm;
+        self.next.pattern_count = count_asked;
+        self.next.pattern_radial = radial;
+        self.next.pattern_step_mm = step_mm;
         // The body is inside the row now, so its eye goes with its row, as `apply_boolean` says.
         // It is not named: the pattern adopts its target, which is reached from the pattern's row
         // like any other block inside another, and naming one is the user's to ask for.
@@ -3252,7 +3446,7 @@ impl App {
         }
         self.select_body(Some(node));
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         // Only a block that was there can be counted, so an empty slot says what it is waiting
         // for instead -- and says it, never warns it, so a script runs on.
@@ -3297,8 +3491,8 @@ impl App {
             .get("axis")
             .and_then(|v| v.as_str())
             .and_then(|name| Axis::ALL.into_iter().find(|a| a.label().eq_ignore_ascii_case(name)))
-            .unwrap_or(self.mirror_axis);
-        let bodies = self.doc.listed_bodies(self.part_graph());
+            .unwrap_or(self.next.mirror_axis);
+        let bodies = self.bodies_to_start_from();
         // Nothing to mirror leaves the slot waiting rather than refusing, as a shell's does.
         let target = Self::target_operand(named, self.selected_body, &bodies);
         let node = Node::Mirror {
@@ -3319,7 +3513,7 @@ impl App {
                 return;
             }
         };
-        self.mirror_axis = axis_asked;
+        self.next.mirror_axis = axis_asked;
         let joined = matches!(&node, Node::Mirror { join: true, .. });
         let mut graph = self.part_graph().clone();
         let node = graph.add(node);
@@ -3349,18 +3543,18 @@ impl App {
         }
         self.select_body(Some(node));
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         match target.source() {
             None => self.say("A mirror with an empty slot — put a block in it to reflect"),
             Some(target) => {
                 let original = self.body_label(target);
                 self.say(if joined {
-                    format!("Mirrored in {} — both halves in one block", self.mirror_axis.label())
+                    format!("Mirrored in {} — both halves in one block", self.next.mirror_axis.label())
                 } else {
                     format!(
                         "Mirrored in {} — the reflection is its own block, and {original} is still beside it",
-                        self.mirror_axis.label(),
+                        self.next.mirror_axis.label(),
                     )
                 });
             }
@@ -3394,15 +3588,18 @@ impl App {
                 return;
             }
         };
-        let Some((a, b)) = pair.or_else(|| self.starting_pair()) else {
-            self.warn("Needs two bodies to morph between");
-            return;
+        // No two bodies to start from is two slots waiting, as a boolean's are and for its
+        // reason: the morph is made and told what to read afterwards.
+        let guessed = pair.is_none();
+        let (mut a, mut b) = match pair.or_else(|| self.starting_pair()) {
+            Some((a, b)) => (fieldform_scene::Operand::filled(a), fieldform_scene::Operand::filled(b)),
+            None => (fieldform_scene::Operand::empty(), fieldform_scene::Operand::empty()),
         };
         // Half way, which is the only starting value that shows what the block does. Nought or
         // one would look like nothing happened.
         let node = Node::Morph {
-            a: fieldform_scene::Operand::filled(a),
-            b: fieldform_scene::Operand::filled(b),
+            a,
+            b,
             t: ParamRef::Literal(0.5),
         };
         let node = match console_keys::morph_with_keys(node, args, &|t| self.lookup(t)) {
@@ -3413,29 +3610,47 @@ impl App {
             }
         };
         let mut graph = self.part_graph().clone();
-        let node = graph.add(node);
+        let built = node;
+        let mut node = graph.add(built.clone());
         if let Some(why) = self.refuse_reason(&graph) {
-            self.warn(why);
-            return;
+            // A guessed pair the gate refused leaves the morph waiting, as a boolean's does and
+            // for its reason (`apply_boolean`).
+            let Node::Morph { t, .. } = built else { unreachable!("a morph was built above") };
+            if !guessed || (a.is_empty() && b.is_empty()) {
+                self.warn(why);
+                return;
+            }
+            (a, b) = (fieldform_scene::Operand::empty(), fieldform_scene::Operand::empty());
+            graph = self.part_graph().clone();
+            node = graph.add(Node::Morph { a, b, t });
+            if let Some(why) = self.refuse_reason(&graph) {
+                self.warn(why);
+                return;
+            }
+            self.say(format!("{why} \u{2014} so the block is made empty"));
         }
         self.set_part_graph(graph);
-        self.clear_hidden(a);
-        self.clear_hidden(b);
+        for read in [a, b].iter().filter_map(|slot| slot.source()) {
+            self.clear_hidden(read);
+        }
         self.select_body(Some(node));
         // The result becomes the next pair's first operand, the way a boolean's does: what you
         // just made is what you are most likely to reach for next.
-        self.boolean_a = Some(node);
-        self.boolean_b = None;
+        self.next.boolean_a = Some(node);
+        self.next.boolean_b = None;
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         // Which two it picked, by name, because it picks rather than asks: a message that did
         // not say would leave the guess to be discovered by looking at the shape.
-        self.say(format!(
-            "Morphing {} to {} — change either, or the amount, in the block",
-            self.body_label(a),
-            self.body_label(b)
-        ));
+        self.say(match (a.source(), b.source()) {
+            (Some(a), Some(b)) => format!(
+                "Morphing {} to {} — change either, or the amount, in the block",
+                self.body_label(a),
+                self.body_label(b)
+            ),
+            _ => "Added a morph, waiting for its two bodies — name them in the block; it is drawn once it has them".to_string(),
+        });
     }
 
     /// Shells the selected body: hollows it out, leaving a wall of the stated thickness.
@@ -3446,7 +3661,7 @@ impl App {
     /// this is that solid subtracted from the original.
     pub(crate) fn apply_shell(&mut self, args: &Args) {
         let Ok(named) = self.named_target("shell", args) else { return };
-        let bodies = self.doc.listed_bodies(self.part_graph());
+        let bodies = self.bodies_to_start_from();
         // **No body is no refusal**, which is the whole of §7.2 reaching the console: the block
         // is made with its slot waiting. [`Self::target_operand`] carries the reasoning.
         let target = Self::target_operand(named, self.selected_body, &bodies);
@@ -3454,7 +3669,7 @@ impl App {
         // shell *is* and was still the wrong thing to show: the block named for the operation
         // had no thickness on it — that lived on the other one — and it offered a boolean's
         // union and intersect and a blend radius to something that is neither.
-        let node = Node::Shell { input: target, thickness: ParamRef::Literal(self.shell_thickness) };
+        let node = Node::Shell { input: target, thickness: ParamRef::Literal(self.next.shell_thickness) };
         let node = match console_keys::shell_with_keys(node, args, &|t| self.lookup(t)) {
             Ok(node) => node,
             Err(why) => {
@@ -3463,7 +3678,7 @@ impl App {
             }
         };
         if let Node::Shell { thickness: ParamRef::Literal(t), .. } = &node {
-            self.shell_thickness = *t;
+            self.next.shell_thickness = *t;
         }
         let mut graph = self.part_graph().clone();
         let node = graph.add(node);
@@ -3473,12 +3688,12 @@ impl App {
         }
         self.select_body(Some(node));
         self.mark_changed();
-        self.view_mode = ViewMode::Field;
+        self.view.mode = ViewMode::Field;
         self.rebuild_render_resources();
         self.say(if target.is_empty() {
             "A shell with an empty slot \u{2014} put a block in it".to_string()
         } else {
-            format!("Shelled to a {:.3} mm wall", self.shell_thickness)
+            format!("Shelled to a {:.3} mm wall", self.next.shell_thickness)
         });
     }
 
@@ -3494,6 +3709,11 @@ impl App {
         if self.part_graph().node(id).is_none() {
             return false;
         }
+        // Said of this block before anything is worked out, so the reason names what was asked.
+        if self.doc.is_locked(id) {
+            self.warn(format!("{} is locked, so it cannot be deleted \u{2014} unlock it first", self.body_label(id)));
+            return false;
+        }
         let graph = match Self::after_deleting(&self.doc, self.part_graph(), id, &|e| {
             self.explain_compile(e)
         }) {
@@ -3503,14 +3723,19 @@ impl App {
                 return false;
             }
         };
+        // Deleting the only thing a locked block reads would take the locked block as well.
+        if let Some(why) = self.lock_refusal(&graph) {
+            self.warn(why);
+            return false;
+        }
         self.let_curves_go(id);
         self.set_part_graph(graph);
         self.clear_hidden(id);
         // What it was made from is on its own again, so the selection and the boolean tool
         // follow it rather than pointing at something that no longer exists.
         self.select_body(freed.first().copied());
-        self.boolean_a = freed.first().copied().or(self.boolean_a.filter(|b| *b != id));
-        self.boolean_b = freed.get(1).copied().or(self.boolean_b.filter(|b| *b != id));
+        self.next.boolean_a = freed.first().copied().or(self.next.boolean_a.filter(|b| *b != id));
+        self.next.boolean_b = freed.get(1).copied().or(self.next.boolean_b.filter(|b| *b != id));
         self.mark_changed();
         self.rebuild_render_resources();
         true

@@ -246,6 +246,34 @@
         }
     }
 
+    /// The rule a run of blended pipes skips a member by (`pipe_blend_run` in the shader): once
+    /// the other operand is more than the radius *beyond* this one, the blend is this one to
+    /// the bit -- whichever side of nought either stands, which is wider than the line the test
+    /// above holds, `b = |a| + k`, where it differs for an operand inside its own solid. So a
+    /// member whose least possible value is that far past what the chain has made cannot change
+    /// the chain, and need not be walked to find out. And a blend's first operand joined to
+    /// nothing is itself, which is what the run's `1e30` stands for.
+    #[test]
+    fn a_blend_is_its_nearer_operand_once_the_other_is_a_radius_clear() {
+        let steps: Vec<f64> = (-200..=200).map(|i| f64::from(i) * 0.1 + 0.0137).collect();
+        for n in [1.0, 2.0, 3.0, 4.0] {
+            let mut held = 0usize;
+            for &a in &steps {
+                for &b in &steps {
+                    if b - a > K * (1.0 + 1e-9) {
+                        held += 1;
+                        assert_eq!(blend_bound(a, b, K, n), a, "n = {n}: ({a}, {b}) is not the nearer operand");
+                        assert_eq!(blend_bound(b, a, K, n), a, "n = {n}: ({b}, {a}) is not the nearer operand");
+                    }
+                }
+                assert_eq!(blend_bound(1e30, a, K, n), a, "n = {n}: {a} joined to nothing");
+            }
+            assert!(held > 10_000, "n = {n}: only {held} pairs stood clear, which checks little");
+        }
+        // And with no radius at all it is the hard minimum, which the rule reads the same way.
+        assert_eq!(blend_bound(3.0, 4.0, 0.0, 2.0), 3.0);
+    }
+
     /// A rounded blend claims a distance nowhere: over two operands that are distances it says
     /// `LowerBound`, since inside the join's reach it understates (spec §2.2, §3) -- and the
     /// unit-gradient check that defines a distance confirms it where the bound is shortest,

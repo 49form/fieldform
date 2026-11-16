@@ -155,6 +155,14 @@ pub enum CodegenError {
          is nothing to generate for it. Put a block in it, or take out what reads it."
     )]
     EmptySlot(NodeId),
+    /// A block made before the curve it is built from, or one whose curve was taken out -- the
+    /// same refusal under the same name as `CompileError::WaitsForCurve`, for the reason
+    /// `EmptySlot` is shared.
+    #[error(
+        "a block is waiting for a curve \u{2014} node {0:?} has not been told which curve to \
+         build from, so there is nothing to generate for it. Pick one in the block."
+    )]
+    WaitsForCurve(NodeId),
     /// A body that is, or reads, a cage the document holds open -- the same refusal
     /// `CompileError::OpenCage` is, for the same reason `EmptySlot` is shared (R12).
     #[error("cage {0} is not a solid, so there is nothing to generate for it")]
@@ -1243,11 +1251,15 @@ fn generate_inner(
     // In `order` rather than over `graph.nodes()`, because that is a map and D7 wants the same
     // graph to compile to the same bytes.
     for id in &order {
-        if let Some(Node::Boolean { op, inputs }) = graph.node(*id) {
-            if let Some(run) = looped_run(*op, graph, inputs, run_floor) {
-                for binding in &run.curves {
-                    intern(&mut curves, *binding);
-                }
+        let run = match graph.node(*id) {
+            Some(Node::Boolean { op, inputs }) => looped_run(*op, graph, inputs, run_floor),
+            // A blend's run of pipes reads its spines the same way, so they are made here too.
+            Some(Node::Blend { op, inputs, fillet }) => blend_run(*op, graph, inputs, fillet, run_floor),
+            _ => None,
+        };
+        if let Some(run) = run {
+            for binding in &run.curves {
+                intern(&mut curves, *binding);
             }
         }
     }
@@ -1441,7 +1453,11 @@ fn generate_inner(
             Node::Revolve { outline, frame, angle, sides, rims } => {
                 emit.revolve(outline, frame, angle, sides, rims)
             }
-            Node::Pipe { curve, radius } => emit.pipe(curve, radius)?,
+            // A slot the plan above passed over when empty (`Graph::incomplete`); answered
+            // rather than assumed, as the infill's arm below is.
+            Node::Pipe { curve, radius } => {
+                emit.pipe(&curve.source().ok_or(CodegenError::WaitsForCurve(id))?, radius)?
+            }
             Node::Morph { a, b, t } => emit.morph(a, b, t)?,
             Node::Boolean { op, inputs } => emit.boolean(op, inputs)?,
             Node::Blend { op, inputs, fillet } => emit.blend(op, inputs, fillet)?,
@@ -1459,7 +1475,8 @@ fn generate_inner(
             // The one left unlowered is a block with a hole in it, by `with_infills_lowered`.
             Node::Infill { .. } => return Err(CodegenError::EmptySlot(id)),
             Node::Sweep { outline, spine, section, law, rims } => {
-                emit.sweep(outline, spine, section, law, rims)?
+                let spine = spine.source().ok_or(CodegenError::WaitsForCurve(id))?;
+                emit.sweep(outline, &spine, section, law, rims)?
             }
             Node::Loft { sections, spine, smooth, rims } => emit.loft(sections, spine, smooth, rims)?,
             Node::Unknown(_) => unreachable!("refused in generate, before any lowering"),
@@ -2707,11 +2724,21 @@ impl NodeEmitter<'_> {
                 // to be contiguous as well, for a few dozen bytes each on a list that is tens
                 // long. The source was the thing that cost 123 seconds, not the buffer.
                 let base = params.len();
+                // What a run of driven pipes is handed besides its table: the ramp's reading
+                // at this point, the one every member shares.
+                let mut handed = String::new();
                 match &run.kind {
                     RunKind::Pipes(radii) => {
                         for r in radii {
                             params.push(r.clone());
                         }
+                    }
+                    // A divisor a member, from the function its single arm asks, in list order.
+                    RunKind::DrivenPipes { driver, members } => {
+                        for divisor in driven_pipe_divisors(document, graph, members)? {
+                            params.push(ParamRef::Literal(divisor));
+                        }
+                        handed = format!(", {}", operand(&slot, (*driver, inner))?);
                     }
                     // Twelve a member, in the order the single-extrude arm pushes them —
                     // `extrude_placement`'s nine, then the height, the draft's *tangent* and
@@ -2768,7 +2795,7 @@ impl NodeEmitter<'_> {
                 let (walk, _) = run.kind.walkers();
                 let table = run_table_start(&run.kind, base);
                 blocks_before.push(format!(
-                    "    let r{n} = {walk}({first}u, {table}, u32(params[{count}]), {p});\n"
+                    "    let r{n} = {walk}({first}u, {table}, u32(params[{count}]), {p}{handed});\n"
                 ));
                 named.push((format!("r{n}"), None));
                 for input in inputs.iter().skip(run.at + run.len()) {
@@ -2842,6 +2869,8 @@ impl NodeEmitter<'_> {
         let NodeEmitter {
             document,
             graph,
+            run_floor,
+            curves,
             params,
             slot,
             body,
@@ -2851,12 +2880,88 @@ impl NodeEmitter<'_> {
             operand_masks,
             id,
             n,
+            p,
             inner,
             ctx,
             ..
         } = self;
         Ok({
             let [a, b, rest @ ..] = inputs else { return Err(CodegenError::NothingToCombine(id)) };
+            // **A run of pipes in the list is one loop, not a call each** -- `blend_run` for
+            // which blends and which operands, `pipe_blend_run` for why the loop is the chain
+            // to the letter. The radius's slot first, as the written-out form pushes it, then
+            // the run's; the normal pass counts the same two in the same order.
+            //
+            // **Nothing here is masked.** A mask is a saving on the chain's first pair, and a
+            // run has taken away the per-operand distinction it works by, as a union's run
+            // does; the run's own walk rules its far members out instead, per reading rather
+            // than per cell (`spine_distance_within`).
+            let run = blend_run(*op, graph, inputs, fillet, run_floor);
+            if let Some((run, first)) = run.as_ref().zip(run_first_curve(&curves, run.as_ref())) {
+                let r = params.len();
+                params.push(fillet.radius.clone());
+                let k = format!("params[{r}]");
+                let e = fillet.exponent();
+                let base = params.len();
+                let (amount, driven) = match &run.kind {
+                    RunKind::Pipes(radii) => {
+                        for radius in radii {
+                            params.push(radius.clone());
+                        }
+                        ("0.0".to_string(), false)
+                    }
+                    RunKind::DrivenPipes { driver, members } => {
+                        for divisor in driven_pipe_divisors(document, graph, members)? {
+                            params.push(ParamRef::Literal(divisor));
+                        }
+                        (operand(&slot, (*driver, inner))?, true)
+                    }
+                    _ => unreachable!("`blend_run` admits only pipes"),
+                };
+                let count = params.len();
+                params.push(ParamRef::Literal(run.len() as f64));
+                debug_assert_eq!(
+                    params.len() - base,
+                    run.slots(),
+                    "the value pass pushed slots the normal pass will not count"
+                );
+                // The chain in list order, each step a `let` of its own as the written-out
+                // form's are, with the run standing where its first member stood and taking
+                // what was made before it.
+                let mut made: Option<String> = None;
+                let mut lets = 0usize;
+                let mut named = |blocks: &mut Vec<String>, value: String| -> String {
+                    let name = format!("bl{n}_{lets}");
+                    lets += 1;
+                    blocks.push(format!("    let {name} = {value};\n"));
+                    name
+                };
+                for (index, input) in inputs.iter().enumerate() {
+                    if index > run.at && index < run.at + run.len() {
+                        continue;
+                    }
+                    // A call is given a name before the next step reads it; an operand's own
+                    // name is one already.
+                    let before = match made.take() {
+                        Some(value) if value.contains('(') => Some(named(&mut blocks_before, value)),
+                        other => other,
+                    };
+                    made = Some(if index == run.at {
+                        format!(
+                            "pipe_blend_run({first}u, {base}u, u32(params[{count}]), {p}, \
+                             {amount}, {driven}, {}, {k}, {e:?})",
+                            before.as_deref().unwrap_or("1e30"),
+                        )
+                    } else {
+                        let name = operand(&slot, (*input, inner))?;
+                        match before {
+                            Some(before) => format!("blend_bound({before}, {name}, {k}, {e:?})"),
+                            None => name,
+                        }
+                    });
+                }
+                return made.ok_or(CodegenError::NothingToCombine(id));
+            }
             let (name_a, name_b) = (operand(&slot, (*a, inner))?, operand(&slot, (*b, inner))?);
             // **The radius: a slot, or the ramp that drives it** (`round-chamfer-spec.md` §9.1),
             // lowered exactly as a driven offset's distance is -- the ramp's own expression read
@@ -4564,6 +4669,7 @@ fn normal_function(
                 }
             }
             Node::Pipe { curve, radius } => {
+                let curve = &curve.source().ok_or(CodegenError::WaitsForCurve(id))?;
                 let c = curves
                     .iter()
                     .position(|x| *x == CurveUse::Spine(*curve))
@@ -4645,9 +4751,17 @@ fn normal_function(
                         let count = base + run.slots() - 1;
                         let (_, walk) = run.kind.walkers();
                         let table = run_table_start(&run.kind, base);
+                        // The ramp's reading a run of driven pipes is handed, as the value
+                        // pass hands it.
+                        let handed = match &run.kind {
+                            RunKind::DrivenPipes { driver, .. } => {
+                                format!(", {}", value_of(&slot, (*driver, inner))?)
+                            }
+                            _ => String::new(),
+                        };
                         blocks_before.push(format!(
                             "    let pr{n} = {walk}({first}u, {table}, \
-                             u32(params[{count}]), {p});\n"
+                             u32(params[{count}]), {p}{handed});\n"
                         ));
                         values.push(format!("pr{n}.w"));
                         normals.push(format!("pr{n}.xyz"));
@@ -4670,6 +4784,71 @@ fn normal_function(
                     blocks_before.push(block);
                 }
                 folded
+            }
+            // **The same run the value pass took, decided by the same function**, and its slots
+            // counted in the same order: the radius's, then the run's. The walk hands back the
+            // chain's gradient in `xyz` and its value in `w`, which is the `let` pair a
+            // written-out step makes, in one name.
+            Node::Blend { op, inputs, fillet }
+                if blend_run(*op, graph, inputs, fillet, run_floor)
+                    .is_some_and(|run| run_first_curve(&curves, Some(&run)).is_some()) =>
+            {
+                let run = blend_run(*op, graph, inputs, fillet, run_floor).expect("asked above");
+                let first = run_first_curve(&curves, Some(&run)).expect("asked above");
+                let r = params;
+                params += 1;
+                let k = format!("params[{r}]");
+                let e = fillet.exponent();
+                let base = params;
+                params += run.slots();
+                let count = base + run.slots() - 1;
+                let (amount, driven) = match &run.kind {
+                    RunKind::DrivenPipes { driver, .. } => (value_of(&slot, (*driver, inner))?, true),
+                    _ => ("0.0".to_string(), false),
+                };
+                let mut made: Option<(String, String)> = None;
+                let mut lets = 0usize;
+                for (index, input) in inputs.iter().enumerate() {
+                    if index > run.at && index < run.at + run.len() {
+                        continue;
+                    }
+                    // A step is named before the next reads it, value and gradient both; an
+                    // operand's own names are names already.
+                    let before = match made.take() {
+                        Some((value, normal)) if value.contains('(') => {
+                            let names = (format!("blv{n}_{lets}"), format!("blg{n}_{lets}"));
+                            lets += 1;
+                            blocks_before.push(format!(
+                                "    let {} = {value};\n    let {} = {normal};\n",
+                                names.0, names.1
+                            ));
+                            Some(names)
+                        }
+                        other => other,
+                    };
+                    made = Some(if index == run.at {
+                        let start = match &before {
+                            Some((value, normal)) => format!("vec4<f32>({normal}, {value})"),
+                            None => "vec4<f32>(0.0, 0.0, 1.0, 1e30)".to_string(),
+                        };
+                        blocks_before.push(format!(
+                            "    let blr{n} = pipe_blend_run_nearest({first}u, {base}u, \
+                             u32(params[{count}]), {p}, {amount}, {driven}, {start}, {k}, {e:?});\n"
+                        ));
+                        (format!("blr{n}.w"), format!("blr{n}.xyz"))
+                    } else {
+                        let (value, normal) =
+                            (value_of(&slot, (*input, inner))?, normal_of(&slot, (*input, inner))?);
+                        match before {
+                            Some((va, ga)) => (
+                                format!("blend_bound({va}, {value}, {k}, {e:?})"),
+                                format!("blend_bound_normal({va}, {value}, {ga}, {normal}, {k}, {e:?})"),
+                            ),
+                            None => (value, normal),
+                        }
+                    });
+                }
+                made.ok_or(CodegenError::NothingToCombine(id))?
             }
             Node::Blend { op, inputs, fillet } => {
                 let [a, b, rest @ ..] = &inputs[..] else { return Err(CodegenError::NothingToCombine(id)) };
@@ -5031,6 +5210,7 @@ fn normal_function(
                     fieldform_scene::Outline::Wall { .. } => CurveUse::Wall(id, WALL_PARTS[0]),
                 };
                 let c = curves.iter().position(|x| *x == first).expect("interned above");
+                let spine = &spine.source().ok_or(CodegenError::WaitsForCurve(id))?;
                 let s = curves
                     .iter()
                     .position(|x| *x == CurveUse::Spine(*spine))
@@ -5613,7 +5793,7 @@ fn wedge_slots(
     let into = move |p: nalgebra::Point3<f64>| {
         nalgebra::Point3::from(rotation.inverse_transform_vector(&(p.coords - translation)))
     };
-    let points = fieldform_field::outline_chain(document, outline.curve(), frame.curve_source())
+    let points = fieldform_field::outline_chain(document, outline.curve()?, frame.curve_source())
         .ok()?
         .points;
     let starts_at = fieldform_field::Profile::azimuth(&points, into);
@@ -7856,6 +8036,16 @@ enum RunKind {
     /// The radii themselves, because they are `ParamRef`s the graph already holds and carrying
     /// them reads no value.
     Pipes(Vec<ParamRef>),
+    /// Pipes whose radius one ramp drives: a spine binding and one slot each, the member's
+    /// *divisor* where a plain pipe's is its radius.
+    ///
+    /// **One ramp for the whole run.** A driven pipe is `(d_spine - amount) / divisor`, and
+    /// `amount` is the ramp read at the point -- the same reading for every member when they
+    /// share the ramp, so it is taken once outside the loop and the members differ by a spine
+    /// and a number, as plain ones do. Two ramps in one stretch are two expressions and end
+    /// each other's run. The nodes rather than the divisors, because a divisor is worked out
+    /// from the document at emission, as the single arm works it out.
+    DrivenPipes { driver: NodeId, members: Vec<NodeId> },
     /// Extrudes: a profile binding and twelve slots each.
     ///
     /// The nodes rather than the numbers, because most of an extrude's slots are its *placement*
@@ -7983,7 +8173,7 @@ impl RunKind {
     /// `a_fan_of_thin_extrudes_is_one_walk`.
     fn slots_each(&self) -> usize {
         match self {
-            RunKind::Pipes(_) => 1,
+            RunKind::Pipes(_) | RunKind::DrivenPipes { .. } => 1,
             RunKind::Extrudes(_) => 9 + DEPTH_SLOTS,
             RunKind::Walls(_) => 9 + DEPTH_SLOTS + 4,
             RunKind::Primitives(shape, _) => shape.slots(),
@@ -7994,7 +8184,7 @@ impl RunKind {
     /// read from three polylines where a spine or a profile is one.
     fn bindings_each(&self) -> usize {
         match self {
-            RunKind::Pipes(_) | RunKind::Extrudes(_) => 1,
+            RunKind::Pipes(_) | RunKind::DrivenPipes { .. } | RunKind::Extrudes(_) => 1,
             RunKind::Walls(_) => WALL_PARTS.len(),
             RunKind::Primitives(..) => 0,
         }
@@ -8004,6 +8194,7 @@ impl RunKind {
     fn walkers(&self) -> (&'static str, &'static str) {
         match self {
             RunKind::Pipes(_) => ("pipe_run_distance", "pipe_run_nearest"),
+            RunKind::DrivenPipes { .. } => ("driven_pipe_run_distance", "driven_pipe_run_nearest"),
             RunKind::Extrudes(_) => ("extrude_run_distance", "extrude_run_nearest"),
             RunKind::Walls(_) => ("wall_extrude_run_distance", "wall_extrude_run_nearest"),
             RunKind::Primitives(shape, _) => shape.walkers(),
@@ -8065,6 +8256,25 @@ impl OperandRun {
     }
 }
 
+/// Each member's divisor, in list order, from the function a single driven pipe asks -- so a
+/// run and a call divide by one number, and a bound that is not a number is refused as it is
+/// there.
+fn driven_pipe_divisors(
+    document: &fieldform_scene::Document,
+    graph: &Graph,
+    members: &[NodeId],
+) -> Result<Vec<f64>, CodegenError> {
+    members
+        .iter()
+        .map(|member| {
+            finite(
+                fieldform_field::driven_pipe_divisor(document, graph, *member),
+                "a varying pipe radius's bound",
+            )
+        })
+        .collect()
+}
+
 /// Where a run's walk finds its members' slots, as the walk's second argument: a literal index
 /// for the runs whose members are written in place, and the header's own slot for primitives,
 /// whose table is laid at the end of the buffer and could not be named by a literal without the
@@ -8120,8 +8330,11 @@ fn primitive_run_members(graph: &Graph, order: &[NodeId], floor: usize) -> HashS
 /// - **Or a plain primitive**: a hard-edged cylinder, cone or box, a capsule, a sphere or a torus,
 ///   which reads nothing but its own slots. Its members are skipped by both passes and read from a
 ///   table at the end of the buffer (`primitive_run_members`), so a member more changes no text.
-/// - **A pipe whose radius is a plain number.** A driven radius compiles to the offset expression
-///   instead — a different body, with a divisor of its own — so it cannot share a loop body. An
+/// - **Pipes whose radii are given one way: plain numbers, or one ramp's readings.** A driven
+///   radius compiles to the offset expression — a different body from a plain pipe's, with a
+///   divisor of its own — so the two cannot share a loop; but pipes one ramp drives differ from
+///   each other only by a spine and that divisor, the ramp being read once at the point, and
+///   are a run of their own kind (`RunKind::DrivenPipes`). Two ramps are two expressions. An
 ///   extrude needs no condition of this sort: every number on it is already a parameter slot, and
 ///   `extrude_placement` resolves the plane and the sweep direction to nine more whichever
 ///   `Sweep` it holds, so any two extrudes differ only in what is in the buffer.
@@ -8159,6 +8372,84 @@ fn looped_run(
         BooleanOp::Difference => 1,
         BooleanOp::Intersection => return None,
     };
+    run_among(graph, inputs, start, floor, false)
+}
+
+/// The run of pipes a blend's list may walk rather than write out, or `None`.
+///
+/// **The join a frame of bones is made with, and the one a run never reached.** A blend of a
+/// list is a chain -- each operand joining what the ones before it made -- so twenty pipes
+/// blended were twenty calls, each inlined at every place `march` reads the field, where the
+/// same twenty unioned had been one loop since the union run was built: measured on the chair
+/// this was written for, minutes of the driver's time against seconds
+/// (`fieldform-gpu/examples/blend_run_cost.rs`). The chain folds in list order whether written
+/// out or walked, so a run stands in the list where its first member stood and takes what was
+/// made before it as the loop's starting value.
+///
+/// One function for both passes, as `looped_run` is and for its reason. What a blend has to be
+/// for its list to hold a run, each condition a different body the loop does not have:
+///
+/// - **A union.** A blended difference or intersection negates operands, and which ones
+///   depends on where in the list they stand.
+/// - **A plain radius and one leg.** A driven radius divides every step by its own bound, and
+///   a chamfer of two legs scales the operands; neither is refused for being wrong, only for
+///   being a second loop body nobody has asked for.
+/// - **Nothing tapering**, which swaps the join for `smooth_min_tapering`.
+///
+/// **Pipes only**, plain or driven by one ramp (`run_among`). A blend of extrudes or of
+/// primitives is still written out: the walks for those fold by `min`, and a chain's walk is
+/// one more function a kind, to be written when a document asks for it.
+///
+/// **What it is worth, and the floor it keeps** -- `blend_run_cost`, an RTX A500 Laptop GPU on
+/// Vulkan, 2026-11-14, every source cold, least of six rounds of twenty frames. Pipes on spokes
+/// tapered by one ramp and joined by one G2 blend, which is both new runs at once; the rows for
+/// each alone are in that example and read the same way. The last column is the loop with
+/// nothing ruled out, so the difference from the one before it is `spine_distance_within`'s.
+///
+/// | pipes | compile ms, as calls → as a loop | 720 px, as calls → loop | 1440 px | loop, unpruned |
+/// |---|---|---|---|---|
+/// | 2 | 696 → **527** | 6.8 → 6.8 | 22.8 → 23.2 | 7.3 / 23.8 |
+/// | 3 | 945 → **559** | 7.5 → 7.2 | 25.1 → 24.0 | 8.1 / 25.6 |
+/// | **4** | 1 437 → **535** | 8.9 → 7.6 | 28.3 → 25.2 | 10.4 / 28.6 |
+/// | 5 | 2 365 → **576** | 11.0 → 8.7 | 35.2 → 28.1 | 10.2 / 32.5 |
+/// | 8 | 11 087 → **535** | 28.6 → 10.3 | 90.0 → 34.6 | 14.5 / 47.8 |
+/// | 16 | 33 553 → **546** | 84.0 → 18.3 | 215.4 → 53.3 | 32.3 / 86.2 |
+///
+/// **`RUN_FLOOR` again, read rather than inherited.** At four no arm of any of the three
+/// shapes regresses -- 8.9 → 7.6 here, 9.2 → 7.9 blended alone, 7.6 → 7.6 tapered alone --
+/// and below four the frames differ by less than the controls do: eight and nine spheres,
+/// whose arms are the same bytes, spread 5.3 to 6.0 ms at 720 px and 20.9 to 23.5 at 1440 that
+/// run. So a lower floor is not something this table can argue for, and one number for every
+/// run of pipes stays worth more than a number each. Past four it is one-sided: at sixteen,
+/// sixty times the compile, and the frame from 84.0 ms to 32.3 for being a loop and on to 18.3
+/// for ruling far members out.
+fn blend_run(
+    op: BooleanOp,
+    graph: &Graph,
+    inputs: &[Operand],
+    fillet: &fieldform_scene::Fillet,
+    floor: usize,
+) -> Option<OperandRun> {
+    if op != BooleanOp::Union
+        || fillet.radius.driver().is_some()
+        || fillet.second_leg().is_some()
+        || tapers(graph)
+    {
+        return None;
+    }
+    run_among(graph, inputs, 0, floor, true)
+}
+
+/// The longest stretch of `inputs`, from `start`, that one loop may walk -- `looped_run`'s
+/// search and `blend_run`'s, which differ in where a run may begin and in whether anything but
+/// a pipe may be one (`pipes_only`).
+fn run_among(
+    graph: &Graph,
+    inputs: &[Operand],
+    start: usize,
+    floor: usize,
+    pipes_only: bool,
+) -> Option<OperandRun> {
     // Every consumer of every node, and every use of a curve as a spine, counted once for the
     // whole graph rather than per candidate.
     let mut consumers: HashMap<NodeId, usize> = HashMap::new();
@@ -8168,24 +8459,30 @@ fn looped_run(
             *consumers.entry(input).or_insert(0) += 1;
         }
         match node {
-            Node::Pipe { curve, .. } => *spine_uses.entry(*curve).or_insert(0) += 1,
-            Node::Sweep { spine, .. } => *spine_uses.entry(*spine).or_insert(0) += 1,
+            // An empty slot is no use of any curve.
+            Node::Pipe { curve: slot, .. } | Node::Sweep { spine: slot, .. } => {
+                if let Some(curve) = slot.source() {
+                    *spine_uses.entry(curve).or_insert(0) += 1;
+                }
+            }
             Node::Attract { toward: fieldform_scene::Attractor::Curve(id), .. } => {
                 *spine_uses.entry(*id).or_insert(0) += 1
             }
             _ => {}
         }
     }
-    let plain_pipe = |slot: &Operand| -> Option<(CurveId, ParamRef)> {
+    // A pipe this join alone consumes, on a spine nothing else walks: its node, its spine and
+    // its radius -- a number, or the ramp that drives it, which the stretch below sorts out.
+    let pipe_of = |slot: &Operand| -> Option<(NodeId, CurveId, ParamRef)> {
         let id = slot.source()?;
         let Some(Node::Pipe { curve, radius }) = graph.node(id) else { return None };
-        if radius.driver().is_some()
-            || consumers.get(&id).copied().unwrap_or(0) != 1
+        let curve = &curve.source()?;
+        if consumers.get(&id).copied().unwrap_or(0) != 1
             || spine_uses.get(curve).copied().unwrap_or(0) != 1
         {
             return None;
         }
-        Some((*curve, radius.clone()))
+        Some((id, *curve, radius.clone()))
     };
     // An extrude this boolean alone consumes. Nothing on the node itself can disqualify it: the
     // sweep, the draft and the symmetric flag are all parameter slots, so every extrude compiles
@@ -8224,12 +8521,21 @@ fn looped_run(
         // Every stretch from here, of which at most one can be non-empty — a node is a pipe, a
         // thick extrude or a thin one and never two of them — so whichever starts at `at` is
         // the kind of the run there.
-        let mut pipes = Vec::new();
-        while let Some(found) = inputs.get(at + pipes.len()).and_then(|slot| plain_pipe(slot)) {
+        // **Plain radii together, or one ramp's pipes together**: a loop has one body, and a
+        // number in a slot and a ramp's reading are two, as two different ramps are. So a
+        // stretch ends where the way its radius is given changes, and the next begins there.
+        let mut pipes: Vec<(NodeId, CurveId, ParamRef)> = Vec::new();
+        while let Some(found) = inputs.get(at + pipes.len()).and_then(|slot| pipe_of(slot)) {
+            if pipes.first().is_some_and(|(_, _, radius)| radius.driver() != found.2.driver()) {
+                break;
+            }
             pipes.push(found);
         }
         let stretch_of = |thin: bool| -> Vec<NodeId> {
             let mut found = Vec::new();
+            if pipes_only {
+                return found;
+            }
             while let Some(id) = inputs.get(at + found.len()).and_then(|s| extrude_of(s, thin)) {
                 found.push(id);
             }
@@ -8237,10 +8543,14 @@ fn looped_run(
         };
         let (extrudes, walls) = (stretch_of(false), stretch_of(true));
         let here: Option<(Vec<CurveUse>, RunKind)> = if !pipes.is_empty() {
-            Some((
-                pipes.iter().map(|(c, _)| CurveUse::Spine(*c)).collect(),
-                RunKind::Pipes(pipes.iter().map(|(_, r)| r.clone()).collect()),
-            ))
+            let spines = pipes.iter().map(|(_, c, _)| CurveUse::Spine(*c)).collect();
+            Some(match pipes[0].2.driver() {
+                None => (spines, RunKind::Pipes(pipes.iter().map(|(_, _, r)| r.clone()).collect())),
+                Some(driver) => (
+                    spines,
+                    RunKind::DrivenPipes { driver, members: pipes.iter().map(|(id, _, _)| *id).collect() },
+                ),
+            })
         } else if !extrudes.is_empty() {
             Some((
                 extrudes.iter().map(|id| CurveUse::Profile(*id)).collect(),
@@ -8256,7 +8566,9 @@ fn looped_run(
                     .collect(),
                 RunKind::Walls(walls),
             ))
-        } else if let Some((shape, _)) = inputs.get(at).and_then(|s| primitive_of(s)) {
+        } else if let Some((shape, _)) =
+            inputs.get(at).and_then(|s| primitive_of(s)).filter(|_| !pipes_only)
+        {
             // A stretch of one shape: a cylinder beside a cone ends both, as a pipe beside an
             // extrude does, since a loop has one body.
             let mut members = Vec::new();
@@ -8324,7 +8636,15 @@ fn source_of(at: impl Into<Operand>) -> NodeId {
 /// between the walk and the refusal, which nothing does. `CompileError`'s `empty_slot` is this
 /// function on the CPU side, worded to match.
 fn empty_slot(graph: &Graph, met: NodeId) -> CodegenError {
-    CodegenError::EmptySlot(graph.first_empty_operand().map_or(met, |(node, _)| node))
+    if let Some((node, _)) = graph.first_empty_operand() {
+        return CodegenError::EmptySlot(node);
+    }
+    // No operand is empty, so the hole is a block waiting for a curve -- the other thing
+    // `Graph::incomplete` reads, named in id order as the field's own refusal names it.
+    match graph.first_waiting_for_a_curve() {
+        Some(node) => CodegenError::WaitsForCurve(node),
+        None => CodegenError::EmptySlot(met),
+    }
 }
 
 /// The open cage a body is, or reads, if any -- the same question `compile.rs` asks, so the two

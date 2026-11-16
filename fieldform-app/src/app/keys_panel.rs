@@ -8,13 +8,13 @@ use crate::*;
 impl App {
     /// The keymap the person's bindings make over the registry's defaults, and what collides.
     pub(crate) fn rebuild_keymap(&mut self) {
-        let (bound, conflicts) = keybindings::effective(&self.bindings);
+        let (bound, conflicts) = keybindings::effective(&self.keys.bindings);
         let mut keymap = fieldform_ops::Keymap::new();
         for (chord, command) in &bound {
             keymap.bind(chord.shortcut(), command.op, command.fixed_args());
         }
-        self.keymap = keymap;
-        self.binding_conflicts = conflicts;
+        self.keys.keymap = keymap;
+        self.keys.conflicts = conflicts;
     }
 
     /// Reads the person's bindings file, if there is one, saying what it could not read.
@@ -25,7 +25,7 @@ impl App {
         for why in errors {
             self.warn(format!("{}: {why}", path.display()));
         }
-        self.bindings = lines;
+        self.keys.bindings = lines;
         self.rebuild_keymap();
     }
 
@@ -43,43 +43,43 @@ impl App {
             self.warn(format!("The bindings could not be kept: {why}"));
             return;
         }
-        if let Err(why) = std::fs::write(&path, keybindings::write(&self.bindings)) {
+        if let Err(why) = std::fs::write(&path, keybindings::write(&self.keys.bindings)) {
             self.warn(format!("The bindings could not be kept in {}: {why}", path.display()));
         }
     }
 
     /// Starts waiting for the keys to give `id`; the next chord pressed is it, Esc gives up.
     pub(crate) fn begin_capture(&mut self, id: &'static str) {
-        self.capturing = Some(id);
-        self.bindings_note = None;
+        self.keys.capturing = Some(id);
+        self.keys.note = None;
     }
 
     /// The chord pressed while capturing: given to the command, or refused by name (§9.2).
     pub(crate) fn captured(&mut self, chord: commands::Chord) {
-        let Some(id) = self.capturing.take() else { return };
+        let Some(id) = self.keys.capturing.take() else { return };
         if chord.key == "Escape" && !chord.ctrl && !chord.alt && !chord.shift {
-            self.bindings_note = None;
+            self.keys.note = None;
             return;
         }
-        if let Some(why) = keybindings::refusal(&self.bindings, id, &chord) {
-            self.bindings_note = Some(why);
+        if let Some(why) = keybindings::refusal(&self.keys.bindings, id, &chord) {
+            self.keys.note = Some(why);
             return;
         }
-        self.bindings = keybindings::rebound(&self.bindings, id, chord.clone());
+        self.keys.bindings = keybindings::rebound(&self.keys.bindings, id, chord.clone());
         self.save_bindings();
         let name = commands::by_id(id).map_or(id, |c| c.display_name.trim_end_matches("..."));
-        self.bindings_note = Some(format!("{name} is on {}", chord.label()));
+        self.keys.note = Some(format!("{name} is on {}", chord.label()));
     }
 
     /// Takes every key off `id`, defaults included.
     pub(crate) fn clear_binding(&mut self, id: &'static str) {
-        self.bindings = keybindings::cleared(&self.bindings, id);
+        self.keys.bindings = keybindings::cleared(&self.keys.bindings, id);
         self.save_bindings();
     }
 
     /// Gives `id` its default keys back.
     pub(crate) fn reset_binding(&mut self, id: &'static str) {
-        self.bindings = keybindings::reset(&self.bindings, id);
+        self.keys.bindings = keybindings::reset(&self.keys.bindings, id);
         self.save_bindings();
     }
 
@@ -87,16 +87,16 @@ impl App {
     pub(crate) fn keys_panel(&mut self, ctx: &egui::Context) {
         let mut open = self.show_shortcuts;
         if !open {
-            self.capturing = None;
+            self.keys.capturing = None;
             return;
         }
-        let (bound, _) = keybindings::effective(&self.bindings);
+        let (bound, _) = keybindings::effective(&self.keys.bindings);
         let mut capture: Option<&'static str> = None;
         let mut clear: Option<&'static str> = None;
         let mut reset: Option<&'static str> = None;
-        let capturing = self.capturing;
-        let note = self.bindings_note.clone();
-        let conflicts = self.binding_conflicts.clone();
+        let capturing = self.keys.capturing;
+        let note = self.keys.note.clone();
+        let conflicts = self.keys.conflicts.clone();
         egui::Window::new("Keys").open(&mut open).default_width(560.0).show(ctx, |ui| {
             ui.label(egui::RichText::new("The mouse is the navigation's, and no key may take it:").weak());
             for (keys, what) in [
@@ -120,8 +120,8 @@ impl App {
             egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                 for c in commands::COMMANDS.iter().filter(|c| c.built()) {
                     let chords: Vec<String> = bound.iter().filter(|(_, b)| b.id == c.id).map(|(ch, _)| ch.label()).collect();
-                    let custom = self.bindings.iter().any(|l| l.command == Some(c.id))
-                        || c.chords().iter().any(|d| self.bindings.iter().any(|l| l.chord == *d));
+                    let custom = self.keys.bindings.iter().any(|l| l.command == Some(c.id))
+                        || c.chords().iter().any(|d| self.keys.bindings.iter().any(|l| l.chord == *d));
                     ui.horizontal(|ui| {
                         let place = if c.category.is_empty() { "console".to_string() } else { c.category.join(" › ") };
                         ui.add_sized(

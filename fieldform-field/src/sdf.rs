@@ -651,6 +651,25 @@ mod tests {
         CageField::from_cage(&Cage::cube(), 3).unwrap()
     }
 
+    /// Asked together, a cage's distance and normal are the two it gives when asked apart: the
+    /// one search has to land where each of the two would have, on a face, an edge and a corner
+    /// alike, inside and out.
+    #[test]
+    fn a_cage_answers_its_distance_and_normal_together_as_it_does_apart() {
+        use crate::ScalarField;
+        let field = CageField::from_cage(&Cage::cube_of(1000.0), 3).unwrap();
+        for k in 0..600 {
+            let p = Point3::new(
+                ((k * 37) % 1600) as f64 - 800.0,
+                ((k * 71) % 1600) as f64 - 800.0,
+                ((k * 13) % 1600) as f64 - 800.0,
+            );
+            let (distance, normal) = ScalarField::distance_and_normal(&field, p);
+            assert_eq!(distance, ScalarField::distance(&field, p), "the distance at {p:?}");
+            assert_eq!(normal, ScalarField::normal(&field, p), "the normal at {p:?}");
+        }
+    }
+
     /// The hierarchy must not change any answer, on real cage geometry and including the
     /// inside/outside test — pruning that occasionally flipped a sign would read as a speck of
     /// inverted surface rather than as an obvious failure.

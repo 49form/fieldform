@@ -21,7 +21,7 @@
 
     fn thin(curve: CurveId, thickness: f64, side: WallSide, ends: WallEnds, sweep: Sweep) -> Node {
         Node::Extrude { rims: Default::default(),
-            outline: Outline::Wall { curve, thickness: lit(thickness), side, ends },
+            outline: Outline::Wall { curve: curve.into(), thickness: lit(thickness), side, ends },
             sweep,
             height: lit(20.0),
             draft: lit(0.0),
@@ -185,7 +185,7 @@
         );
         let plane = |curve: CurveId, sweep: &Sweep| {
             let outline = Outline::Wall {
-                curve,
+                curve: curve.into(),
                 thickness: lit(2.0),
                 side: WallSide::Centre,
                 ends: WallEnds::Square,
@@ -243,7 +243,7 @@
         let arc = Curve::new(id, "arc", 3, control, vec![1.0; 4], knots, false).expect("a cubic");
         doc.curves.insert(id, arc);
         let outline = Outline::Wall {
-            curve: id,
+            curve: id.into(),
             thickness: lit(3.0),
             side: WallSide::Left,
             ends: WallEnds::Square,
@@ -281,7 +281,7 @@
         drawn(&mut doc, vec![Point3::new(0.0, 40.0, 5.0), Point3::new(0.0, 0.0, 5.0)], false);
         drawn(&mut doc, vec![Point3::new(0.0, 0.0, 5.0), Point3::new(40.0, 0.0, 5.0)], false);
         let wall = Outline::Wall {
-            curve: id,
+            curve: id.into(),
             thickness: lit(2.0),
             side: WallSide::Centre,
             ends: WallEnds::Square,
@@ -340,7 +340,7 @@
         // A thickness that names a parameter the document does not hold has no value.
         let unnamed = Node::Extrude { rims: Default::default(),
             outline: Outline::Wall {
-                curve: line,
+                curve: line.into(),
                 thickness: ParamRef::Named(fieldform_scene::ParamId::new()),
                 side: WallSide::Centre,
                 ends: WallEnds::Square,
@@ -382,7 +382,7 @@
             let mut graph = Graph::empty();
             let node = graph.add(Node::Extrude { rims: Default::default(),
                 outline: Outline::Wall {
-                    curve: line,
+                    curve: line.into(),
                     thickness: lit(3.0),
                     side: WallSide::Left,
                     ends: WallEnds::Round,

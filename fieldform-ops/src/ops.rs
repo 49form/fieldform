@@ -516,6 +516,47 @@ impl Command for SetShown {
     }
 }
 
+/// Locks or unlocks a block ([`fieldform_scene::NodeMeta::locked`]), as an undo step.
+///
+/// The flag alone rather than the whole entry, for [`SetShown`]'s reason.
+pub struct SetLocked {
+    id: fieldform_scene::NodeId,
+    after: bool,
+    before: bool,
+}
+
+impl SetLocked {
+    pub fn new(id: fieldform_scene::NodeId, locked: bool) -> Self {
+        Self { id, after: locked, before: locked }
+    }
+
+    fn write(&self, doc: &mut Document, locked: bool) {
+        let slot = doc.node_meta.entry(self.id).or_default();
+        slot.locked = locked;
+        // An entry holding nothing is no entry, for the reason `SetName` drops one.
+        if slot.is_empty() {
+            doc.node_meta.remove(&self.id);
+        }
+    }
+}
+
+impl Command for SetLocked {
+    fn name(&self) -> &str {
+        "block.set_locked"
+    }
+
+    fn execute(&mut self, doc: &mut Document) -> Result<(), OpError> {
+        self.before = doc.is_locked(self.id);
+        self.write(doc, self.after);
+        Ok(())
+    }
+
+    fn undo(&mut self, doc: &mut Document) -> Result<(), OpError> {
+        self.write(doc, self.before);
+        Ok(())
+    }
+}
+
 /// Turns a block's eye on or off — **the one write every eye makes**, and an undo step, which the
 /// eye was not (`block-ownership-spec.md` §7.3, §8).
 ///
@@ -1664,6 +1705,21 @@ impl Command for RefineCage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lock is one undo step, and unlocking a block that held nothing else leaves no entry.
+    #[test]
+    fn a_lock_is_undone_and_leaves_no_entry_behind() {
+        let mut doc = Document::new();
+        let block = fieldform_scene::NodeId::new();
+        let mut stack = CommandStack::new(64);
+        stack.execute(&mut doc, Box::new(SetLocked::new(block, true))).unwrap();
+        assert!(doc.is_locked(block));
+        stack.undo(&mut doc);
+        assert!(!doc.is_locked(block));
+        assert!(!doc.node_meta.contains_key(&block), "and leaves no entry");
+        stack.redo(&mut doc);
+        assert!(doc.is_locked(block));
+    }
     use crate::CommandStack;
     use fieldform_cage::Cage;
 
@@ -1753,6 +1809,7 @@ mod tests {
             name: Some("ball".to_string()),
             hidden: false,
             shown: true,
+            ..Default::default()
         };
         doc.node_meta.insert(ball, variable.clone());
 
@@ -1804,7 +1861,7 @@ mod tests {
         assert_eq!(doc.node_meta.get(&grown), Some(&hidden));
 
         // A consumed block's eye turned on: `shown`, beside a name and a `hidden` it leaves alone.
-        let named = NodeMeta { name: Some("ball".to_string()), hidden: true, shown: false };
+        let named = NodeMeta { name: Some("ball".to_string()), hidden: true, ..NodeMeta::default() };
         doc.node_meta.insert(ball, named.clone());
         stack
             .execute(&mut doc, Box::new(SetVisible::new(ball, EyeFlag::Shown, true)))

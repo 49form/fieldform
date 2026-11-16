@@ -80,7 +80,11 @@ impl App {
                 return;
             }
             Some(text) => Some(std::path::PathBuf::from(text.trim())),
-            None if args.iter().next().is_none() && self.script.is_none() && !self.script_running && !cfg!(test) => {
+            None if args.iter().next().is_none() && self.scripting.script.is_none() && !self.scripting.running && !cfg!(test) => {
+                if let Some(why) = crate::file_picker::unavailable() {
+                    self.warn(format!("Saving an image needs a file picker, and {why} — or give `file=`"));
+                    return;
+                }
                 let start = self.image_folder(&block).ok();
                 let mut dialog = rfd::FileDialog::new()
                     .set_title("Save Image")
@@ -90,10 +94,13 @@ impl App {
                 if let Some(dir) = start {
                     dialog = dialog.set_directory(dir);
                 }
-                match dialog.save_file() {
-                    Some(path) => Some(path),
-                    None => return, // cancelled: nothing made
-                }
+                // The same command again with the answer as its `file=`; a cancel makes nothing.
+                let args = args.clone();
+                self.ask_for_path(dialog, crate::file_picker::Ask::Save, move |app, path| {
+                    let file = Value::Str(path.to_string_lossy().to_string());
+                    app.saveimage_command(&args.with("file", file));
+                });
+                return;
             }
             None => None,
         };
@@ -342,7 +349,7 @@ impl App {
             return;
         }
         let interacting = ctx.input(|i| i.pointer.any_down() || i.pointer.is_moving() || !i.events.is_empty());
-        let quiet = self.session.is_none() && self.cage_session.is_none() && !interacting;
+        let quiet = self.tools.session.is_none() && self.cage_session.is_none() && !interacting;
         let revision = self.document_moves;
         let ids: Vec<SaveImageId> = self.images.armed.iter().copied().collect();
         for id in ids {
@@ -595,10 +602,20 @@ impl App {
                     row_label(ui, "Folder:");
                     ui.add(egui::TextEdit::singleline(&mut b.folder).hint_text("beside the document").desired_width(160.0))
                         .on_hover_text("Relative to the document's folder; an unsaved document writes under Pictures\\FieldForm.");
-                    if ui.small_button("Choose…").clicked()
-                        && let Some(dir) = rfd::FileDialog::new().pick_folder()
-                    {
-                        b.folder = dir.to_string_lossy().to_string();
+                    if ui.small_button("Choose…").clicked() {
+                        self.ask_for_path(rfd::FileDialog::new(), crate::file_picker::Ask::Folder, move |app, dir| {
+                            let folder = dir.to_string_lossy().to_string();
+                            if !app.doc.images.iter().any(|x| x.id == id && x.folder != folder) {
+                                return;
+                            }
+                            let images = app
+                                .doc
+                                .images
+                                .iter()
+                                .map(|x| if x.id == id { SaveImage { folder: folder.clone(), ..x.clone() } } else { x.clone() })
+                                .collect();
+                            app.set_images(images, Some(id));
+                        });
                     }
                 });
                 ui.horizontal(|ui| {
@@ -755,7 +772,17 @@ fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
     (ok != 0).then_some(free)
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
+fn free_disk_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ok = unsafe { libc::statvfs(path.as_ptr(), &mut stat) };
+    // What this account may use, which is less than what is free where blocks are reserved.
+    (ok == 0).then(|| stat.f_bavail as u64 * stat.f_frsize as u64)
+}
+
+#[cfg(not(any(windows, unix)))]
 fn free_disk_bytes(_path: &std::path::Path) -> Option<u64> {
     None
 }

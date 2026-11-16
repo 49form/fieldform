@@ -581,15 +581,15 @@ impl App {
                 .inner;
             // The first number of a block a session just made, waiting for the keyboard: focused,
             // a `DragValue` shows as text with its value selected, so typing replaces it.
-            if self.focus_first_number && computed.is_none() {
-                self.focus_first_number = false;
+            if self.tools.focus_first_number && computed.is_none() {
+                self.tools.focus_first_number = false;
                 response.request_focus();
                 select_whole_number(ui.ctx(), response.id);
             }
-            if self.drawing_pending && computed.is_none() {
-                self.pending_numbers.push(response.id);
+            if self.tools.drawing_pending && computed.is_none() {
+                self.tools.pending_numbers.push(response.id);
                 if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    self.keep_pending = true;
+                    self.tools.keep_pending = true;
                 }
             }
             if let Some(expression) = &computed {
@@ -610,7 +610,7 @@ impl App {
                 // displayed `3`, which is the stored value and the shown value disagreeing in the one
                 // widget built to stop that.
                 //
-                // Rounded here *and* on the way out in `pattern_count`, which is not duplication:
+                // Rounded here *and* on the way out in `next.pattern_count`, which is not duplication:
                 // this one keeps the stored number whole where somebody typed it, so the box and the
                 // document agree; that one keeps the *built* count whole however a variable drives
                 // it. A value typed here is the only one this line ever sees.
@@ -677,7 +677,7 @@ impl App {
                             // then `x_2` say nothing about what the number is for, and the row
                             // that holds them is in another panel among all the others. The
                             // next thing typed replaces it.
-                            self.naming_parameter = Some(id);
+                            self.notebook.naming_parameter = Some(id);
                             self.mark_changed();
                             ui.close();
                         }
@@ -899,22 +899,22 @@ impl App {
     /// make and the row says whose it is.
     /// Edit > Allow agent and `allowagent`: turns it the other way, and keeps it for next time.
     pub(crate) fn toggle_allow_agent(&mut self) {
-        if self.agent_host.as_ref().is_some_and(|h| h.mode == agent::server::HostMode::Launch) {
+        if self.agent_link.host.as_ref().is_some_and(|h| h.mode == agent::server::HostMode::Launch) {
             self.warn("This session was started by an agent, so it is the agent's already");
             return;
         }
         let ctx = self.egui_ctx.clone();
-        self.set_allow_agent(!self.allow_agent, &ctx);
+        self.set_allow_agent(!self.agent_link.allowed, &ctx);
         if !cfg!(test)
-            && !self.script_running
-            && let Err(why) = display_quality::save_allow_agent(self.allow_agent)
+            && !self.scripting.running
+            && let Err(why) = display_quality::save_allow_agent(self.agent_link.allowed)
         {
-            self.say(format!("Allow agent is {} for this session only: {why}", if self.allow_agent { "on" } else { "off" }));
+            self.say(format!("Allow agent is {} for this session only: {why}", if self.agent_link.allowed { "on" } else { "off" }));
         }
     }
 
     fn environment_row(&mut self, ui: &mut egui::Ui) {
-        let current = self.environment;
+        let current = self.view.environment;
         let mut next = None;
         ui.horizontal(|ui| {
             ui.label("Lighting:");
@@ -1062,36 +1062,8 @@ impl App {
                         self.material_row(ui);
                         self.environment_row(ui);
                         ui.separator();
-                        ui.horizontal(|ui| {
-                            // **"Cage detail", because that is what it sets.** Nothing displays
-                            // a limit-surface mesh -- the viewport is field-traced -- so "Mesh"
-                            // read as a setting for the model, when what it sets is the
-                            // tolerance the traced view bakes the *control cage* at, and the one
-                            // export will mesh at once export exists. Asked what it did; the
-                            // answer was not in the word. The field's own doc has said it was
-                            // worth renaming since the tracer landed.
-                            ui.label("Cage detail:").on_hover_text(
-                                "How finely the control cage is baked for display, in cells \
-                                 across the part. Bodies are traced from the field itself and \
-                                 are not affected.",
-                            );
-                            let mut resolution = self.mesh_resolution as u32;
-                            ui.add(
-                                egui::DragValue::new(&mut resolution).speed(1.0).suffix(" cells"),
-                            );
-                            // Below about 8 cells nothing is recognisable; above ~256 the
-                            // brute-force field evaluation stops being interactive on this
-                            // machine.
-                            let resolution = (resolution as usize).clamp(8, 256);
-                            // Changing this used to store the number and stop there, so nothing
-                            // was rebuilt until some *other* edit happened to trigger one. The
-                            // control looked like it did nothing, which — until the next cage
-                            // edit — was true.
-                            if resolution != self.mesh_resolution {
-                                self.mesh_resolution = resolution;
-                                self.rebuild_render_resources();
-                            }
-                        });
+                        // Cage detail used to be a row here. It is View › Cage detail now, with
+                        // the other settings for how the part is looked at, and `display cage=`.
                         self.draft_controls(ui);
                     });
                 });

@@ -63,7 +63,7 @@ impl App {
         let over_two = operands.len() > 2;
         // The list's own header: what it holds, and the two ways to fill it.
         {
-            let collecting = self.collecting == Some(id);
+            let collecting = self.notebook.collecting == Some(id);
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(format!("Bodies ({})", operands.len())).weak(),
@@ -76,7 +76,7 @@ impl App {
                     )
                     .clicked()
                 {
-                    self.collecting = if collecting { None } else { Some(id) };
+                    self.notebook.collecting = if collecting { None } else { Some(id) };
                     if !collecting {
                         self.say(format!(
                             "Picking bodies for {} — click them in the viewport",
@@ -315,7 +315,7 @@ impl App {
         });
         // A fillet radius the node already carries stays with it; one being added
         // starts from the tool's current setting.
-        let mut new_fillet = fillet.unwrap_or(self.blend_radius);
+        let mut new_fillet = fillet.unwrap_or(self.next.blend_radius);
         // A chamfer's second leg, kept through a switch of shape: the kernel reads it only on a
         // chamfer (`Fillet::second_leg`), so switching to a round and back loses nothing.
         let mut new_second = second;
