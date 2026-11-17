@@ -75,6 +75,7 @@ impl App {
             "create.cylinder" => self.add_primitive_with(PrimitiveKind::Cylinder, args),
             "create.cone" => self.add_primitive_with(PrimitiveKind::Cone, args),
             "create.torus" => self.add_primitive_with(PrimitiveKind::Torus, args),
+            "create.oloid" => self.add_primitive_with(PrimitiveKind::Oloid, args),
             "create.capsule" => self.add_primitive_with(PrimitiveKind::Capsule, args),
             "create.coil" => self.add_primitive_with(PrimitiveKind::Coil, args),
             "create.thread" => self.add_primitive_with(PrimitiveKind::Thread, args),

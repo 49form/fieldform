@@ -1493,7 +1493,9 @@ impl Profile {
     /// two cannot disagree about magnitude near a corner the way a half-plane test would.
     pub fn distance(&self, q: Point2<f64>) -> f64 {
         match &self.baked {
-            Some(grid) => grid.distance(q),
+            // Onto the outline where its own segments can say, the grid elsewhere: the grid
+            // alone stands every wall out by its margin. See `distance_to_outline`.
+            Some(grid) => grid.distance_to_outline(q, &self.points),
             None => self.walk(q),
         }
     }

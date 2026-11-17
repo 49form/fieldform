@@ -101,6 +101,7 @@ impl Node {
             | Node::Cylinder { .. }
             | Node::Cone { .. }
             | Node::Torus { .. }
+            | Node::Oloid { .. }
             | Node::Capsule { .. }
             | Node::Coil { .. }
             | Node::Thread { .. }

@@ -1243,6 +1243,7 @@ pub(crate) fn changes_the_cells(consumer: &Node, from: NodeId) -> bool {
         | Node::Plane { .. }
         | Node::Point { .. }
         | Node::Torus { .. }
+        | Node::Oloid { .. }
         | Node::Capsule { .. }
         | Node::Coil { .. }
         | Node::Thread { .. }

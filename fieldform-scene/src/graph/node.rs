@@ -277,6 +277,19 @@ pub enum Node {
         minor_radius: ParamRef,
         turn: Turn,
     },
+    /// An oloid, and the solids beside it: the convex hull of two equal circles in
+    /// perpendicular planes, one in XY and one in XZ, their centres `spread` radii apart along X.
+    ///
+    /// A spread of one puts each circle through the other's centre, which is the oloid itself;
+    /// the square root of two is the roller whose centre of mass keeps its height. The spread
+    /// is in radii rather than millimetres so that changing the radius scales the shape and
+    /// does not change which shape it is.
+    Oloid {
+        centre: crate::Place,
+        radius: ParamRef,
+        spread: ParamRef,
+        turn: Turn,
+    },
     /// A capsule between two points, with a radius at each.
     ///
     /// The points are the *cap centres*, so the shape reaches a radius beyond each of them and
@@ -1002,6 +1015,12 @@ impl Node {
                 out.push(minor_radius);
                 out.extend(turn.params());
             }
+            Node::Oloid { centre, radius, spread, turn } => {
+                out.extend(centre.refs());
+                out.push(radius);
+                out.push(spread);
+                out.extend(turn.params());
+            }
             Node::Capsule { ends, start_radius, end_radius } => {
                 out.extend(ends.params());
                 out.push(start_radius);
@@ -1197,6 +1216,12 @@ impl Node {
                 out.extend(centre.refs_mut());
                 out.push(major_radius);
                 out.push(minor_radius);
+                out.extend(turn.params_mut());
+            }
+            Node::Oloid { centre, radius, spread, turn } => {
+                out.extend(centre.refs_mut());
+                out.push(radius);
+                out.push(spread);
                 out.extend(turn.params_mut());
             }
             Node::Capsule { ends, start_radius, end_radius } => {
@@ -1431,6 +1456,7 @@ impl Node {
             | Node::Cylinder { .. }
             | Node::Cone { .. }
             | Node::Torus { .. }
+            | Node::Oloid { .. }
             | Node::Capsule { .. }
             | Node::Coil { .. }
             | Node::Thread { .. }
@@ -1542,6 +1568,7 @@ impl Node {
             | Node::Cylinder { .. }
             | Node::Cone { .. }
             | Node::Torus { .. }
+            | Node::Oloid { .. }
             | Node::Capsule { .. }
             | Node::Coil { .. }
             | Node::Thread { .. }
@@ -1626,7 +1653,8 @@ impl Node {
             Node::Sphere { centre, .. }
             | Node::Cuboid { centre, .. }
             | Node::SkewedBox { centre, .. }
-            | Node::Torus { centre, .. } => visit(centre),
+            | Node::Torus { centre, .. }
+            | Node::Oloid { centre, .. } => visit(centre),
             // Two, and gathered through `Ends` rather than reached into, so a block holding a
             // pair of places says so once.
             Node::Cylinder { ends, .. }
@@ -1649,7 +1677,8 @@ impl Node {
             Node::Sphere { centre, .. }
             | Node::Cuboid { centre, .. }
             | Node::SkewedBox { centre, .. }
-            | Node::Torus { centre, .. } => vec![centre],
+            | Node::Torus { centre, .. }
+            | Node::Oloid { centre, .. } => vec![centre],
             Node::Cylinder { ends, .. }
             | Node::Cone { ends, .. }
             | Node::Hole { ends, .. }
@@ -1665,9 +1694,10 @@ impl Node {
     /// two-ended shapes, whose direction already falls out of where their ends are.
     pub fn turn(&self) -> Option<&Turn> {
         match self {
-            Node::Cuboid { turn, .. } | Node::Torus { turn, .. } | Node::Plane { turn, .. } => {
-                Some(turn)
-            }
+            Node::Cuboid { turn, .. }
+            | Node::Torus { turn, .. }
+            | Node::Oloid { turn, .. }
+            | Node::Plane { turn, .. } => Some(turn),
             _ => None,
         }
     }
@@ -1675,9 +1705,10 @@ impl Node {
     /// The same, to edit.
     pub fn turn_mut(&mut self) -> Option<&mut Turn> {
         match self {
-            Node::Cuboid { turn, .. } | Node::Torus { turn, .. } | Node::Plane { turn, .. } => {
-                Some(turn)
-            }
+            Node::Cuboid { turn, .. }
+            | Node::Torus { turn, .. }
+            | Node::Oloid { turn, .. }
+            | Node::Plane { turn, .. } => Some(turn),
             _ => None,
         }
     }
@@ -1905,7 +1936,9 @@ impl Node {
             // The three that carry both a place and a turn, each of which may name a curve.
             // Matched by name rather than through the generic arms below, because those borrow
             // the whole node to ask and so can answer for one field or the other and never both.
-            Node::Cuboid { centre, turn, .. } | Node::Torus { centre, turn, .. } => {
+            Node::Cuboid { centre, turn, .. }
+            | Node::Torus { centre, turn, .. }
+            | Node::Oloid { centre, turn, .. } => {
                 let mut out: Vec<&mut CurveId> = centre.curve_mut().into_iter().collect();
                 out.extend(turn.curve_mut());
                 out

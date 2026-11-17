@@ -689,6 +689,9 @@ impl App {
             Node::Torus { centre, major_radius, minor_radius, turn } => {
                 self.torus_controls(ui, id, centre, major_radius, minor_radius, turn)
             }
+            Node::Oloid { centre, radius, spread, turn } => {
+                self.oloid_controls(ui, id, centre, radius, spread, turn)
+            }
             Node::Coil { frame, diameter, size, section, hand } => {
                 self.coil_controls(ui, id, frame, diameter, size, section, hand)
             }
@@ -1237,6 +1240,41 @@ impl App {
                     minor_radius: new_minor,
                     turn: new_turn,
                 },
+            );
+        }
+    }
+
+    /// The Oloid block: where it is, which way it faces, its circles' radius and how far
+    /// apart their centres stand.
+    fn oloid_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: NodeId,
+        centre: fieldform_scene::Place,
+        radius: ParamRef,
+        spread: ParamRef,
+        turn: Turn,
+    ) {
+        let new_centre = self.place_fields(ui, id, "At:", centre);
+        let new_turn = self.turn_fields(ui, id, turn);
+        ui.separator();
+        let (new_radius, _) =
+            self.parametric_field(ui, "Radius:", radius, 0.5, POSITIVE_MM, "The radius of both circles");
+        // In radii rather than millimetres, so the radius scales the shape without changing
+        // which shape it is.
+        let (new_spread, _) = self.parametric_field_in(
+            ui,
+            "Spread:",
+            spread,
+            0.01,
+            0.0..=1.0e3,
+            "Between the circles' centres, in radii: 1 is the oloid, 1.414 the two-circle roller",
+            "",
+        );
+        if new_centre != centre || new_radius != radius || new_spread != spread || new_turn != turn {
+            self.replace_node(
+                id,
+                Node::Oloid { centre: new_centre, radius: new_radius, spread: new_spread, turn: new_turn },
             );
         }
     }

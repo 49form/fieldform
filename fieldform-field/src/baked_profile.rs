@@ -130,6 +130,11 @@ pub struct BakedProfile {
     /// a bake of anything that is not an outline, such as a wall's folded distance.
     segs: Vec<u32>,
     seglist: Vec<u32>,
+    /// How far from its block a segment is listed: [`LIST_REACH`] margins, which is what the
+    /// shader reads to, and as far again as the bake is read off its outline -- a drafted wall
+    /// or a fillet asks for contours millimetres away, and an exact read on this side has to
+    /// reach them. A longer list is still a right one for the shader, which stops at its own.
+    list_reach: f64,
     /// Whether the outline turns anticlockwise, which is what the exact read's sign is taken from.
     ccw: bool,
 }
@@ -351,12 +356,12 @@ impl BakedProfile {
     /// boundary. `examples/draft_limits.rs` measures the cliff, the cure and what it costs.
     pub fn new(profile: &Profile, cells: usize, reads: (f64, f64)) -> Self {
         let mut baked = Self::of(profile.bounds(), |q| profile.walk(q), cells, reads);
-        baked.index_segments(profile.points());
+        baked.index_segments(profile.points(), reads);
         baked
     }
 
     /// Lists, for each stored block, the outline's segments within [`LIST_REACH`] margins of it.
-    fn index_segments(&mut self, points: &[Point2<f64>]) {
+    fn index_segments(&mut self, points: &[Point2<f64>], reads: (f64, f64)) {
         let n = points.len();
         if n < 3 {
             return;
@@ -366,7 +371,8 @@ impl BakedProfile {
             a.x * b.y - b.x * a.y
         }).sum();
         self.ccw = area > 0.0;
-        let reach = LIST_REACH * self.margin;
+        let reach = LIST_REACH * self.margin + reads.0.abs().max(reads.1.abs());
+        self.list_reach = reach;
         let side = BLOCK as f64 * self.cell;
         // Each segment against the few blocks its own box, widened by the reach, covers -- not
         // every stored block against every segment, which cost the lens's bake sixty times itself
@@ -448,6 +454,70 @@ impl BakedProfile {
         }
     }
 
+    /// The exact signed distance from the block's own listed segments, where they are near enough
+    /// to be the answer, and `None` where they are not -- the shader's `outline_distance_local`,
+    /// step for step, so the field read on this side finishes on the outline as a still does.
+    ///
+    /// **Without it the field the exporter meshes is the grid, and the grid is a bound.** A
+    /// reading less its margin is never more than the truth, which is right for a ray and wrong
+    /// for an output: every baked wall stands out by up to a margin, all of them the same way.
+    /// Measured on a reference part at the coarser export presets: a cut 0.3 % larger than drawn,
+    /// and the part 1.1 to 1.3 % short of its own volume, from walls that each sat about 0.2 mm
+    /// proud. The sign at a vertex is the two edges' outward normals summed, as the shader takes
+    /// it, which is exact for a polygon and needs no walk round the whole outline.
+    pub fn outline_distance_local(&self, q: Point2<f64>, points: &[Point2<f64>]) -> Option<f64> {
+        let n = points.len();
+        if self.segs.is_empty() || n < 3 {
+            return None;
+        }
+        let x = (q.x - self.lo.x) / self.cell;
+        let y = (q.y - self.lo.y) / self.cell;
+        if x < 0.0 || y < 0.0 || x >= (self.wide - 1) as f64 || y >= (self.high - 1) as f64 {
+            return None;
+        }
+        let bi = ((x / BLOCK as f64).floor() as usize).min(self.blocks_wide - 1);
+        let bj = ((y / BLOCK as f64).floor() as usize).min(self.blocks_high - 1);
+        let k = bj * self.blocks_wide + bi;
+        let (first, count) = (self.segs[2 * k] as usize, self.segs[2 * k + 1] as usize);
+        let next = |i: usize| if i + 1 == n { 0 } else { i + 1 };
+        let mut best = (f64::INFINITY, 0usize, 0.0f64);
+        for &i in &self.seglist[first..first + count] {
+            let i = i as usize;
+            let (a, b) = (points[i], points[next(i)]);
+            let ab = b - a;
+            let len2 = ab.norm_squared();
+            if len2 <= 0.0 {
+                continue;
+            }
+            let t = ((q - a).dot(&ab) / len2).clamp(0.0, 1.0);
+            let d = (q - (a + ab * t)).norm();
+            if d < best.0 {
+                best = (d, i, t);
+            }
+        }
+        let (d, i, t) = best;
+        if !(d <= self.list_reach) {
+            return None;
+        }
+        let (a, b) = (points[i], points[next(i)]);
+        let inside = if t > 1e-5 && t < 1.0 - 1e-5 {
+            let left = (b.x - a.x) * (q.y - a.y) - (b.y - a.y) * (q.x - a.x) > 0.0;
+            left == self.ccw
+        } else {
+            let (v, e_in, e_out) = if t <= 1e-5 {
+                (a, a - points[if i == 0 { n - 1 } else { i - 1 }], b - a)
+            } else {
+                (b, b - a, points[next(next(i))] - b)
+            };
+            let outward = |e: nalgebra::Vector2<f64>| {
+                let o = if self.ccw { nalgebra::Vector2::new(e.y, -e.x) } else { nalgebra::Vector2::new(-e.y, e.x) };
+                o.try_normalize(0.0).unwrap_or_else(nalgebra::Vector2::zeros)
+            };
+            (q - v).dot(&(outward(e_in) + outward(e_out))) < 0.0
+        };
+        Some(if inside { -d } else { d })
+    }
+
     /// The margin subtracted from a reading near the surface, in millimetres.
     ///
     /// Reported because it is the accuracy of this bake where accuracy matters — the coarse
@@ -492,6 +562,41 @@ impl BakedProfile {
 
     /// The distance to the profile, never more than the truth.
     pub fn distance(&self, q: Point2<f64>) -> f64 {
+        self.read(q, false)
+    }
+
+    /// The distance to the outline `points` this was baked from, exact near it and the grid's
+    /// bound further off -- what the field reads on this side, where the grid alone would stand
+    /// every wall out by its margin (see [`Self::outline_distance_local`]).
+    ///
+    /// **Two things make the join between the two clean, and both were measured missing.** A
+    /// reading that went from exact to the grid's at the edge of the lists stepped by up to two
+    /// margins there: 23 mm per millimetre across a drafted wall's contours, which a ray steps
+    /// through, and half a millimetre more room than a slot had once the section was cut out,
+    /// because past the edge the depth was still being read from a surface a margin away from
+    /// the exact one. So past the lists the fine level's margin is taken toward nought, a bound on
+    /// the depth as well as the distance -- safe there, since the sign is four margins clear of
+    /// changing -- and over the last two margins of the lists' reach the exact reading is blended
+    /// into the grid's. Each is a lower bound, so the blend is; the exact one is the larger, so
+    /// leaving it can only slow the reading's rise, never speed it.
+    pub fn distance_to_outline(&self, q: Point2<f64>, points: &[Point2<f64>]) -> f64 {
+        if self.segs.is_empty() {
+            return self.distance(q);
+        }
+        let Some(exact) = self.outline_distance_local(q, points) else {
+            return self.read(q, true);
+        };
+        let blend = 2.0 * self.margin;
+        let toward_exact = ((self.list_reach - exact.abs()) / blend).clamp(0.0, 1.0);
+        if toward_exact >= 1.0 {
+            return exact;
+        }
+        toward_exact * exact + (1.0 - toward_exact) * self.read(q, true)
+    }
+
+    /// The grid's reading, with the fine level's margin down on both sides or, `toward_nought`,
+    /// off whichever sign the reading has as the coarse level's always is.
+    fn read(&self, q: Point2<f64>, toward_nought: bool) -> f64 {
         let last = (self.wide - 1) as f64;
         let tall = (self.high - 1) as f64;
         let x = (q.x - self.lo.x) / self.cell;
@@ -499,7 +604,7 @@ impl BakedProfile {
 
         let cx = x.clamp(0.0, last);
         let cy = y.clamp(0.0, tall);
-        let here = self.sample(cx, cy);
+        let here = self.sample(cx, cy, toward_nought);
 
         // **Outside the grid, Pythagoras against the nearest point on it.** The profile lies
         // inside the box and the clamp is componentwise, so on every axis where the query is
@@ -513,7 +618,7 @@ impl BakedProfile {
     }
 
     /// Bilinear at a position already on the grid: from the block if there is one, else coarse.
-    fn sample(&self, x: f64, y: f64) -> f64 {
+    fn sample(&self, x: f64, y: f64, toward_nought: bool) -> f64 {
         let bi = ((x / BLOCK as f64).floor() as usize).min(self.blocks_wide - 1);
         let bj = ((y / BLOCK as f64).floor() as usize).min(self.blocks_high - 1);
         let start = self.page[bj * self.blocks_wide + bi];
@@ -528,7 +633,8 @@ impl BakedProfile {
             let (fx, fy) = (lx - i as f64, ly - j as f64);
             let top = read(base) * (1.0 - fx) + read(base + 1) * fx;
             let bottom = read(base + stride) * (1.0 - fx) + read(base + stride + 1) * fx;
-            return top * (1.0 - fy) + bottom * fy - self.margin;
+            let here = top * (1.0 - fy) + bottom * fy;
+            return if toward_nought && here < 0.0 { here + self.margin } else { here - self.margin };
         }
 
         // No block here, so the surface is not either: the coarse reading is enough, with the
@@ -557,6 +663,38 @@ impl BakedProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Near its outline a bake reads the outline, out to the contours it is baked for** (backlog
+    /// item 142). The grid alone is a bound, short by its margin everywhere, so a wall meshed off it
+    /// stands proud by that much; the exact read from the block's own segments is the walk's own
+    /// number. Read on the outline, inside and out, and at a drafted wall's contour 3 mm off; the
+    /// grid's own reading is the control, short by more than a hundredth somewhere.
+    #[test]
+    fn near_its_outline_a_bake_reads_the_outline_out_to_its_contours() {
+        let n = 240;
+        let ring: Vec<Point2<f64>> = (0..n)
+            .map(|i| {
+                let a = i as f64 / n as f64 * std::f64::consts::TAU;
+                Point2::new(20.0 * a.cos(), 13.0 * a.sin())
+            })
+            .collect();
+        let profile = Profile::new(ring).unwrap();
+        let reads = (0.0, 3.0);
+        let cells = bake_cells(40.0, 0.8, reads).expect("bakes");
+        let baked = BakedProfile::new(&profile, cells, reads);
+        let mut short = 0.0f64;
+        for i in 0..997 {
+            let a = i as f64 * 0.0063;
+            for off in [-0.4, 0.0, 0.3, 1.7, 3.0] {
+                let q = Point2::new((20.0 + off) * a.cos(), (13.0 + off) * a.sin());
+                let walked = profile.walk(q);
+                let read = baked.distance_to_outline(q, profile.points());
+                assert!((read - walked).abs() < 1e-9, "at {q:?} the bake reads {read} where the outline is {walked}");
+                short = short.max(walked - baked.distance(q));
+            }
+        }
+        assert!(short > 0.01, "the grid alone should be short somewhere, and was short by at most {short}");
+    }
 
     /// **Every segment within reach of a block is in that block's list, and the lists are short**
     /// (backlog item 115). The lens of the owner's wing, with its three sharp corners, at the bake
@@ -876,6 +1014,7 @@ impl Plan {
             fine,
             segs: Vec::new(),
             seglist: Vec::new(),
+            list_reach: 0.0,
             ccw: true,
             margin: self.margin,
             coarse_margin: self.coarse_margin,

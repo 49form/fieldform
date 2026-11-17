@@ -1320,6 +1320,11 @@ impl GraphField {
                     major_radius: resolve(major_radius).ok_or(CompileError::UnresolvedRadius)?,
                     minor_radius: resolve(minor_radius).ok_or(CompileError::UnresolvedRadius)?,
                 })),
+                Node::Oloid { centre, radius, spread, .. } => Op::Leaf(std::sync::Arc::new(crate::Oloid {
+                    centre: resolve_place_for(document, graph, *id, centre, &resolve)?,
+                    radius: resolve(radius).ok_or(CompileError::UnresolvedRadius)?,
+                    spread: resolve(spread).ok_or(CompileError::UnresolvedRadius)?,
+                })),
                 Node::Lattice {
                     frame,
                     cell,
@@ -3778,6 +3783,72 @@ impl GraphField {
         }
     }
 
+    /// The radius of the smallest round leaf whose surface may pass through the box, carried
+    /// through every op that moves a point rigidly or scales it, and given up on -- `None`, the
+    /// claim of a field that declares nothing -- by every op that bends space or moves the
+    /// surface off its leaf's: a twist, a pull, an offset, a lattice.
+    ///
+    /// Giving up is the safe answer. It asks the mesher for nothing more than it did before
+    /// this existed, which is a hole it may miss, never a cell it divides for nothing.
+    fn detail_at(&self, index: usize, lo: Point3<f64>, hi: Point3<f64>) -> Option<f64> {
+        let least = |a: Option<f64>, b: Option<f64>| match (a, b) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let bounds_of = |map: &dyn Fn(Point3<f64>) -> Point3<f64>| {
+            let mut l = Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+            let mut h = Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+            for i in 0..8 {
+                let corner = Point3::new(
+                    if i & 1 == 0 { lo.x } else { hi.x },
+                    if i & 2 == 0 { lo.y } else { hi.y },
+                    if i & 4 == 0 { lo.z } else { hi.z },
+                );
+                let q = map(corner);
+                for axis in 0..3 {
+                    l[axis] = l[axis].min(q[axis]);
+                    h[axis] = h[axis].max(q[axis]);
+                }
+            }
+            (l, h)
+        };
+        match &self.ops[index] {
+            Op::Leaf(field) => field.detail_within(lo, hi),
+            Op::Boolean { inputs, .. } => {
+                inputs.iter().map(|i| self.detail_at(*i, lo, hi)).fold(None, least)
+            }
+            Op::Blend { a, b, .. } | Op::Morph { a, b, .. } => {
+                least(self.detail_at(*a, lo, hi), self.detail_at(*b, lo, hi))
+            }
+            Op::Pattern { input, inverse, excluded, .. } => inverse
+                .iter()
+                .zip(excluded)
+                .filter(|(_, left_out)| !**left_out)
+                .map(|(m, _)| {
+                    let (l, h) = bounds_of(&|p| m * p);
+                    self.detail_at(*input, l, h)
+                })
+                .fold(None, least),
+            Op::Mirror { input, at, normal, join, .. } => {
+                let (l, h) = bounds_of(&|p| reflect(p, *at, *normal));
+                let reflected = self.detail_at(*input, l, h);
+                if *join { least(reflected, self.detail_at(*input, lo, hi)) } else { reflected }
+            }
+            Op::Transform { input, rotation, translation, scale } => {
+                let (l, h) = bounds_of(&|p| to_local(p, rotation, translation, *scale));
+                self.detail_at(*input, l, h).map(|r| r * scale)
+            }
+            Op::Scale { input, factors, s_min } => {
+                self.detail_at(*input, squeeze(lo, factors), squeeze(hi, factors)).map(|r| r * s_min)
+            }
+            Op::Lattice { .. }
+            | Op::Offset { .. }
+            | Op::Ramp { .. }
+            | Op::Twist { .. }
+            | Op::Attract { .. } => None,
+        }
+    }
+
     /// Which body's surface passes through `p`, if any is close enough to be the one meant.
     ///
     /// A point on the composed surface lies on exactly one body's surface — the others are
@@ -3840,6 +3911,10 @@ impl ScalarField for GraphField {
 
     fn interval(&self, lo: Point3<f64>, hi: Point3<f64>) -> (f64, f64) {
         self.interval_at(self.output, lo, hi)
+    }
+
+    fn detail_within(&self, lo: Point3<f64>, hi: Point3<f64>) -> Option<f64> {
+        self.detail_at(self.output, lo, hi)
     }
 
     /// The smallest any leaf declares. A boolean or a blend can only cut a leaf's features

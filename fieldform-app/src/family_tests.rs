@@ -42,6 +42,7 @@ fn every_kind_of_node_is_in_the_family_the_table_says() {
         ("Cylinder", Some(Create)),
         ("Cone", Some(Create)),
         ("Torus", Some(Create)),
+        ("Oloid", Some(Create)),
         ("Capsule", Some(Create)),
         ("Coil", Some(Create)),
         ("Thread", Some(Create)),

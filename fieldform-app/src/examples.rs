@@ -16,6 +16,7 @@ pub const EXAMPLES: &[(&str, &str)] = &[
     ("cylinder", "cylinder radius=4 'rod'"),
     ("cone", "cone base_radius=20 top_radius=5 'taper'"),
     ("torus", "torus major_radius=30 minor_radius=5 'ring'"),
+    ("oloid", "oloid radius=20 spread=1 'roller'"),
     ("capsule", "capsule start_radius=5 end_radius=5 'pill'"),
     ("point", "point at=10,0,0"),
     ("plane", "plane origin=0,0,10"),

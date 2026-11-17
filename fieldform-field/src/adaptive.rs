@@ -51,6 +51,23 @@
 //! believing it. Measured on the same part, at Coarse, over six boxes: 130 420 to 131 732
 //! triangles where before it ranged 0 to 130 760, for 4% more time. On a gyroid cube that was
 //! never missing walls (`examples/capped_lattice.rs`) it changes neither count nor time.
+//!
+//! **And a second, for round things.** A hole through a flat wall has the same trouble the other
+//! way up: every edge crosses the face and none crosses the hole. A field may say, per region,
+//! the radius of the smallest round thing whose surface passes there
+//! ([`ScalarField::detail_within`]), and a cell larger than it divides. Measured on a reference
+//! part (`fieldform-io/examples/reference_meshes_judged.rs`): four 4.4 mm vents missing at Coarse
+//! and Normal were found, the furthest the part's surface sat from the mesh falling from 13.8 to
+//! 3.8 chords and from 52 to 6.9, for 3% and 0.6% more triangles.
+//!
+//! # Where a vertex is put, and when that decides a division
+//!
+//! A cell's vertex is where its crossings' tangent planes meet, which on a dome whose rim is flat
+//! is *above* the surface: the sag test, reading only the crossings, passes, and the vertex sits
+//! clear. Measured on a ball at Coarse, vertices 8 to 26 chords off. So the field is read at the
+//! solved vertex too, and a cell whose vertex is off by more than the chord divides; at the floor,
+//! where it cannot, the vertex is taken down the gradient onto the surface instead.
+//! `examples/mesh_export_judged.rs` holds the closed-form shapes to it.
 
 use nalgebra::{Matrix3, Point3, Vector3};
 
@@ -321,6 +338,8 @@ struct Hermite {
     spread: f64,
     /// The furthest any crossing sits from the plane through their mean, in millimetres.
     sag: f64,
+    /// How far the field reads at the furthest of the solved vertices, in millimetres.
+    off: f64,
 }
 
 fn hermite(field: &(dyn ScalarField + Sync), cell: &Cell) -> Option<Hermite> {
@@ -362,6 +381,7 @@ fn hermite(field: &(dyn ScalarField + Sync), cell: &Cell) -> Option<Hermite> {
     let mut normals = Vec::with_capacity(sheets);
     let mut spread: f64 = 0.0;
     let mut sag: f64 = 0.0;
+    let mut off: f64 = 0.0;
     for s in 0..sheets {
         if count[s] == 0 {
             // A sheet whose corners are inside but whose edges never cross is one the cell only
@@ -375,11 +395,13 @@ fn hermite(field: &(dyn ScalarField + Sync), cell: &Cell) -> Option<Hermite> {
         }
         let mean = Point3::from(mass[s] / count[s] as f64);
         let solved = crate::mesh::solve_qef(a[s], b[s], mean);
-        vertices.push(Point3::new(
+        let vertex = Point3::new(
             solved.x.clamp(cell.lo.x, cell.lo.x + cell.size),
             solved.y.clamp(cell.lo.y, cell.lo.y + cell.size),
             solved.z.clamp(cell.lo.z, cell.lo.z + cell.size),
-        ));
+        );
+        off = off.max(field.distance(vertex).abs());
+        vertices.push(vertex);
 
         // The widest disagreement between any two normals, not the spread about their mean. A
         // crease shows as two tight clusters pointing different ways, whose mean is a direction
@@ -412,6 +434,7 @@ fn hermite(field: &(dyn ScalarField + Sync), cell: &Cell) -> Option<Hermite> {
         inside,
         spread,
         sag,
+        off,
     })
 }
 
@@ -540,6 +563,13 @@ fn decide(
     if cell.depth < FORCED_DEPTH && !too_small {
         return Decided::Branch;
     }
+    // **A round thing smaller than the cell, whose surface may pass through it.** A hole through
+    // a flat wall can sit between every pair of this cell's edges: they all cross the face, none
+    // crosses the hole, and every test below then reads a flat face. Asked before them, since
+    // what they would read here is the thing that cannot be trusted.
+    if !too_small && field.detail_within(cell.lo, cell.hi()).is_some_and(|r| cell.size > r) {
+        return Decided::Branch;
+    }
 
     match hermite(field, cell) {
         // **Larger than the field's thinnest feature, and the surface may be here: look
@@ -607,21 +637,46 @@ fn decide(
         Some(h) => {
             let ambiguous = !is_manifold(h.inside);
             let turns = h.spread > tol.angle_deg.to_radians();
-            let sags = h.sag > tol.chord_mm;
+            let sags = h.sag > tol.chord_mm || h.off > tol.chord_mm;
             let long = tol.max_edge_mm > 0.0 && cell.size > tol.max_edge_mm;
             if !too_small && (ambiguous || turns || sags || long) {
                 return Decided::Branch;
             }
+            let mut vertices = h.vertices;
+            if h.off > tol.chord_mm {
+                for v in &mut vertices {
+                    *v = onto_surface(field, *v, cell);
+                }
+            }
             Decided::Done(Tree::Leaf(Box::new(Leaf {
                 #[cfg(test)]
                 cell: *cell,
-                vertices: h.vertices,
+                vertices,
                 normals: h.normals,
                 of_edge: h.of_edge,
                 inside: h.inside,
             })))
         }
     }
+}
+
+/// A vertex taken down the field's gradient onto the surface, and kept in its cell.
+///
+/// Only for a cell at the floor whose solved vertex is off by more than the chord: anywhere else
+/// that cell would have been divided instead. Two Newton steps, as relaxation takes, and a crease
+/// vertex is left where it is by construction, since one the solve put on the crease reads
+/// nought there and does not move.
+fn onto_surface(field: &(dyn ScalarField + Sync), mut v: Point3<f64>, cell: &Cell) -> Point3<f64> {
+    for _ in 0..2 {
+        let d = field.distance(v);
+        let n = crate::mesh::surface_normal(field, v, cell.size * 1e-3);
+        v -= n * d;
+    }
+    Point3::new(
+        v.x.clamp(cell.lo.x, cell.lo.x + cell.size),
+        v.y.clamp(cell.lo.y, cell.lo.y + cell.size),
+        v.z.clamp(cell.lo.z, cell.lo.z + cell.size),
+    )
 }
 
 fn branch(
@@ -1376,6 +1431,49 @@ mod tests {
             "without the declaration the walk from the centre still finds the wall: {} triangles",
             silent.triangles.len()
         );
+    }
+
+    /// A plate 2 mm thick with a hole 1.5 mm in radius through it, placed between the grid lines
+    /// the forced depth lays down.
+    struct HolePlate {
+        declares: bool,
+    }
+    const HOLE_AT: (f64, f64) = (5.3, 9.7);
+    impl HolePlate {
+        fn hole(p: Point3<f64>) -> f64 {
+            1.5 - (p.x - HOLE_AT.0).hypot(p.y - HOLE_AT.1)
+        }
+    }
+    impl ScalarField for HolePlate {
+        fn distance(&self, p: Point3<f64>) -> f64 {
+            (p.z.abs() - 1.0).max(Self::hole(p))
+        }
+        fn detail_within(&self, lo: Point3<f64>, hi: Point3<f64>) -> Option<f64> {
+            let centre = nalgebra::center(&lo, &hi);
+            let reach = (hi - lo).norm() * 0.5;
+            (self.declares && Self::hole(centre).abs() <= reach).then_some(1.5)
+        }
+    }
+
+    /// **A hole between every edge is found where its radius is said, and lost where it is not**
+    /// (backlog item 142). Every edge near the hole crosses the plate's flat faces and none crosses
+    /// the hole, so a mesher reading crossings sees a flat face and stops; told the radius, it keeps
+    /// dividing until a grid line has to pass through the circle. The silent plate is the control:
+    /// it is what makes the first assertion about the declaration rather than about the grid.
+    #[test]
+    fn a_hole_between_every_edge_is_found_where_its_radius_is_declared() {
+        let tol = MeshTolerance { chord_mm: 0.05, angle_deg: 20.0, max_edge_mm: 0.0, min_cell_mm: 0.25 };
+        let bounds = (Point3::new(-32.0, -32.0, -32.0), Point3::new(32.0, 32.0, 32.0));
+        let on_the_hole_wall = |mesh: &FieldMesh| {
+            mesh.positions
+                .iter()
+                .filter(|p| p.z.abs() < 0.9 && (p.x - HOLE_AT.0).hypot(p.y - HOLE_AT.1) < 1.8)
+                .count()
+        };
+        let declared = mesh_field_adaptive(&HolePlate { declares: true }, bounds, &tol);
+        assert!(on_the_hole_wall(&declared) >= 8, "the hole's wall has {} vertices", on_the_hole_wall(&declared));
+        let silent = mesh_field_adaptive(&HolePlate { declares: false }, bounds, &tol);
+        assert_eq!(on_the_hole_wall(&silent), 0, "the control should miss the hole: the grid found it unasked");
     }
 
     struct Flat;

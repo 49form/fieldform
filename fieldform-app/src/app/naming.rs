@@ -386,6 +386,7 @@ impl App {
             Some(Node::Cylinder { .. }) => "Cylinder".to_string(),
             Some(Node::Cone { .. }) => "Cone".to_string(),
             Some(Node::Torus { .. }) => "Torus".to_string(),
+            Some(Node::Oloid { .. }) => "Oloid".to_string(),
             Some(Node::Coil { .. }) => "Coil".to_string(),
             // Its name, where it has one, is what it is: "M8 thread" reads down the list.
             Some(Node::Thread { designation: Some(name), .. }) => format!("{name} thread"),

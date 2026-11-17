@@ -168,6 +168,12 @@ impl ScalarField for Hole {
         if self.thread.is_some() { Normalization::LowerBound } else { Normalization::Distance }
     }
 
+    fn detail_within(&self, lo: Point3<f64>, hi: Point3<f64>) -> Option<f64> {
+        // The narrowest stretch of wall: a counterbore's step is a detail of the hole below it.
+        let narrowest = self.section.wall.iter().map(|w| w.0).filter(|r| *r > 0.0).fold(f64::INFINITY, f64::min);
+        crate::primitive::round_detail(self, lo, hi, narrowest).filter(|r| r.is_finite())
+    }
+
     fn lipschitz(&self) -> f64 {
         1.0
     }

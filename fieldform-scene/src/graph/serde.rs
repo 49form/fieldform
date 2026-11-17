@@ -581,6 +581,16 @@ impl Serialize for Node {
                 ("minor_radius", json(minor_radius)?),
                 ("turn", json(turn)?),
             ]),
+            Node::Oloid { centre, radius, spread, turn } => json_fields(
+                [
+                    (KIND, json(&"oloid")?),
+                    ("centre", json(centre)?),
+                    ("radius", json(radius)?),
+                    ("spread", json(spread)?),
+                ]
+                .into_iter()
+                .chain(if turn_is_none(turn) { None } else { Some(("turn", json(turn)?)) }),
+            ),
             // Flat fields beside a string tag. See [`CellMap`] for why, and note that the
             // rectangular arm writes exactly the object it wrote before cylindrical existed.
             Node::Lattice { cell, map, phase, frame } => {
@@ -1165,6 +1175,8 @@ impl<'de> Deserialize<'de> for Node {
             // `edge` and `edge_continuity` are 3.20's on a cone.
             "cone" => &[KIND, "ends", "base_radius", "top_radius", "edge", "edge_continuity"],
             "torus" => &[KIND, "centre", "major_radius", "minor_radius", "turn"],
+            // 3.36's.
+            "oloid" => &[KIND, "centre", "radius", "spread", "turn"],
             // Every field any map or phase may write. A node carrying the wrong set for its
             // tags is caught when it is read, not here — this list is only about what this
             // build has heard of at all.
@@ -1493,6 +1505,12 @@ impl<'de> Deserialize<'de> for Node {
                 centre: read(kind, "centre", field("centre")?)?,
                 major_radius: read(kind, "major_radius", field("major_radius")?)?,
                 minor_radius: read(kind, "minor_radius", field("minor_radius")?)?,
+                turn: read_turn(kind, object)?,
+            },
+            "oloid" => Node::Oloid {
+                centre: read(kind, "centre", field("centre")?)?,
+                radius: read(kind, "radius", field("radius")?)?,
+                spread: read(kind, "spread", field("spread")?)?,
                 turn: read_turn(kind, object)?,
             },
             "lattice" => {

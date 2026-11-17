@@ -119,6 +119,7 @@ fn lipschitz_of_node(document: &Document, graph: &Graph, node: NodeId, depth: us
         | Node::Cylinder { .. }
         | Node::Cone { .. }
         | Node::Torus { .. }
+        | Node::Oloid { .. }
         | Node::Capsule { .. }
         | Node::Plane { .. }
         | Node::Point { .. }
@@ -367,6 +368,7 @@ fn true_distance_at(document: &Document, graph: &Graph, node: NodeId, depth: usi
         | Node::Sphere { .. }
         | Node::SkewedBox { .. }
         | Node::Torus { .. }
+        | Node::Oloid { .. }
         | Node::Capsule { .. }
         | Node::Plane { .. }
         | Node::Point { .. }
@@ -673,7 +675,9 @@ pub fn may_divide(graph: &Graph) -> bool {
         | Node::Pattern { .. }
         | Node::Twist { .. }
         | Node::Morph { .. }
-        | Node::Attract { .. } => true,
+        | Node::Attract { .. }
+        // A written field's divisor is a number in its block, which a drag moves.
+        | Node::Expression { .. } => true,
         Node::Offset { distance, .. } => distance.driver().is_some(),
         Node::Pipe { radius, .. } => radius.driver().is_some(),
         Node::Lattice { phase, .. } => phase.param().driver().is_some(),
@@ -898,6 +902,16 @@ pub(crate) fn own_divisor(
                     _ => 1.0,
                 }
             }
+            // **A written field divides by the number its block carries, and this walk was not
+            // told** -- the one arithmetic again. The text is returned over its divisor, so a
+            // field written with a divisor of two reads half its distance everywhere: the
+            // shading took every face for one crowded by material and drew the body black, and
+            // the step budget was bought as if it divided by nothing. One for a divisor that
+            // does not resolve or is not a positive number, which the compile refuses by name.
+            Node::Expression { divisor, .. } => document
+                .resolve(divisor)
+                .filter(|k| k.is_finite() && *k > 0.0)
+                .unwrap_or(1.0),
             // Everything else either divides by nothing or has already paid for what it does,
             // which is the same list `graph_lipschitz` states arm by arm.
         _ => 1.0,
@@ -1066,6 +1080,7 @@ pub(crate) fn driven_refusal(node: &Node) -> Option<CompileError> {
         Node::Cylinder { .. } => "a cylinder's ends or radius",
         Node::Cone { .. } => "a cone's ends or radii",
         Node::Torus { .. } => "a torus's centre or radii",
+        Node::Oloid { .. } => "an oloid's centre, radius or spread",
         Node::Capsule { .. } => "a capsule's ends or radii",
         // A varying pitch or radius is a warp of its own, with a bound nobody has worked out.
         Node::Coil { .. } => "a coil's diameter, size, wire or frame",

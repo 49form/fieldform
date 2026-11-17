@@ -1439,6 +1439,7 @@ fn generate_inner(
             | Node::Cylinder { .. }
             | Node::Cone { .. }
             | Node::Torus { .. }
+            | Node::Oloid { .. }
             | Node::Plane { .. }
             | Node::Point { .. }
             | Node::Coil { .. }
@@ -2214,6 +2215,13 @@ impl NodeEmitter<'_> {
                 params.push(*major_radius);
                 params.push(*minor_radius);
                 format!("torus_distance({p}, {c}, params[{r}], params[{}])", r + 1)
+            }
+            Node::Oloid { centre, radius, spread, .. } => {
+                let c = place_slots(&mut params, graph, document, id, centre);
+                let r = params.len();
+                params.push(*radius);
+                params.push(*spread);
+                format!("oloid_distance({p}, {c}, params[{r}], params[{}])", r + 1)
             }
             Node::Plane { origin, flipped, .. } => {
                 let o = place_slots(&mut params, graph, document, id, origin);
@@ -4374,6 +4382,13 @@ fn normal_function(
                 params += 2;
                 let args = format!("{p}, {c}, params[{r}], params[{}]", r + 1);
                 (format!("torus_distance({args})"), format!("torus_normal({args})"))
+            }
+            Node::Oloid { .. } => {
+                let c = point_slots(&mut params, &[ParamRef::Literal(0.0); 3]);
+                let r = params;
+                params += 2;
+                let args = format!("{p}, {c}, params[{r}], params[{}]", r + 1);
+                (format!("oloid_distance({args})"), format!("oloid_normal({args})"))
             }
             Node::Lattice { map, phase, .. } => {
                 let c = params;
@@ -6895,6 +6910,7 @@ fn pattern_prune_floor(
             | Node::Cone { .. }
             | Node::Capsule { .. }
             | Node::Expression { .. }
+            | Node::Oloid { .. }
             | Node::Torus { .. } => Ok(()),
             Node::Pipe { .. } => {
                 *divisor = divisor.max(fieldform_field::driven_pipe_divisor(document, graph, id));

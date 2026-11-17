@@ -18,6 +18,7 @@ pub(crate) enum PrimitiveKind {
     Cylinder,
     Cone,
     Torus,
+    Oloid,
     Capsule,
     Coil,
     Thread,
@@ -40,7 +41,7 @@ impl PrimitiveKind {
     /// word and its operation, in this order, in Create › Primitives — the capsule, the coil and
     /// the thread carrying on in Create › Features, below Sweep.
     #[cfg(test)]
-    pub(crate) const ALL: [PrimitiveKind; 11] = [
+    pub(crate) const ALL: [PrimitiveKind; 12] = [
         PrimitiveKind::Point,
         PrimitiveKind::Plane,
         PrimitiveKind::Sphere,
@@ -49,6 +50,7 @@ impl PrimitiveKind {
         PrimitiveKind::Cylinder,
         PrimitiveKind::Cone,
         PrimitiveKind::Torus,
+        PrimitiveKind::Oloid,
         PrimitiveKind::Capsule,
         PrimitiveKind::Coil,
         PrimitiveKind::Thread,
@@ -67,6 +69,7 @@ impl PrimitiveKind {
             PrimitiveKind::Cylinder => "Cylinder",
             PrimitiveKind::Cone => "Cone",
             PrimitiveKind::Torus => "Torus",
+            PrimitiveKind::Oloid => "Oloid",
             PrimitiveKind::Capsule => "Capsule",
             PrimitiveKind::Coil => "Coil",
             PrimitiveKind::Thread => "Thread",
@@ -93,6 +96,7 @@ impl PrimitiveKind {
             PrimitiveKind::Cylinder => "create.cylinder",
             PrimitiveKind::Cone => "create.cone",
             PrimitiveKind::Torus => "create.torus",
+            PrimitiveKind::Oloid => "create.oloid",
             PrimitiveKind::Capsule => "create.capsule",
             PrimitiveKind::Coil => "create.coil",
             PrimitiveKind::Thread => "create.thread",
@@ -167,6 +171,15 @@ impl PrimitiveKind {
                 centre: fieldform_scene::Place::At(centre),
                 major_radius: literal(size * 0.35),
                 minor_radius: literal(size * 0.15),
+                turn: fieldform_scene::no_turn(),
+            },
+            // The true oloid, each circle through the other's centre, which is three radii
+            // long: three tenths of the envelope as the radius is a round number that leaves
+            // it nine tenths of `size` from tip to tip.
+            PrimitiveKind::Oloid => Node::Oloid {
+                centre: fieldform_scene::Place::At(centre),
+                radius: literal(size * 0.3),
+                spread: literal(1.0),
                 turn: fieldform_scene::no_turn(),
             },
             // The points are cap centres, so the ends reach a radius past them: a quarter of

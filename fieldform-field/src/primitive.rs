@@ -24,6 +24,28 @@
 use crate::{Normalization, ScalarField};
 use nalgebra::{Matrix3, Point2, Point3, Vector2, Vector3};
 
+/// `radius`, where a round field's own surface may pass through the box: what
+/// [`ScalarField::detail_within`] answers for every primitive here that has a radius to give.
+///
+/// The radius rather than the diameter, because it is what makes the promise hold: a cell no
+/// larger than it has an edge through any circle of that radius, whichever way the grid falls,
+/// and a corner inside any ball of it.
+pub(crate) fn round_detail<F: ScalarField + ?Sized>(
+    field: &F,
+    lo: Point3<f64>,
+    hi: Point3<f64>,
+    radius: f64,
+) -> Option<f64> {
+    let (least, most) = field.interval(lo, hi);
+    (least <= 0.0 && most >= 0.0 && radius > 0.0).then_some(radius)
+}
+
+/// The smaller end of a capsule, unless it comes to a point -- then the larger, since a cell
+/// asked to be no larger than nought would be divided to the floor along the whole of it.
+fn thinnest_end(a: f64, b: f64) -> f64 {
+    if a.min(b) > 0.0 { a.min(b) } else { a.max(b) }
+}
+
 /// A sphere: the simplest exact distance field there is.
 #[derive(Copy, Clone, Debug)]
 pub struct Sphere {
@@ -46,6 +68,10 @@ impl ScalarField for Sphere {
 
     fn normalization(&self) -> Normalization {
         Normalization::Distance
+    }
+
+    fn detail_within(&self, lo: Point3<f64>, hi: Point3<f64>) -> Option<f64> {
+        round_detail(self, lo, hi, self.radius)
     }
 }
 
@@ -641,6 +667,10 @@ impl ScalarField for Torus {
     fn normalization(&self) -> Normalization {
         Normalization::Distance
     }
+
+    fn detail_within(&self, lo: Point3<f64>, hi: Point3<f64>) -> Option<f64> {
+        round_detail(self, lo, hi, self.minor_radius)
+    }
 }
 
 /// A cylinder between two points.
@@ -687,6 +717,10 @@ impl ScalarField for Cylinder {
     fn normalization(&self) -> Normalization {
         Normalization::Distance
     }
+
+    fn detail_within(&self, lo: Point3<f64>, hi: Point3<f64>) -> Option<f64> {
+        round_detail(self, lo, hi, self.radius)
+    }
 }
 
 /// A cone between two points, with a radius at each: flat ends, and either may be zero.
@@ -731,6 +765,10 @@ impl ScalarField for Cone {
 
     fn normalization(&self) -> Normalization {
         Normalization::Distance
+    }
+
+    fn detail_within(&self, lo: Point3<f64>, hi: Point3<f64>) -> Option<f64> {
+        round_detail(self, lo, hi, self.base_radius.max(self.top_radius))
     }
 }
 
@@ -784,6 +822,10 @@ impl ScalarField for Capsule {
 
     fn normalization(&self) -> Normalization {
         Normalization::Distance
+    }
+
+    fn detail_within(&self, lo: Point3<f64>, hi: Point3<f64>) -> Option<f64> {
+        round_detail(self, lo, hi, thinnest_end(self.start_radius, self.end_radius))
     }
 }
 
@@ -953,6 +995,10 @@ impl ScalarField for EdgedCylinder {
 
     fn normalization(&self) -> Normalization {
         if self.edge.exponent == 2.0 { Normalization::Distance } else { Normalization::LowerBound }
+    }
+
+    fn detail_within(&self, lo: Point3<f64>, hi: Point3<f64>) -> Option<f64> {
+        round_detail(self, lo, hi, self.cylinder.radius)
     }
 
     fn lipschitz(&self) -> f64 {

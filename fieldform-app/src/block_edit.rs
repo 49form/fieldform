@@ -55,6 +55,7 @@ pub fn verb_of(node: &Node) -> Option<(&'static str, &'static str)> {
         Node::Cylinder { .. } => ("cylinder", "create.cylinder"),
         Node::Cone { .. } => ("cone", "create.cone"),
         Node::Torus { .. } => ("torus", "create.torus"),
+        Node::Oloid { .. } => ("oloid", "create.oloid"),
         Node::Capsule { .. } => ("capsule", "create.capsule"),
         Node::Coil { .. } => ("coil", "create.coil"),
         Node::Thread { .. } => ("thread", "create.thread"),
@@ -116,6 +117,7 @@ pub fn node_with_keys(node: Node, args: &Args, cx: &Context) -> Result<Node, Str
         | Node::Cylinder { .. }
         | Node::Cone { .. }
         | Node::Torus { .. }
+        | Node::Oloid { .. }
         | Node::Capsule { .. }
         | Node::Coil { .. }
         | Node::Thread { .. }

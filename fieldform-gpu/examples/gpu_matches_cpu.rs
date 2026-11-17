@@ -267,6 +267,7 @@ fn main() {
         Scene::RoundedManyWayDifference,
         Scene::ChamferedManyWayUnion,
         Scene::RoundSolids,
+        Scene::Oloids,
         Scene::SkewedBoxes,
         Scene::Morphed,
         Scene::MorphedDriven,
@@ -1373,6 +1374,12 @@ enum Scene {
     /// `f32` from a different expression, and a mismatch in either would show up as the hit
     /// point missing the surface.
     RoundSolids,
+    /// Three hulls of two circles: the oloid itself, a narrow one turned off every axis, and a
+    /// wide one blended into a sphere. The one leaf whose distance is a search rather than a
+    /// formula on both sides -- a walk and a golden-section refinement, in `f64` there and
+    /// `f32` here with fewer steps -- so what this holds is that the two searches land on the
+    /// same plane, and that the creases' closed form takes over at the same place.
+    Oloids,
     /// Two skewed boxes and a sphere: one box leaning every way at once and blended into the
     /// sphere, the other **left-handed** and placed by a turn and a scale about a pivot that is
     /// not the origin. Twelve slots in each pass, counted separately, so a slot dropped from one
@@ -1687,6 +1694,7 @@ impl Scene {
             Scene::RoundedManyWayDifference => "a block minus three cutters, in one rounded subtraction",
             Scene::ChamferedManyWayUnion => "four solids in one chamfered union",
             Scene::RoundSolids => "round solids, sliced by a half-space",
+            Scene::Oloids => "three oloids: one plain, one turned, one blended into a sphere",
             Scene::SkewedBoxes => "two skewed boxes and a sphere, one box blended and one turned",
             Scene::Morphed => "a sphere and a cuboid, morphed half way",
             Scene::MorphedDriven => "the same, with the amount driven by a ramp",
@@ -4697,6 +4705,51 @@ impl Scene {
             graph.add(Node::Boolean { op: BooleanOp::Union, inputs: vec![rounded.into(), placed.into()] });
             return (doc, graph, Vec::new());
         }
+        if matches!(self, Scene::Oloids) {
+            let mut graph = Graph::empty();
+            let at = |x: f64, y: f64, z: f64| {
+                fieldform_scene::Place::At([
+                    ParamRef::Literal(x * CAGE_MM),
+                    ParamRef::Literal(y * CAGE_MM),
+                    ParamRef::Literal(z * CAGE_MM),
+                ])
+            };
+            let mm = |f: f64| ParamRef::Literal(f * CAGE_MM);
+            let plain = graph.add(Node::Oloid {
+                centre: at(-0.4, 0.3, 0.0),
+                radius: mm(0.16),
+                spread: ParamRef::Literal(1.0),
+                turn: fieldform_scene::no_turn(),
+            });
+            // Angles that line up with nothing, as the round solids' placement has.
+            let turned = graph.add(Node::Oloid {
+                centre: at(0.4, 0.3, 0.05),
+                radius: mm(0.2),
+                spread: ParamRef::Literal(0.45),
+                turn: fieldform_scene::Turn::By([
+                    ParamRef::Literal(37.0),
+                    ParamRef::Literal(24.0),
+                    ParamRef::Literal(-16.0),
+                ]),
+            });
+            let wide = graph.add(Node::Oloid {
+                centre: at(0.0, -0.3, 0.0),
+                radius: mm(0.14),
+                spread: ParamRef::Literal(2.2),
+                turn: fieldform_scene::no_turn(),
+            });
+            let ball = graph.add(Node::Sphere { centre: at(0.0, -0.3, 0.16), radius: mm(0.1) });
+            let joined = graph.add(Node::Blend {
+                op: BooleanOp::Union,
+                inputs: vec![wide.into(), ball.into()],
+                fillet: Fillet::of(ParamRef::Literal(30.0)),
+            });
+            graph.add(Node::Boolean {
+                op: BooleanOp::Union,
+                inputs: vec![plain.into(), turned.into(), joined.into()],
+            });
+            return (doc, graph, Vec::new());
+        }
         if matches!(self, Scene::RoundSolids) {
             let mut graph = Graph::empty();
             let at = |x: f64, y: f64, z: f64| {
@@ -4825,6 +4878,7 @@ impl Scene {
             | Scene::RoundedManyWayDifference
             | Scene::ChamferedManyWayUnion
             | Scene::RoundSolids
+            | Scene::Oloids
             | Scene::SkewedBoxes
             | Scene::Morphed
             | Scene::MorphedDriven

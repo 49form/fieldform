@@ -410,7 +410,11 @@ pub(crate) const FORMAT_MAJOR: u32 = 3;
 /// positions and faces, and left out when there are none, so an uncreased cage is written exactly
 /// as before. A 3.34 build refuses a creased cage rather than drawing it smooth: the cage's shape
 /// denies fields it does not know, which is the refusal, since a higher minor loads by design.
-pub(crate) const FORMAT_MINOR: u32 = 35;
+///
+/// 3.36 adds the `oloid` node: the convex hull of two equal circles in perpendicular planes, by
+/// a centre, a radius, the spread between the circles' centres in radii, and a turn. A 3.35
+/// build keeps the node rather than drawing nothing.
+pub(crate) const FORMAT_MINOR: u32 = 36;
 
 #[derive(thiserror::Error, Debug)]
 pub enum FormatError {

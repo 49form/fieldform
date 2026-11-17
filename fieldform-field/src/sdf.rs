@@ -31,7 +31,7 @@ pub struct ClosestPoint {
 /// triangles, and picking any one of their face normals gives the wrong answer in concave
 /// regions. The pseudonormal for the actual feature is what's provably correct.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum Feature {
+pub(crate) enum Feature {
     Face(usize),
     Edge(u32, u32),
     Vertex(u32),
@@ -586,7 +586,7 @@ fn barycentric(p: Point3<f64>, a: Point3<f64>, b: Point3<f64>, c: Point3<f64>) -
 ///
 /// The standard Voronoi-region method (Ericson, *Real-Time Collision Detection*): check the
 /// regions outside each vertex and edge in turn, and fall through to the face interior.
-fn closest_point_on_triangle(
+pub(crate) fn closest_point_on_triangle(
     p: Point3<f64>,
     a: Point3<f64>,
     b: Point3<f64>,

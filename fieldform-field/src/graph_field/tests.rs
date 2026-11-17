@@ -6766,6 +6766,32 @@
         assert!(!crate::may_divide(&sphere), "a sphere never divides, so its program never settles");
     }
 
+    /// **A written field's divisor reaches the shading and the step budget.** The text is returned
+    /// over the divisor, so the body reads short by it everywhere; left out of the table, a field
+    /// written with a divisor of two was shaded as crowded on every face and drawn black.
+    #[test]
+    fn a_written_fields_divisor_is_what_the_shading_and_the_steps_scale_by() {
+        let written = |divisor: f64| {
+            let mut graph = Graph::empty();
+            graph.add(Node::Expression {
+                text: fieldform_scene::Written::unparsed("z"),
+                frame: fieldform_scene::Frame::default(),
+                size: [lit(100.0); 3],
+                divisor: lit(divisor),
+                claim: fieldform_scene::WrittenClaim::LowerBound,
+            });
+            graph
+        };
+        let doc = Document::new();
+        assert_eq!(crate::value_scale_with(&doc, &written(2.0), &[]), 2.0);
+        assert_eq!(crate::step_multiplier(&doc, &written(2.0)), 2.0);
+        assert_eq!(crate::value_scale_with(&doc, &written(1.0), &[]), 1.0, "undivided, nothing is scaled");
+        // A divisor the compile refuses must not reach a step multiplier as a nought or a NaN.
+        assert_eq!(crate::step_multiplier(&doc, &written(0.0)), 1.0);
+        assert_eq!(crate::step_multiplier(&doc, &written(f64::NAN)), 1.0);
+        assert!(crate::may_divide(&written(1.0)), "its divisor is a number a drag can move");
+    }
+
     /// **Left a union where the halves do not share the start face**: a solid set going off its
     /// plane does not touch the mirror, one already on both sides crosses it, and a mirror plane
     /// beside the profile is a different reflection.

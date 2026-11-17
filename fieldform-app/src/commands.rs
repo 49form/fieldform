@@ -516,6 +516,12 @@ const TORUS_P: &[Param] = &[
     p("centre", Unit::Mm),
     p("turn", Unit::Degrees),
 ];
+const OLOID_P: &[Param] = &[
+    p("radius", Unit::Mm),
+    p("spread", Unit::Plain),
+    p("centre", Unit::Mm),
+    p("turn", Unit::Degrees),
+];
 const CAPSULE_P: &[Param] = &[
     p("start_radius", Unit::Mm),
     p("end_radius", Unit::Mm),
@@ -901,6 +907,8 @@ fn build() -> Vec<Command> {
             .hint("Between two points, a radius at each — zero at one end for a point"),
         op("create.torus", "torus", "Torus").menu(PRIMITIVES, 1).session(TORUS_P).aliases(&["ring"])
             .hint("A ring in the XY plane"),
+        op("create.oloid", "oloid", "Oloid").menu(PRIMITIVES, 1).session(OLOID_P)
+            .hint("The hull of two perpendicular circles: a spread of 1 is the oloid"),
         // **Named for what it does, not for what it takes**: the ways a curve becomes a solid.
         // A closed loop is filled and an open curve is given a thickness, so one entry each.
         op("create.extrude", "extrude", "Extrude").menu(SWEEP, 0).keys(&["E"]).session(EXTRUDE_P).inputs(PROFILE)
@@ -1623,7 +1631,8 @@ mod tests {
             ("expression", "create.expression"),
             ("point", "create.point"), ("plane", "create.plane"), ("sphere", "create.sphere"),
             ("cube", "create.cube"), ("skewedbox", "create.skewbox"), ("cylinder", "create.cylinder"),
-            ("cone", "create.cone"), ("torus", "create.torus"), ("capsule", "create.capsule"),
+            ("cone", "create.cone"), ("torus", "create.torus"), ("oloid", "create.oloid"),
+            ("capsule", "create.capsule"),
             ("help", "console.help"), ("clear", "console.clear"),
         ] {
             let found = words.iter().find(|(w, _)| w == word).map(|(_, o)| *o);

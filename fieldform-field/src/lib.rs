@@ -39,7 +39,9 @@ pub use hole::{hole_basis, into_material, Hole, HoleSection};
 mod lattice;
 mod measure;
 mod mesh;
+mod mesh_judge;
 mod written;
+mod oloid;
 mod overlay;
 pub use overlay::{
     display_graph_with_stand_ins, is_reference_body, pick_bounds, plane_frames, point_positions,
@@ -137,6 +139,7 @@ pub use verify::{
 };
 pub use adaptive::{MeshTolerance, mesh_field_adaptive};
 pub use mesh::{FieldMesh, mesh_field};
+pub use mesh_judge::{judge_mesh, MeshJudgement, Reach};
 pub use baked_profile::{BakedProfile, bake_cells, band_range, LIST_REACH};
 pub use profile::fillet_under_lean;
 pub use profile::{
@@ -151,6 +154,7 @@ pub(crate) use profile::{
 pub use written::WrittenField;
 pub use primitive::{Cuboid, Edge, EdgedCuboid, SkewedBox, Sphere};
 pub(crate) use primitive::{EdgedCone, EdgedCylinder};
+pub(crate) use oloid::Oloid;
 pub(crate) use primitive::{Capsule, Cone, Cylinder, Plane, Point, Torus};
 pub use simplify::{Simplified, improve_shape, relax, simplify, weld};
 pub use adaptive::LeafEstimate;
@@ -426,6 +430,24 @@ pub trait ScalarField: Send + Sync {
     /// A mesher told this keeps dividing wherever the surface might be until its cells are no
     /// larger than it, and then no wall can fit between two corners of an edge.
     fn feature_size(&self) -> Option<f64> {
+        None
+    }
+
+    /// The radius of the smallest round thing -- a hole, a pin, a ball -- whose own surface may
+    /// pass through the box, or `None` where none does.
+    ///
+    /// **For a mesher that reads the surface only where it crosses a cell's edges.** A hole
+    /// through a flat wall, narrower than the cells the wall is meshed with, can fall between
+    /// every pair of edges: each one crosses the flat face and none of them crosses the hole, so
+    /// the face looks flat and the hole is not drawn. Measured on a reference part: four vent
+    /// holes 4.4 mm across, through a wall meshed in cells of several times that, missing at the
+    /// two coarser presets and present only at the finest. A mesher told this keeps dividing a
+    /// cell the surface may cross until it is no larger than the radius, and then a grid line
+    /// passes through every such circle whatever its position.
+    ///
+    /// Local rather than one number for the field, unlike [`Self::feature_size`]: a part with one
+    /// small hole should pay for it around that hole, not over every face it has.
+    fn detail_within(&self, _lo: Point3<f64>, _hi: Point3<f64>) -> Option<f64> {
         None
     }
 

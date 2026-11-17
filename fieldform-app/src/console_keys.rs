@@ -281,6 +281,18 @@ pub const VERBS: &[Verb] = &[
         },
     },
     Verb {
+        op: "create.oloid",
+        keys: Keys::Declared {
+            reads: &[
+                key("radius", &["radius"]),
+                key("spread", &["spread"]),
+                key("centre", &["centre"]),
+                key("turn", &["turn"]),
+            ],
+            not_read: &[],
+        },
+    },
+    Verb {
         op: "create.capsule",
         keys: Keys::Declared {
             reads: &[
@@ -883,6 +895,7 @@ pub fn reach_of(node: &Node) -> Reach {
         Node::Plane { .. } => Reach::Ops(&["create.plane"]),
         Node::Point { .. } => Reach::Ops(&["create.point"]),
         Node::Torus { .. } => Reach::Ops(&["create.torus"]),
+        Node::Oloid { .. } => Reach::Ops(&["create.oloid"]),
         Node::Capsule { .. } => Reach::Ops(&["create.capsule"]),
         Node::Coil { .. } => Reach::Ops(&["create.coil"]),
         Node::Thread { .. } => Reach::Ops(&["create.thread"]),
@@ -1299,6 +1312,20 @@ pub fn primitive_with_keys(
             }
             if let Some(r) = one("top_radius")? {
                 *top_radius = r;
+            }
+        }
+        Node::Oloid { centre, radius, spread, turn: t } => {
+            if let Some(c) = place("centre")? {
+                *centre = c;
+            }
+            if let Some(r) = one("radius")? {
+                *radius = r;
+            }
+            if let Some(s) = one("spread")? {
+                *spread = s;
+            }
+            if let Some(by) = turn("turn")? {
+                *t = by;
             }
         }
         Node::Torus { centre, major_radius, minor_radius, turn: t } => {
@@ -2965,6 +2992,7 @@ pub(crate) mod tests {
             Node::Cylinder { edge: fieldform_scene::Fillet { radius: lit(0.5), continuity: fieldform_scene::Continuity::G2, second: None }, ends: Ends::between(Place::At(p(0.0, 0.0, 0.0)), Place::At(p(0.0, 0.0, 9.0))), radius: lit(3.0) },
             Node::Cone { edge: fieldform_scene::Fillet { radius: lit(0.5), continuity: fieldform_scene::Continuity::G2, second: None }, ends: Ends::between(Place::At(p(0.0, 0.0, 0.0)), Place::At(p(0.0, 0.0, 9.0))), base_radius: lit(3.0), top_radius: lit(1.0) },
             Node::Torus { centre: Place::At(p(1.0, 2.0, 3.0)), major_radius: lit(5.0), minor_radius: lit(1.0), turn: Turn::By(p(10.0, 20.0, 30.0)) },
+            Node::Oloid { centre: Place::At(p(1.0, 2.0, 3.0)), radius: lit(5.0), spread: lit(1.5), turn: Turn::By(p(10.0, 20.0, 30.0)) },
             Node::Capsule { ends: Ends::between(Place::At(p(0.0, 0.0, 0.0)), Place::At(p(0.0, 0.0, 9.0))), start_radius: lit(3.0), end_radius: lit(2.0) },
             // Each size pair, so `turns`, `pitch` and `height` are all held to a block that writes them.
             Node::Coil { frame: frame.clone(), diameter: lit(20.0), size: fieldform_scene::CoilSize::TurnsPitch { turns: lit(5.0), pitch: lit(6.0) }, section: fieldform_scene::CoilSection::Circle { wire: lit(2.0) }, hand: fieldform_scene::Hand::Left },

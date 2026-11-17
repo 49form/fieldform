@@ -241,6 +241,18 @@ fn every_kind_with_every_edge() -> Vec<Case> {
         vec![m, c, t],
     );
 
+    let (r, c, t) = (n(), n(), n());
+    case(
+        "an oloid on a block, faced by another",
+        Node::Oloid {
+            centre: Place::From { node: c },
+            radius: driven(r),
+            spread: lit(1.0),
+            turn: Turn::From { node: t },
+        },
+        vec![r, c, t],
+    );
+
     let (o, t0, t1) = (n(), n(), n());
     case(
         "a plane on a block whose facing went to a placement",
@@ -617,6 +629,7 @@ fn kind(node: &Node) -> &'static str {
         Node::Plane { .. } => "plane",
         Node::Point { .. } => "point",
         Node::Torus { .. } => "torus",
+        Node::Oloid { .. } => "oloid",
         Node::Capsule { .. } => "capsule",
         Node::Coil { .. } => "coil",
         Node::Expression { .. } => "expression",
@@ -647,7 +660,7 @@ fn kind(node: &Node) -> &'static str {
 fn the_sample_holds_every_kind() {
     let held: std::collections::BTreeSet<&str> =
         every_kind_with_every_edge().iter().map(|case| kind(&case.node)).collect();
-    assert_eq!(held.len(), 35, "a kind of node has no case: {held:?}");
+    assert_eq!(held.len(), 36, "a kind of node has no case: {held:?}");
 }
 
 /// **A node's inputs are its operands, then what drives its parameters, then what it is pointed

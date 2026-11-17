@@ -269,6 +269,12 @@ pub fn keys_of(node: &Node, n: &Names) -> Result<Written, String> {
             keys.push(("centre", place(centre, n)?));
             keys.push(("turn", turn(t, n)?));
         }
+        Node::Oloid { centre, radius, spread, turn: t } => {
+            keys.push(("radius", value(radius, n)?));
+            keys.push(("spread", value(spread, n)?));
+            keys.push(("centre", place(centre, n)?));
+            keys.push(("turn", turn(t, n)?));
+        }
         Node::Capsule { ends: e, start_radius, end_radius } => {
             let (from, to) = ends(e, n)?;
             keys.push(("start_radius", value(start_radius, n)?));
@@ -1239,6 +1245,7 @@ mod tests {
             Node::Cylinder { .. } => Node::Cylinder { edge: Default::default(), ends, radius: one },
             Node::Cone { .. } => Node::Cone { ends, base_radius: one, top_radius: one, edge: Default::default() },
             Node::Torus { .. } => Node::Torus { centre: Place::origin(), major_radius: one, minor_radius: one, turn: fieldform_scene::no_turn() },
+            Node::Oloid { .. } => Node::Oloid { centre: Place::origin(), radius: one, spread: one, turn: fieldform_scene::no_turn() },
             Node::Capsule { .. } => Node::Capsule { ends, start_radius: one, end_radius: one },
             Node::Coil { .. } => Node::Coil {
                 frame: Frame::default(),

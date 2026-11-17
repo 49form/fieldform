@@ -883,7 +883,10 @@ fn gradient(field: &(dyn ScalarField + Sync), p: Point3<f64>, h: f64) -> Vector3
 /// Whether a triangle is still on the surface and still facing the way it was, after one of its
 /// corners moved.
 ///
-/// One field query. Asking [`faces_outward`] instead would be six, for a stricter question than
+/// Four field queries: the middle and the middle of each edge. The middle alone let a move pass
+/// that bowed an edge off the surface -- a triangle's worst point is on an edge as often as at its
+/// centre, and the export was measured several chords out where relaxation had been allowed to
+/// stretch triangles across a curve. Asking [`faces_outward`] instead would be six, for a stricter question than
 /// this pass is entitled to ask: a triangle the mesher wound inward was inward before the vertex
 /// moved, and refusing the move over it would make relaxation's reach depend on defects it is not
 /// the one fixing.
@@ -902,7 +905,10 @@ fn still_good(
         return false;
     }
     let centre = Point3::from((p(0).coords + p(1).coords + p(2).coords) / 3.0);
-    field.distance(centre).abs() <= tolerance_mm
+    let mid = |i: usize, j: usize| Point3::from((p(i).coords + p(j).coords) / 2.0);
+    [centre, mid(0, 1), mid(1, 2), mid(2, 0)]
+        .iter()
+        .all(|q| field.distance(*q).abs() <= tolerance_mm)
 }
 
 /// Merges pairs of corners the mesher left in the same place, and drops the triangles that

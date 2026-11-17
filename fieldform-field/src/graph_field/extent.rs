@@ -257,6 +257,21 @@ fn extent_of(
             let reach = axis.map(|a| major.abs() * (1.0 - a * a).max(0.0).sqrt() + minor);
             Extent::around([c - reach, c + reach], 0.0)
         }
+        // The two circles' own boxes, joined, since the solid is their hull. Turned, each
+        // circle reaches its radius along a world axis less what its own normal takes of it,
+        // and its centre stands half the spread along the turned X.
+        Node::Oloid { centre, radius, spread, turn } => {
+            let r = resolve(radius).abs();
+            let half = 0.5 * resolve(spread).abs() * r;
+            let c = place_at(document, graph, centre, resolve);
+            let turned = turn_rotation(document, graph, turn, &numbers);
+            let (along, flat, upright) = (turned * Vector3::x(), turned * Vector3::z(), turned * Vector3::y());
+            let reach = Vector3::from_fn(|i, _| {
+                let circle = |normal: Vector3<f64>| r * (1.0 - normal[i] * normal[i]).max(0.0).sqrt();
+                half * along[i].abs() + circle(flat).max(circle(upright))
+            });
+            Extent::around([c - reach, c + reach], 0.0)
+        }
         // A half-space: the one leaf with no box of its own, and the reason this whole type
         // has three states. It is still usable, because an intersection bounds it.
         // **A conformal lattice confined to a shell is the one lattice with a box**, and it

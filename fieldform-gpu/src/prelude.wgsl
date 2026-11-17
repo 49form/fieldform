@@ -2025,6 +2025,142 @@ fn torus_normal(p: vec3<f32>, centre: vec3<f32>, major: f32, minor: f32) -> vec3
     return radial_direction(q) * (ring / len) + vec3<f32>(0.0, 0.0, q.z / len);
 }
 
+// ---- The oloid: the convex hull of two equal circles in perpendicular planes, matching
+// `oloid.rs` in fieldform-field, which carries the derivation.
+//
+// Every tangent plane of the surface is `tau*x + a*y + b*z = r` in the quarter `y, z >= 0`, and
+// the signed distance of a convex solid is the furthest such plane -- everywhere inside, and
+// outside wherever the foot of the perpendicular lands on the plane's own segment of contact.
+// Elsewhere the nearest point is on one of the two circular creases. The planes are walked by
+// `u` in `[0, pi/2]`, `tau = -tau_max * cos(2u)`, in which `a` and `b` are smooth to both ends.
+
+// The plane at `u`: its unit normal, and in `w` its offset along it.
+fn oloid_plane(u: f32, r: f32, k: f32) -> vec4<f32> {
+    let s = sin(u);
+    let c = cos(u);
+    let tau = -2.0 / (2.0 + k) * (c * c - s * s);
+    let lean = tau * (0.5 * k - 1.0);
+    let n = vec3<f32>(
+        tau,
+        1.41421356 * s * sqrt(max(1.0 + lean, 0.0)),
+        1.41421356 * c * sqrt(max(1.0 - lean, 0.0)),
+    );
+    let scale = inverseSqrt(dot(n, n));
+    return vec4<f32>(n * scale, r * scale);
+}
+
+fn oloid_reading(u: f32, x: vec3<f32>, r: f32, k: f32) -> f32 {
+    let plane = oloid_plane(u, r, k);
+    return dot(plane.xyz, x) - plane.w;
+}
+
+// The nearest point of the two creases: each an arc of its circle, stopping where the tangent
+// line reaches the other circle's tip, at a cosine of `1 / (1 + k)`.
+fn oloid_crease(x: vec3<f32>, r: f32, k: f32) -> vec3<f32> {
+    let half = 0.5 * k * r;
+    let stop = 1.0 / (1.0 + k);
+    let rise = sqrt(max(1.0 - stop * stop, 0.0));
+    let a = vec2<f32>(x.x + half, x.y);
+    let rho_a = length(a);
+    var on_xy = vec3<f32>(-half + r * stop, r * rise, 0.0);
+    if a.x <= rho_a * stop && rho_a > 0.0 {
+        on_xy = vec3<f32>(-half + r * a.x / rho_a, r * a.y / rho_a, 0.0);
+    }
+    let b = vec2<f32>(x.x - half, x.z);
+    let rho_b = length(b);
+    var on_xz = vec3<f32>(half - r * stop, 0.0, r * rise);
+    if -b.x <= rho_b * stop && rho_b > 0.0 {
+        on_xz = vec3<f32>(half + r * b.x / rho_b, 0.0, r * b.y / rho_b);
+    }
+    let da = x - on_xy;
+    let db = x - on_xz;
+    if dot(da, da) <= dot(db, db) {
+        return on_xy;
+    }
+    return on_xz;
+}
+
+// The direction the distance rises in, and in `w` the distance, at a folded point.
+fn oloid_folded(x: vec3<f32>, radius: f32, spread: f32) -> vec4<f32> {
+    let r = abs(radius);
+    let k = abs(spread);
+    if !(r > 0.0) {
+        let d = length(x);
+        return vec4<f32>(x / max(d, 1e-9), d);
+    }
+    // A coarse walk, then a golden-section search between the best step's neighbours: the
+    // reading is three slow waves in `u`, so a dozen steps cannot straddle a maximum.
+    let step = 1.57079633 / 12.0;
+    var best = -1e30;
+    var at = 0.0;
+    for (var i = 0; i <= 12; i++) {
+        let u = f32(i) * step;
+        let v = oloid_reading(u, x, r, k);
+        if v > best {
+            best = v;
+            at = u;
+        }
+    }
+    var lo = max(at - step, 0.0);
+    var hi = min(at + step, 1.57079633);
+    let gold = 0.61803399;
+    var m1 = hi - gold * (hi - lo);
+    var m2 = lo + gold * (hi - lo);
+    var v1 = oloid_reading(m1, x, r, k);
+    var v2 = oloid_reading(m2, x, r, k);
+    for (var i = 0; i < 14; i++) {
+        if v1 > v2 {
+            hi = m2;
+            m2 = m1;
+            v2 = v1;
+            m1 = hi - gold * (hi - lo);
+            v1 = oloid_reading(m1, x, r, k);
+        } else {
+            lo = m1;
+            m1 = m2;
+            v1 = v2;
+            m2 = lo + gold * (hi - lo);
+            v2 = oloid_reading(m2, x, r, k);
+        }
+    }
+    let u = 0.5 * (lo + hi);
+    let plane = oloid_plane(u, r, k);
+    let reading = dot(plane.xyz, x) - plane.w;
+    if reading <= 0.0 {
+        return vec4<f32>(plane.xyz, reading);
+    }
+    // Outside: on the plane's segment of contact the plane is the answer, and off it a crease.
+    let s = sin(u);
+    let c = cos(u);
+    let tau = -2.0 / (2.0 + k) * (c * c - s * s);
+    let near = 1.0 + 0.5 * k * tau;
+    let far = 1.0 - 0.5 * k * tau;
+    let half = 0.5 * k * r;
+    // The unnormalised plane is `(tau, a, b)` and its length is `r / plane.w`.
+    let unscale = r / plane.w;
+    let p = vec3<f32>(-half + r * tau / near, r * plane.y * unscale / near, 0.0);
+    let q = vec3<f32>(half + r * tau / far, 0.0, r * plane.z * unscale / far);
+    let along = q - p;
+    let t = dot(x - p, along) / max(dot(along, along), 1e-30);
+    if t >= 0.0 && t <= 1.0 {
+        return vec4<f32>(plane.xyz, reading);
+    }
+    let offset = x - oloid_crease(x, r, k);
+    let d = length(offset);
+    return vec4<f32>(offset / max(d, 1e-9), max(d, reading));
+}
+
+fn oloid_distance(p: vec3<f32>, centre: vec3<f32>, radius: f32, spread: f32) -> f32 {
+    let q = p - centre;
+    return oloid_folded(vec3<f32>(q.x, abs(q.y), abs(q.z)), radius, spread).w;
+}
+
+fn oloid_normal(p: vec3<f32>, centre: vec3<f32>, radius: f32, spread: f32) -> vec3<f32> {
+    let q = p - centre;
+    let n = oloid_folded(vec3<f32>(q.x, abs(q.y), abs(q.z)), radius, spread).xyz;
+    return n * vec3<f32>(1.0, select(1.0, -1.0, q.y < 0.0), select(1.0, -1.0, q.z < 0.0));
+}
+
 // ---- The helical coordinate: a coil and a thread, matching `helical.rs` in fieldform-field.
 //
 // A point about `+Z` is read as its radius and its height less the pitch times the turn, and a

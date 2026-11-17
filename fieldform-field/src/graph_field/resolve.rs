@@ -246,7 +246,8 @@ pub fn body_frame(
             Node::Sphere { centre, .. }
             | Node::Cuboid { centre, .. }
             | Node::SkewedBox { centre, .. }
-            | Node::Torus { centre, .. } => {
+            | Node::Torus { centre, .. }
+            | Node::Oloid { centre, .. } => {
                 let c = resolve_place_for(document, &flat, id, centre, resolve)?;
                 return Ok(frame * stand_at(c.coords, nalgebra::UnitQuaternion::identity()));
             }

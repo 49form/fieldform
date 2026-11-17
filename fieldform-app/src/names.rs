@@ -48,6 +48,7 @@ pub fn operation_word(node: &Node) -> &'static str {
         Node::Plane { .. } => "Plane",
         Node::Point { .. } => "Point",
         Node::Torus { .. } => "Torus",
+        Node::Oloid { .. } => "Oloid",
         Node::Capsule { .. } => "Capsule",
         Node::Coil { .. } => "Coil",
         Node::Thread { .. } => "Thread",
