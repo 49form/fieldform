@@ -48,6 +48,14 @@ impl App {
     /// it, and losing it to a menu item used for something else is the kind of small theft
     /// nobody reports and everybody notices.
     pub(crate) fn duplicate_selection(&mut self) {
+        // A profile row is several curves and the joins between them, which the clipboard has no
+        // shape for; it is copied whole, and the clipboard is not touched at all.
+        if self.selected_curve.is_none()
+            && let Some(outputs::BlockRef::Profile(key)) = self.selected_block
+        {
+            self.duplicate_profile(key);
+            return;
+        }
         let held = self.clipboard.take();
         self.copy_selection(false);
         if self.clipboard.is_none() {
@@ -66,6 +74,54 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// A second profile row beside this one: every curve copied, the copies held to each other
+    /// as the originals are, and the original left exactly as it was. One undo step, named with
+    /// the row's name if it has one, and selected so the manipulator is on it.
+    pub(crate) fn duplicate_profile(&mut self, key: CurveId) {
+        self.refresh_profiles();
+        let Some(members) = self.curve_ui.profiles.members(key).map(|m| m.to_vec()) else {
+            self.warn("That profile is no longer a row");
+            return;
+        };
+        let label = self.profile_label(key);
+        let (mut commands, copies) =
+            match crate::curve_edits::duplicate_profile_commands(&self.doc, &members) {
+                Ok(made) => made,
+                Err(why) => {
+                    self.warn(why);
+                    return;
+                }
+            };
+        let copy_of = |id: CurveId| members.iter().position(|m| *m == id).map(|i| copies[i]);
+        let Some(new_key) = copy_of(key) else { return };
+        // The row's name goes with it, so a named row's copy is findable by name. An unnamed row
+        // stays unnamed and reads "Profile N" by its own place in the list.
+        if let Some(name) = self.doc.profile_names.get(&key) {
+            commands.push(Box::new(fieldform_ops::SetName::new(
+                fieldform_ops::Named::Profile(new_key),
+                &format!("{name} copy"),
+            )));
+        }
+        self.gesture = None;
+        let batch = Box::new(fieldform_ops::Batch::new("edit.duplicate", commands));
+        if let Err(e) = self.stack.execute(&mut self.doc, batch) {
+            self.warn(e.to_string());
+            return;
+        }
+        // **Made in the order the originals were**, because a row is keyed by its earliest-made
+        // curve: stamped any other way the copy's key would be some other member, and the name
+        // just given to it would name nothing.
+        let mut ordered: Vec<CurveId> = members.clone();
+        ordered.sort_by_key(|id| (self.doc.curves_created.get(id).copied().unwrap_or(0), id.raw()));
+        let ordered: Vec<CurveId> = ordered.into_iter().filter_map(copy_of).collect();
+        self.stamp_curves_in_order(&ordered);
+        self.after_document_change();
+        self.refresh_profiles_with(false);
+        self.select_block(outputs::BlockRef::Profile(new_key));
+        let copy_label = self.profile_label(new_key);
+        self.say(format!("Duplicated {label} as {copy_label} — drag it off the original"));
     }
 
     /// Pastes whatever was copied, as something independent of it.

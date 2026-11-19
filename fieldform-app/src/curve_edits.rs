@@ -1254,3 +1254,111 @@ pub(crate) fn moved_to_start_at(
 /// edits, because [`fieldform_scene::Curve::new`] accepts any degree and refusing saved work
 /// would destroy it — `a_degree_nine_curve_saved_earlier_still_opens_and_edits` holds that.
 pub(crate) const CURVE_DEGREES: [usize; 5] = [1, 2, 3, 5, 7];
+
+/// A profile row copied: every curve, held to each other the way the originals are, sharing
+/// nothing with them. The commands, and the copies in the order of `members`.
+///
+/// **What holds a join is carried, not what it holds on to.** A point two member ends share
+/// gets a point of its own, at the place the original stands now, so the copy's corner is held
+/// and moving it leaves the original alone; an end placed on a point no other member uses is
+/// left loose, since that point belongs to something outside the row. A relation goes across
+/// only when every curve it names is a member, remapped to the copies: a joint's continuity is
+/// what makes an open profile one row, and a mirror whose axis is outside the row would make the
+/// copy follow the original's axis back on top of it.
+pub(crate) fn duplicate_profile_commands(
+    doc: &Document,
+    members: &[CurveId],
+) -> Result<(Vec<Box<dyn fieldform_ops::Command>>, Vec<CurveId>), String> {
+    let map: std::collections::HashMap<CurveId, CurveId> =
+        members.iter().map(|id| (*id, CurveId::new())).collect();
+    // How many member ends each point holds, so a point only one of them uses is told apart
+    // from one that is a join.
+    let mut held: std::collections::HashMap<NodeId, usize> = std::collections::HashMap::new();
+    for id in members {
+        let Some(curve) = doc.curve(*id) else { continue };
+        let last = curve.control_points().len() - 1;
+        for index in [0, last] {
+            if let Some(node) = curve.placed_on(index) {
+                *held.entry(node).or_default() += 1;
+            }
+        }
+    }
+    let mut graphs: std::collections::BTreeMap<PartId, (Graph, Graph)> = Default::default();
+    let mut fresh_points: std::collections::HashMap<NodeId, NodeId> = Default::default();
+    let mut copies = Vec::new();
+    let mut commands: Vec<Box<dyn fieldform_ops::Command>> = Vec::new();
+    for id in members {
+        let curve = doc.curve(*id).ok_or("a curve of that profile is not in the document")?;
+        let new_id = map[id];
+        let mut copy = curve
+            .copy_as(new_id, format!("{} copy", curve.name))
+            .map_err(|e| format!("could not copy {}: {e}", curve.name))?;
+        let last = curve.control_points().len() - 1;
+        for index in [0, last] {
+            let Some(node) = curve.placed_on(index) else { continue };
+            if held.get(&node).copied().unwrap_or(0) < 2 {
+                continue;
+            }
+            let point = match fresh_points.get(&node) {
+                Some(p) => *p,
+                None => {
+                    let Some((part, owner)) =
+                        doc.parts.iter().find(|(_, p)| p.graph.node(node).is_some())
+                    else {
+                        continue;
+                    };
+                    let (_, after) = graphs
+                        .entry(*part)
+                        .or_insert_with(|| (owner.graph.clone(), owner.graph.clone()));
+                    let at = curve.control_points()[index];
+                    let p = after.add(Node::Point {
+                        at: [ParamRef::Literal(at.x), ParamRef::Literal(at.y), ParamRef::Literal(at.z)],
+                    });
+                    fresh_points.insert(node, p);
+                    p
+                }
+            };
+            copy.place_on(index, Some(point));
+        }
+        copies.push(new_id);
+        commands.push(Box::new(SetCurve::insert(copy)));
+    }
+    for (part, (before, after)) in graphs {
+        commands.insert(0, Box::new(SetPartGraph::new(part, before, after)));
+    }
+    for record in doc.relations.values() {
+        if let Some(relation) = remapped(&record.relation, &map) {
+            commands.push(Box::new(SetRelation::insert(
+                fieldform_scene::id::RelationId::new(),
+                fieldform_scene::RelationRecord { relation, broken: None },
+            )));
+        }
+    }
+    Ok((commands, copies))
+}
+
+/// A relation moved onto the copies, or `None` when it names a curve the copy does not have.
+fn remapped(
+    relation: &fieldform_scene::Relation,
+    map: &std::collections::HashMap<CurveId, CurveId>,
+) -> Option<fieldform_scene::Relation> {
+    use fieldform_scene::Relation as R;
+    let c = |id: &CurveId| map.get(id).copied();
+    let end = |e: &fieldform_scene::CurveEnd| {
+        Some(fieldform_scene::CurveEnd { curve: c(&e.curve)?, end: e.end })
+    };
+    Some(match relation {
+        R::Joint { master, slave, continuity } => {
+            R::Joint { master: end(master)?, slave: end(slave)?, continuity: *continuity }
+        }
+        R::Parallel { master, slave } => R::Parallel { master: c(master)?, slave: c(slave)? },
+        R::Perpendicular { master, slave } => {
+            R::Perpendicular { master: c(master)?, slave: c(slave)? }
+        }
+        R::EqualLength { master, slave } => R::EqualLength { master: c(master)?, slave: c(slave)? },
+        R::Concentric { master, slave } => R::Concentric { master: c(master)?, slave: c(slave)? },
+        R::Mirror { master, slave, axis } => {
+            R::Mirror { master: c(master)?, slave: c(slave)?, axis: c(axis)? }
+        }
+    })
+}

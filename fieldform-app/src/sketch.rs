@@ -104,6 +104,14 @@ impl App {
             return false;
         }
         let mut moved = false;
+        let users = self.point_users();
+        // Where every point stood before any sketch was laid this pass. A corner is shared, so
+        // the first sketch laid moves it, and the next one reading it afterwards would take the
+        // plane's move for an edit to the point and leave the plane.
+        let before: std::collections::HashMap<NodeId, Point3<f64>> = users
+            .keys()
+            .filter_map(|n| point_literals(self.part_graph(), *n).map(|p| (*n, p)))
+            .collect();
         for id in self.sketch_order() {
             let Some(sketch) = self.doc.sketches.get(&id).cloned() else { continue };
             if !sketch.live {
@@ -128,8 +136,24 @@ impl App {
                     continue;
                 }
             };
+            // **A joint point is the sketch's own, not a block it is left to.** A point every curve
+            // end on which is a sketch on this plane holds the sketch's corners and nothing else, so
+            // it is laid with the sketch: where the plane goes it goes, and its own position is
+            // what an edit to it is read from, since a dragged point moves before the curve ends on
+            // it catch up. Any other point is somebody else's, and the end is left to it.
+            let held_by: Vec<Option<NodeId>> =
+                (0..points.len()).map(|i| self.doc.curve(id).and_then(|c| c.placed_on(i))).collect();
+            let joint: Vec<Option<NodeId>> = held_by
+                .iter()
+                .map(|n| n.filter(|n| self.is_sketch_joint(*n, plane, &users)))
+                .collect();
             let placed: Vec<bool> =
-                (0..points.len()).map(|i| self.doc.curve(id).is_some_and(|c| c.placed_on(i).is_some())).collect();
+                (0..points.len()).map(|i| held_by[i].is_some() && joint[i].is_none()).collect();
+            let points: Vec<Point3<f64>> = points
+                .iter()
+                .zip(&joint)
+                .map(|(p, j)| j.and_then(|n| before.get(&n).copied()).unwrap_or(*p))
+                .collect();
             let mut after = sketch.clone();
             let plane_name = self.body_label(plane);
             // **Edits first, read against the frame they were made in.** A point not where the
@@ -177,7 +201,14 @@ impl App {
                     continue;
                 }
                 let laid = frame.lay(*local);
-                if (laid - p).norm_squared() > 1e-24
+                if let Some(node) = joint[i]
+                    && (laid - p).norm_squared() > 1e-24
+                    && let Some(part) = self.doc.parts.get_mut(&self.active_part)
+                {
+                    move_point_node(&mut part.graph, node, laid);
+                }
+                let here = self.doc.curve(id).map(|c| c.control_points()[i]).unwrap_or(laid);
+                if (laid - here).norm_squared() > 1e-24
                     && let Some(c) = self.doc.curve_mut(id)
                 {
                     c.set_control_point(i, laid);
@@ -198,6 +229,33 @@ impl App {
             self.rebuild_curve_display();
         }
         moved
+    }
+
+    /// Every point block a curve end sits on, with the curves whose ends sit on it.
+    fn point_users(&self) -> std::collections::HashMap<NodeId, Vec<CurveId>> {
+        let mut users: std::collections::HashMap<NodeId, Vec<CurveId>> = Default::default();
+        for c in self.doc.curves.values() {
+            for i in 0..c.control_points().len() {
+                if let Some(node) = c.placed_on(i) {
+                    users.entry(node).or_default().push(c.id);
+                }
+            }
+        }
+        users
+    }
+
+    /// Whether `node` is a joint of sketches on `plane` alone: a point of plain numbers, every
+    /// curve end on which is a live sketch's on that plane.
+    fn is_sketch_joint(
+        &self,
+        node: NodeId,
+        plane: NodeId,
+        users: &std::collections::HashMap<NodeId, Vec<CurveId>>,
+    ) -> bool {
+        point_literals(self.part_graph(), node).is_some()
+            && users.get(&node).is_some_and(|curves| {
+                curves.iter().all(|c| self.doc.sketches.get(c).is_some_and(|s| s.live && s.plane == plane))
+            })
     }
 
     /// A sketch made Fixed outside the history, with the reason said: the edit that caused it
@@ -246,25 +304,66 @@ impl App {
 
     /// Lays `curve` flat on `plane` and makes it a sketch there, as one undo step: the panel's
     /// "Lie on", which is also how a 3D sketch is made 2D again — on purpose, never on its own.
+    ///
+    /// **A curve of a profile takes its profile with it**, joint points and all. Laid alone, a
+    /// side of a held square went flat onto the plane and its ends were pulled straight back by
+    /// the corner points they sit on, which stayed on the ground: it said it lay on the plane and
+    /// followed it, and stood exactly where it was. A profile is one thing to the person drawing
+    /// it, so all of it goes, and the points holding its corners go too -- those that hold
+    /// nothing but its own curves; a point something else stands on is that thing's, and is left.
     pub(crate) fn lie_on_plane(&mut self, curve: CurveId, plane: NodeId) {
-        let Some(before) = self.doc.curve(curve).cloned() else { return };
-        let Some((sketch, laid)) = self.sketch_of(&before, plane) else {
+        let Some(named) = self.doc.curve(curve).map(|c| c.name.clone()) else { return };
+        let Ok(frame) = self.plane_laid(plane) else {
             self.warn(format!("{} cannot be read as a plane to lie on", self.body_label(plane)));
             return;
         };
-        let was = self.doc.sketches.get(&curve).cloned();
-        let commands: Vec<Box<dyn fieldform_ops::Command>> = vec![
-            Box::new(SetCurve::new(curve, Some(before.clone()), Some(laid))),
-            Box::new(fieldform_ops::SetSketch::new(curve, was, Some(sketch))),
-        ];
+        self.refresh_profiles();
+        let row = self.curve_ui.profiles.key_of(curve);
+        let members: Vec<CurveId> = row
+            .and_then(|key| self.curve_ui.profiles.members(key))
+            .map(|m| m.to_vec())
+            .unwrap_or_else(|| vec![curve]);
+        let users = self.point_users();
+        let before = self.part_graph().clone();
+        let mut graph = before.clone();
+        let mut points_moved = false;
+        for (node, curves) in &users {
+            if !curves.iter().all(|c| members.contains(c)) {
+                continue;
+            }
+            if let Some(p) = point_literals(&graph, *node) {
+                points_moved |= move_point_node(&mut graph, *node, frame.lay(frame.local_of(p).0));
+            }
+        }
+        let mut commands: Vec<Box<dyn fieldform_ops::Command>> = Vec::new();
+        if points_moved {
+            commands.push(Box::new(SetPartGraph::new(self.active_part, before, graph)));
+        }
+        for id in &members {
+            let Some(was_curve) = self.doc.curve(*id).cloned() else { continue };
+            let Some((sketch, laid)) = self.sketch_of(&was_curve, plane) else { continue };
+            let was = self.doc.sketches.get(id).cloned();
+            commands.push(Box::new(SetCurve::new(*id, Some(was_curve), Some(laid))));
+            commands.push(Box::new(fieldform_ops::SetSketch::new(*id, was, Some(sketch))));
+        }
         self.gesture = None;
-        if let Err(e) = self.stack.execute(&mut self.doc, Box::new(fieldform_ops::Batch::new("sketch.lie", commands))) {
+        let batch = Box::new(fieldform_ops::Batch::new("sketch.lie", commands));
+        if let Err(e) = self.stack.execute(&mut self.doc, batch) {
             self.warn(e.to_string());
             return;
         }
-        self.mark_changed();
-        self.rebuild_render_resources();
-        self.say(format!("{} lies on {} and follows it", before.name, self.body_label(plane)));
+        self.after_document_change();
+        let plane_name = self.body_label(plane);
+        match row.filter(|_| members.len() > 1) {
+            Some(key) => {
+                let label = self.profile_label(key);
+                self.say(format!(
+                    "{label} lies on {plane_name} and follows it — all {} of its curves, {named} among them",
+                    members.len()
+                ))
+            }
+            None => self.say(format!("{named} lies on {plane_name} and follows it")),
+        }
     }
 
     /// Lets a sketch go of its plane, as one undo step: a free curve where it stands.
@@ -403,7 +502,7 @@ impl App {
                                     .on_disabled_hover_text("Add a plane and it appears here; the curve would lie flat on it and follow it.");
                             }
                             for (plane, name) in &planes {
-                                if ui.selectable_label(false, name).on_hover_text("Flattens the curve onto this plane and makes it a 2D sketch that follows it").clicked() {
+                                if ui.selectable_label(false, name).on_hover_text("Flattens the curve onto this plane and makes it a 2D sketch that follows it, with the rest of its profile if it is part of one").clicked() {
                                     lie_on = Some(*plane);
                                 }
                             }

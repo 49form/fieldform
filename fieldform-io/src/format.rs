@@ -635,13 +635,16 @@ impl Archive {
             if entry.is_dir() {
                 continue;
             }
+            // A name is decoded when it is asked for, and one that will not decode is the
+            // archive's fault and is refused as such: a guessed name is a key nothing else in
+            // the container would be looking for.
+            let name = entry.name()?.into_owned();
             // `enclosed_name` rejects absolute paths and `..` traversal. A malicious archive
             // must not be able to name an entry that escapes the container, because this map
             // is what a later write walks.
-            let name = match entry.enclosed_name() {
-                Some(_) => entry.name().to_string(),
-                None => return Err(FormatError::UnsafePath(entry.name().to_string())),
-            };
+            if entry.enclosed_name().is_none() {
+                return Err(FormatError::UnsafePath(name));
+            }
             let mut bytes = Vec::with_capacity(entry.size() as usize);
             entry.read_to_end(&mut bytes)?;
             entries.insert(name, bytes);
@@ -694,8 +697,12 @@ impl Archive {
     /// Writes to any seekable sink.
     pub fn write_to<W: Write + Seek>(&self, writer: W) -> Result<(), FormatError> {
         let mut zip = zip::ZipWriter::new(writer);
+        // The host an entry says it was made on is written as one value everywhere. Left to the
+        // writer it is the machine's own, so a document saved on two platforms would be two
+        // files; this is the value every archive written so far carries.
         let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+            .compression_method(zip::CompressionMethod::Deflated)
+            .system(zip::System::Unix);
         for (name, bytes) in &self.entries {
             zip.start_file(name, options)?;
             zip.write_all(bytes)?;
@@ -1123,6 +1130,25 @@ mod tests {
         a.write_to(Cursor::new(&mut buf_a)).unwrap();
         b.write_to(Cursor::new(&mut buf_b)).unwrap();
         assert_eq!(buf_a, buf_b, "the same entries should produce the same file");
+    }
+
+    /// The other half of the same promise: an entry records neither the machine that wrote it
+    /// nor the moment. Both are the writer's to fill in when nobody says, and two saves in one
+    /// process agree about both, so the test above cannot see either.
+    #[test]
+    fn a_written_entry_carries_nothing_of_the_machine_or_the_moment() {
+        let mut archive = Archive::new(&Manifest::default());
+        archive.put("a.json", b"2".to_vec());
+        let mut buf = Vec::new();
+        archive.write_to(Cursor::new(&mut buf)).unwrap();
+
+        let mut zip = zip::ZipArchive::new(Cursor::new(buf)).unwrap();
+        assert_eq!(zip.len(), 2);
+        for i in 0..zip.len() {
+            let entry = zip.by_index(i).unwrap();
+            assert_eq!(entry.system(), zip::System::Unix);
+            assert_eq!(entry.last_modified(), Some(zip::DateTime::DEFAULT));
+        }
     }
 
     /// An entry naming its way out of the archive is rejected on read, since the entry map is

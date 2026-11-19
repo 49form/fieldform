@@ -41,20 +41,20 @@ impl App {
         // empty and fill. Short of two the loft is a block in the making: not drawn, and said so
         // under the list, as a slot with nothing in it is.
         let mut new_sections: Vec<fieldform_scene::Outline> = sections.to_vec();
-        let mut curves: Vec<(CurveId, String)> = self
-            .doc
-            .curves
-            .iter()
-            .filter(|(cid, _)| Some(**cid) != spine)
-            .map(|(cid, c)| (*cid, c.name.clone()))
-            .collect();
-        curves.sort_by_key(|(cid, _)| cid.raw());
+        // **Profiles, not the curves inside them** (the owner, 2026-11-16): a section is a closed
+        // loop, so what is offered is each closed row as itself and each closed curve in no row.
+        // It listed every curve by name, which made a square of four lines four entries none of
+        // which said it was a square, and offered open curves a loft refuses.
+        let curves: Vec<(CurveId, String)> =
+            self.profile_choices(true).into_iter().filter(|(cid, _)| Some(*cid) != spine).collect();
         let offered = self.curve_choices(&curves);
+        // A section naming any curve of a row is shown, and counted as taken, as that row.
+        let as_row = |app: &App, c: CurveId| app.curve_ui.profiles.key_of(c).unwrap_or(c);
         let mut removed: Option<usize> = None;
         let mut moved: Option<(usize, usize)> = None;
         let count = new_sections.len();
         for i in 0..count {
-            let current = new_sections[i].curve();
+            let current = new_sections[i].curve().map(|c| as_row(self, c));
             let shown = match current {
                 Some(named) => self.shown_label(&offered, named, "missing"),
                 None => String::new(),
@@ -112,14 +112,14 @@ impl App {
         // is the compile's to say, by name, when the edit is refused.
         let eligible: Vec<(CurveId, String)> = curves
             .iter()
-            .filter(|(c, _)| !new_sections.iter().any(|o| o.curve() == Some(*c)))
+            .filter(|(c, _)| !new_sections.iter().any(|o| o.curve().map(|s| as_row(self, s)) == Some(*c)))
             .cloned()
             .collect();
         ui.horizontal(|ui| {
             row_label(ui, "");
             if eligible.is_empty() {
                 ui.label(
-                    egui::RichText::new("Every curve in the document is in the list.")
+                    egui::RichText::new("Every closed profile in the document is in the list.")
                         .weak()
                         .italics(),
                 );
@@ -128,7 +128,7 @@ impl App {
                     for (c, name) in &eligible {
                         if ui
                             .button(name)
-                            .on_hover_text("Add this curve as the last section")
+                            .on_hover_text("Add this profile as the last section")
                             .clicked()
                         {
                             new_sections.push(fieldform_scene::Outline::closed(*c));

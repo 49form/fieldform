@@ -4225,3 +4225,151 @@ fn a_wall_from_an_open_profile_stops_where_its_row_does() {
     assert_eq!(row, vec![a, b, c]);
     assert_eq!(fieldform_field::outline_chain(&app.doc, a, None).unwrap().curves, row);
 }
+
+/// **A profile row duplicates whole** (the owner, 2026-11-16): every curve copied, the copies held
+/// to each other on points of their own and the original's row left as it was, as one undo step,
+/// with the copy selected. Closed and open alike; an open profile's continuity goes with it.
+#[test]
+fn a_profile_row_duplicates_whole_and_shares_nothing_with_its_original() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for line in [
+        "line p0=0,0,0 p1=20,0,0 'a'",
+        "line p0=20,0,0 p1=20,20,0 'b'",
+        "line p0=20,20,0 p1=0,20,0 'c'",
+        "line p0=0,20,0 p1=0,0,0 'd'",
+    ] {
+        app.run_command(line);
+    }
+    app.refresh_profiles();
+    let a = app.curve_named("a").unwrap();
+    let key = app.curve_ui.profiles.key_of(a).expect("the square is a row");
+    let original: Vec<CurveId> = app.curve_ui.profiles.members(key).unwrap().to_vec();
+    app.select_block(outputs::BlockRef::Profile(key));
+    app.run_command("duplicate");
+    app.refresh_profiles();
+    assert_eq!(app.doc.curves.len(), 8, "{}", last_said(&app));
+    assert_eq!(app.curve_ui.profiles.loops.len(), 2, "two rows: {:?}", app.curve_ui.profiles.loops);
+    assert_eq!(app.curve_ui.profiles.members(key).unwrap(), original.as_slice(), "the original's row is unchanged");
+    let Some(outputs::BlockRef::Profile(copy_key)) = app.selected_block else {
+        panic!("the copy is selected: {:?}", app.selected_block)
+    };
+    assert_ne!(copy_key, key);
+    let copies: Vec<CurveId> = app.curve_ui.profiles.members(copy_key).unwrap().to_vec();
+    assert!(copies.iter().all(|c| !original.contains(c)));
+    // Every corner of the copy is held, and on a point none of the original's ends use.
+    for m in fieldform_field::loop_meetings(&app.doc, &copies) {
+        let end = |(curve, index): (CurveId, usize)| fieldform_scene::CurveEnd {
+            curve,
+            end: if index == 0 { fieldform_scene::End::Start } else { fieldform_scene::End::End },
+        };
+        assert!(app.doc.ends_held(end(m.ends[0]), end(m.ends[1])), "{m:?}");
+        let point = app.doc.curve(m.ends[0].0).unwrap().placed_on(m.ends[0].1).unwrap();
+        for c in &original {
+            let curve = app.doc.curve(*c).unwrap();
+            assert!((0..curve.control_points().len()).all(|i| curve.placed_on(i) != Some(point)));
+        }
+    }
+    app.run_command("undo");
+    app.refresh_profiles();
+    assert_eq!(app.doc.curves.len(), 4, "one undo takes the whole copy");
+
+    // An open profile: its joint's continuity is what makes it one row, and the copy has it too.
+    for line in [
+        "line p0=0,50,0 p1=20,50,0 'e'",
+        "line p0=20,50,0 p1=40,60,0 'f'",
+        "continuity at=e.end g=0",
+    ] {
+        app.run_command(line);
+    }
+    app.refresh_profiles();
+    let open = app.curve_ui.profiles.key_of(app.curve_named("e").unwrap()).expect("an open row");
+    app.select_block(outputs::BlockRef::Profile(open));
+    app.run_command("duplicate");
+    app.refresh_profiles();
+    assert_eq!(app.curve_ui.profiles.chains.len(), 2, "{}", last_said(&app));
+    assert_eq!(app.curve_ui.profiles.chains.iter().map(|(_, m)| m.len()).collect::<Vec<_>>(), vec![2, 2]);
+}
+
+/// **A held profile lies on a plane whole, and follows it whole** (the owner, 2026-11-16). Laying
+/// one side of a held square on a plane above it used to say it lay there and leave it on the
+/// ground, its ends pulled back by the corner points, and the next side laid turned the first into
+/// a 3D sketch. Now every side and every corner point goes up together, the plane moving takes all
+/// of it, and one undo puts it back on the ground.
+#[test]
+fn a_held_profile_lies_on_a_plane_whole_and_follows_it() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for line in [
+        "line p0=0,0,0 p1=20,0,0 'a'",
+        "line p0=20,0,0 p1=20,20,0 'b'",
+        "line p0=20,20,0 p1=0,20,0 'c'",
+        "line p0=0,20,0 p1=0,0,0 'd'",
+        "plane origin=0,0,30 'top'",
+    ] {
+        app.run_command(line);
+    }
+    frame(&mut app, Vec::new());
+    let top = app.node_named("top").expect("plane");
+    let sides = ["a", "b", "c", "d"];
+    let at_height = |app: &App, z: f64| {
+        sides.iter().all(|n| curve_points(app, n).iter().all(|p| (p.z - z).abs() < 1e-6))
+    };
+    app.lie_on_plane(app.curve_named("b").unwrap(), top);
+    frame(&mut app, Vec::new());
+    frame(&mut app, Vec::new());
+    assert!(at_height(&app, 30.0), "the whole square is up: {}", last_said(&app));
+    for n in sides {
+        let id = app.curve_named(n).unwrap();
+        assert!(app.doc.sketches.get(&id).is_some_and(|s| s.live && s.plane == top), "{n} follows");
+    }
+    app.refresh_profiles();
+    assert_eq!(app.curve_ui.profiles.loops.len(), 1, "still one held row");
+
+    app.run_command("set top.origin=0,0,50");
+    frame(&mut app, Vec::new());
+    frame(&mut app, Vec::new());
+    assert!(at_height(&app, 50.0), "it followed the plane, corners and all: {}", last_said(&app));
+    for n in sides {
+        assert!(app.doc.sketches[&app.curve_named(n).unwrap()].live, "{n} is still a 2D sketch");
+    }
+
+    app.run_command("undo");
+    app.run_command("undo");
+    frame(&mut app, Vec::new());
+    frame(&mut app, Vec::new());
+    assert!(at_height(&app, 0.0), "one undo for the lie, one for the move");
+    assert!(app.doc.sketches.values().all(|s| !s.live) || app.doc.sketches.is_empty());
+}
+
+/// **A loft is offered profiles, not the curves inside them** (the owner, 2026-11-16): a square
+/// of four lines is one entry that says it is a profile, a closed curve in no row is offered as
+/// itself, and an open curve, which a loft refuses, is not offered at all.
+#[test]
+fn a_loft_is_offered_closed_profiles_and_not_their_curves() {
+    let Some(mut app) = headless_app() else { return };
+    frame(&mut app, Vec::new());
+    for line in [
+        "line p0=0,0,0 p1=20,0,0 'a'",
+        "line p0=20,0,0 p1=20,20,0 'b'",
+        "line p0=20,20,0 p1=0,20,0 'c'",
+        "line p0=0,20,0 p1=0,0,0 'd'",
+        "line p0=50,0,0 p1=60,0,0 'stray'",
+    ] {
+        app.run_command(line);
+    }
+    let ring = CurveId::new();
+    let points = vec![
+        nalgebra::Point3::new(40.0, 0.0, 0.0),
+        nalgebra::Point3::new(50.0, 0.0, 0.0),
+        nalgebra::Point3::new(45.0, 8.0, 0.0),
+    ];
+    app.doc.curves.insert(ring, fieldform_scene::Curve::polyline(ring, "ring", points, true).expect("closed"));
+    let offered = app.profile_choices(true);
+    let names: Vec<&str> = offered.iter().map(|(_, n)| n.as_str()).collect();
+    assert!(names.iter().any(|n| n.starts_with("Profile 1")), "the square as a row: {names:?}");
+    assert!(names.contains(&"ring"), "a closed curve in no row: {names:?}");
+    for inside in ["a", "b", "c", "d", "stray"] {
+        assert!(!names.contains(&inside), "{inside} is not offered: {names:?}");
+    }
+}

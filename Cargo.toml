@@ -137,7 +137,13 @@ tobj = "4.0"
 # as a commit on a closed pull request whose source fork has been deleted; depending on GitHub
 # continuing to serve that is not a build.
 opencascade = { path = "vendor/opencascade-rs/opencascade" }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+# The `.fform` container. Deflate through flate2 alone, on the backend named below: the crate's
+# own `deflate` feature now picks a different backend, and flate2 is one copy shared with the PNG
+# encoder, so taking it would have changed how a saved image is compressed as well as a document.
+zip = { version = "9.7.0", default-features = false, features = ["deflate-flate2"] }
+# Named only to choose what zip's deflate runs on, which zip no longer chooses for itself: the
+# pure-Rust backend every build so far has written with. flate2 does not compile without one.
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 wgpu = "29.0.0"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Memory"] }
 # Puts the emblem into fieldform.exe as its file icon, from `fieldform-app/build.rs`. A build

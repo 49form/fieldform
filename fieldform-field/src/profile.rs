@@ -529,6 +529,9 @@ fn walk(
     let mut walked = vec![seed];
     // The furthest the search got before running out, for the message when it fails.
     let mut stranded: Option<(f64, Point3<f64>)> = None;
+    let mut corners = vec![chain[0]];
+    let held = |a: fieldform_scene::CurveEnd, b: fieldform_scene::CurveEnd| document.ends_held(a, b);
+    let tail = fieldform_scene::CurveEnd { curve: seed, end: fieldform_scene::End::End };
 
     if close_the_loop(
         &pieces,
@@ -537,6 +540,9 @@ fn walk(
         &mut used,
         &mut walked,
         &mut stranded,
+        &mut corners,
+        tail,
+        &held,
     ) {
         // Back where it started: the repeated point goes, because a polyline that ends on its
         // own first point describes a zero-length final segment.
@@ -1163,6 +1169,19 @@ pub fn loop_is_flat(
 /// for a given document even when two loops genuinely exist. Deciding *which* loop somebody
 /// meant, when there really are two, is a question this cannot answer and should not guess at
 /// loudly — but a stable answer that draws something beats a refusal that draws nothing.
+///
+/// **Except where somebody has said: a held join is tried first.** Two profiles drawn with
+/// points in common — a U against a square's side — offer two ways round that both close, and
+/// "first by id" made the row the square on one run and a rectangle out round the U on the
+/// next. The joins the square's corners are held by say which curves go together, so the
+/// continuation held to the tail end is tried before any that only touches it.
+///
+/// **And a loop passes each of its corners once.** Two profiles touching at a corner were one
+/// row: the walk round the first arrived there, went round the second, came back to the same
+/// corner and carried on round its own — a figure of eight, which closes by the old test and
+/// encloses nothing a profile can use. `corners` is every place the chain has turned, and a
+/// piece that would end on one of them other than the start is not taken.
+#[allow(clippy::too_many_arguments)]
 fn close_the_loop(
     pieces: &[(fieldform_scene::CurveId, Vec<Point3<f64>>)],
     joined_mm: f64,
@@ -1170,14 +1189,19 @@ fn close_the_loop(
     used: &mut Vec<bool>,
     walked: &mut Vec<fieldform_scene::CurveId>,
     stranded: &mut Option<(f64, Point3<f64>)>,
+    corners: &mut Vec<Point3<f64>>,
+    tail_end: fieldform_scene::CurveEnd,
+    held: &dyn Fn(fieldform_scene::CurveEnd, fieldform_scene::CurveEnd) -> bool,
 ) -> bool {
+    use fieldform_scene::{CurveEnd, End};
     let meets = |a: &Point3<f64>, b: &Point3<f64>| (a - b).norm() <= joined_mm;
     let tail = *chain.last().expect("a piece has at least two points");
     if chain.len() > 2 && meets(&tail, &chain[0]) {
         return true;
     }
 
-    let mut went_anywhere = false;
+    // Every way on from here, held ones first, each in the pieces' own order.
+    let mut ways: Vec<(bool, usize, bool)> = Vec::new();
     for i in 0..pieces.len() {
         if used[i] {
             continue;
@@ -1186,6 +1210,18 @@ fn close_the_loop(
         let forwards = meets(&tail, &piece[0]);
         let backwards = meets(&tail, piece.last().expect("two points"));
         if !forwards && !backwards {
+            continue;
+        }
+        let joined_by = CurveEnd { curve: pieces[i].0, end: if forwards { End::Start } else { End::End } };
+        ways.push((!held(tail_end, joined_by), i, forwards));
+    }
+    ways.sort_by_key(|(unheld, i, _)| (*unheld, *i));
+
+    let mut went_anywhere = false;
+    for (_, i, forwards) in ways {
+        let piece = &pieces[i].1;
+        let far = if forwards { *piece.last().expect("two points") } else { piece[0] };
+        if corners.iter().skip(1).any(|c| meets(c, &far)) {
             continue;
         }
         went_anywhere = true;
@@ -1201,14 +1237,17 @@ fn close_the_loop(
         chain.extend(added.into_iter().skip(1));
         used[i] = true;
         walked.push(pieces[i].0);
+        corners.push(tail);
+        let leaving = CurveEnd { curve: pieces[i].0, end: if forwards { End::End } else { End::Start } };
 
-        if close_the_loop(pieces, joined_mm, chain, used, walked, stranded) {
+        if close_the_loop(pieces, joined_mm, chain, used, walked, stranded, corners, leaving, held) {
             return true;
         }
 
         chain.truncate(chain.len() - grew);
         used[i] = false;
         walked.pop();
+        corners.pop();
     }
 
     // Nowhere left to go from here. Remember the widest gap reached, since that is the end a
@@ -2898,6 +2937,88 @@ mod fillet_under_lean_tests {
 mod chain_tests {
     use super::*;
     use fieldform_scene::{Curve, CurveId, Document};
+
+    fn square(doc: &mut Document, x: f64, y: f64, side: f64) -> Vec<CurveId> {
+        let c = [(x, y), (x + side, y), (x + side, y + side), (x, y + side)];
+        (0..4).map(|i| line(doc, c[i], c[(i + 1) % 4])).collect()
+    }
+
+    fn sorted(mut v: Vec<CurveId>) -> Vec<CurveId> {
+        v.sort_by_key(|id| id.raw());
+        v
+    }
+
+    /// **Two profiles touching at a corner are two rows, never one figure of eight.** The walk
+    /// round one square arrives at the corner they share with both squares' sides on offer, and
+    /// going round the other square brings it back to that corner and on round its own: a loop,
+    /// by the old test, of all eight sides. A loop passes through each of its corners once.
+    #[test]
+    fn two_profiles_touching_at_a_corner_are_two_rows() {
+        let mut doc = Document::new();
+        // Drawn in an order that puts the shared corner in the middle of the first walk.
+        let a = square(&mut doc, 0.0, 0.0, 10.0);
+        let b = square(&mut doc, 10.0, 10.0, 10.0);
+        for (i, id) in a.iter().chain(&b).enumerate() {
+            doc.curves_created.insert(*id, i as u64);
+        }
+        let rows = profile_partition(&doc);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        let rows: Vec<Vec<CurveId>> = rows.into_iter().map(sorted).collect();
+        assert!(rows.contains(&sorted(a.clone())), "the first square is its own row: {rows:?}");
+        assert!(rows.contains(&sorted(b.clone())), "the second square is its own row: {rows:?}");
+        // And every seed agrees, so an extrude built on either reads its own square.
+        for seed in a.iter().chain(&b) {
+            let walked = sorted(loop_from(&doc, *seed, None).expect("closes"));
+            let own = if a.contains(seed) { &a } else { &b };
+            assert_eq!(walked, sorted(own.clone()), "from {seed:?}");
+        }
+    }
+
+    /// **And where two ways round both close, the held one is taken.** A U drawn against a
+    /// square's side makes two loops through the square's corners: the square, and a rectangle
+    /// out round the U and back along the square's far sides. Both close, and which the walk
+    /// took depended on the curves' ids. The square's own joins hold its corners, so the square is
+    /// the row, every time, and the U is left to be what its own joins make it.
+    #[test]
+    fn where_two_ways_round_both_close_the_held_one_is_taken() {
+        for _ in 0..24 {
+            let mut doc = Document::new();
+            let a = square(&mut doc, 0.0, 0.0, 10.0);
+            let u = vec![
+                line(&mut doc, (10.0, 0.0), (20.0, 0.0)),
+                line(&mut doc, (20.0, 0.0), (20.0, 10.0)),
+                line(&mut doc, (20.0, 10.0), (10.0, 10.0)),
+            ];
+            for (i, id) in a.iter().chain(&u).enumerate() {
+                doc.curves_created.insert(*id, i as u64);
+            }
+            // Each held on points of its own, as two separately drawn profiles are.
+            for group in [&a, &u] {
+                let mut places: Vec<(Point3<f64>, fieldform_scene::NodeId)> = Vec::new();
+                for id in group.iter() {
+                    let curve = doc.curves.get_mut(id).expect("made");
+                    let n = curve.control_points().len();
+                    for i in [0, n - 1] {
+                        let p = curve.control_points()[i];
+                        let node = match places.iter().find(|(q, _)| (q - p).norm() <= JOINED_MM) {
+                            Some((_, node)) => *node,
+                            None => {
+                                let node = fieldform_scene::NodeId::new();
+                                places.push((p, node));
+                                node
+                            }
+                        };
+                        curve.place_on(i, Some(node));
+                    }
+                }
+            }
+            let rows: Vec<Vec<CurveId>> = profile_partition(&doc).into_iter().map(sorted).collect();
+            assert_eq!(rows, vec![sorted(a.clone())], "the square, and only the square");
+            for seed in &a {
+                assert_eq!(sorted(loop_from(&doc, *seed, None).expect("closes")), sorted(a.clone()));
+            }
+        }
+    }
 
     fn line(doc: &mut Document, from: (f64, f64), to: (f64, f64)) -> CurveId {
         let id = CurveId::new();

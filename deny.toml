@@ -42,11 +42,3 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # Only unmaintained crates the workspace itself names directly are errors; the transitive ones
 # (windowing and font stacks) are not ours to replace.
 unmaintained = "workspace"
-ignore = [
-    # `zip` is read with `ZipArchive::new` and entry readers only; nothing calls `extract()`, which
-    # is the code all three advisories describe. Upgrading to 9.x is tracked separately.
-    { id = "RUSTSEC-2026-0367", reason = "only ZipArchive::extract is affected; the .fform reader never extracts to disk" },
-    { id = "RUSTSEC-2026-0368", reason = "only ZipArchive::extract is affected; the .fform reader never extracts to disk" },
-    { id = "RUSTSEC-2026-0369", reason = "only extract() is affected; the .fform reader never extracts to disk" },
-    { id = "RUSTSEC-2026-0429", reason = "only ZipArchive::extract is affected (a symlink entry with a large declared size); the .fform reader never extracts to disk" },
-]

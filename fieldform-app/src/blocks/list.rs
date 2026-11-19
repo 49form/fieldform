@@ -1151,7 +1151,11 @@ pub(crate) struct Join {
 /// instead would have left every open chain without a way to say G1 at its corners.
 ///
 /// **Three ends meeting is not a join**, as no joint is made there either (`loop_meetings`): which
-/// two of the three a continuity is between is a choice the place does not make.
+/// two of the three a continuity is between is a choice the place does not make — **unless the
+/// holds make it.** Where two of them are held to each other and to nothing else there, those
+/// two are a join and the rest are not part of it. A duplicated profile lies exactly on its
+/// original, so each of its joins has four ends; without this both rows vanished, the copy's and
+/// the original's, because neither had a place where only two ends met.
 pub(crate) fn joins_in(doc: &Document) -> Vec<Join> {
     let mut curves: Vec<&fieldform_scene::Curve> =
         doc.curves.values().filter(|c| !c.is_closed()).collect();
@@ -1169,17 +1173,30 @@ pub(crate) fn joins_in(doc: &Document) -> Vec<Join> {
     let meets = |a: &nalgebra::Point3<f64>, b: &nalgebra::Point3<f64>| {
         (a - b).norm() <= fieldform_scene::JOINED_MM
     };
+    // The one other end `i` meets, or the one it is held to where it meets several.
+    let partner = |i: usize| -> Option<usize> {
+        let near: Vec<usize> =
+            (0..ends.len()).filter(|&j| j != i && meets(&ends[i].1, &ends[j].1)).collect();
+        if let &[j] = near.as_slice() {
+            return Some(j);
+        }
+        let held: Vec<usize> =
+            near.into_iter().filter(|&j| doc.ends_held(ends[i].0, ends[j].0)).collect();
+        match held.as_slice() {
+            &[j] => Some(j),
+            _ => None,
+        }
+    };
     let mut out = Vec::new();
     for (i, (a, at)) in ends.iter().enumerate() {
-        let near: Vec<usize> = (0..ends.len()).filter(|&j| j != i && meets(at, &ends[j].1)).collect();
-        let &[j] = near.as_slice() else { continue };
+        let Some(j) = partner(i) else { continue };
         let (b, _) = ends[j];
         // Once per pair, and never a curve meeting itself.
         if j < i || b.curve == a.curve {
             continue;
         }
-        // The other end must see only this one too, or a third end sits within reach of it.
-        if (0..ends.len()).filter(|&k| k != j && meets(&ends[j].1, &ends[k].1)).count() != 1 {
+        // The other end must pick this one too, or a third end has as good a claim on it.
+        if partner(j) != Some(i) {
             continue;
         }
         out.push(Join { at: *at, ends: [*a, b] });

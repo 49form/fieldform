@@ -1416,18 +1416,10 @@ impl App {
     /// gap is and where it is, which is something to go and fix rather than a rule. Unless the
     /// block is built on a wall, which is what an open curve is for: `label` is what the row is
     /// called, "Profile:" for a loop that is filled and "Curve:" for one given a thickness.
-    fn pick_profile(
-        &mut self,
-        ui: &mut egui::Ui,
-        id: NodeId,
-        current: fieldform_scene::CurveSlot,
-        label: &str,
-    ) -> fieldform_scene::CurveSlot {
-        // **The rows first, since a row is what a profile is.** This listed every curve by
-        // name, which was right while a loop of four lines was four rows and wrong the moment
-        // it became one: "Line, Line 2, Line 3, Line 4" is a list you cannot pick a profile
-        // from. A row is offered as itself and hands the block its first curve, which is what
-        // the walk starts from; the curves outside any row follow, as they were.
+    /// What a block reading a profile is offered: the closed rows, each as itself and handing the
+    /// block its first curve, then the curves in no row -- only the closed ones when `closed_only`,
+    /// as a loft's sections are.
+    pub(crate) fn profile_choices(&mut self, closed_only: bool) -> Vec<(CurveId, String)> {
         self.refresh_profiles();
         let mut closed: Vec<(CurveId, String)> = self
             .curve_ui.profiles
@@ -1440,12 +1432,29 @@ impl App {
             .curves
             .values()
             .filter(|c| self.curve_ui.profiles.key_of(c.id).is_none())
+            .filter(|c| !closed_only || c.is_closed())
             .map(|c| (c.id, c.name.clone()))
             .collect();
         loose.sort_by_key(|(id, _)| {
             (self.doc.curves_created.get(id).copied().unwrap_or(0), id.raw())
         });
         closed.extend(loose);
+        closed
+    }
+
+    fn pick_profile(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: NodeId,
+        current: fieldform_scene::CurveSlot,
+        label: &str,
+    ) -> fieldform_scene::CurveSlot {
+        // **The rows first, since a row is what a profile is.** This listed every curve by
+        // name, which was right while a loop of four lines was four rows and wrong the moment
+        // it became one: "Line, Line 2, Line 3, Line 4" is a list you cannot pick a profile
+        // from. A row is offered as itself and hands the block its first curve, which is what
+        // the walk starts from; the curves outside any row follow, as they were.
+        let closed = self.profile_choices(false);
         // A member picked before the rows existed still reads its loop, so it is shown as the
         // row it is in.
         let mut out = match current.source() {
